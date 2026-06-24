@@ -2,7 +2,7 @@
 import re
 import json
 from aiogram import Router, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 
@@ -526,3 +526,73 @@ async def cancel_request(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("❌ Отменено. Напиши, если нужно что-то найти.")
     await callback.answer()
+
+
+# ──────────────────────────────────────────────
+#  Прямой сценарий: пользователь пишет запрос без кнопки
+# ──────────────────────────────────────────────
+
+# Признаки товарного запроса (ключевые слова)
+_PRODUCT_KEYWORDS = [
+    "нужен", "нужна", "найди", "подбери", "купить", "ищу", "посоветуй",
+    "телевизор", "айфон", "iphone", "ноутбук", "холодильник", "пылесос",
+    "кровать", "диван", "монитор", "наушники", "телефон", "смартфон",
+    "до 45к", "до 70000", "₽", "руб", "в ярославле",
+]
+
+# Мусор — короткие сообщения, не являющиеся товарным запросом
+_JUNK_MESSAGES = {
+    "привет", "ок", "да", "нет", "что умеешь", "помощь", "меню",
+}
+
+
+def is_product_request(text: str) -> bool:
+    """
+    Проверяет, похож ли текст на товарный запрос.
+    Возвращает True, если текст достаточно длинный и содержит товарные признаки,
+    и не является мусорным сообщением.
+    """
+    t = text.strip().lower()
+
+    # Минимальная длина
+    if len(t) <= 8:
+        return False
+
+    # Мусор
+    if t in _JUNK_MESSAGES:
+        return False
+
+    # Проверяем хотя бы одно ключевое слово
+    for kw in _PRODUCT_KEYWORDS:
+        if kw in t:
+            return True
+
+    return False
+
+
+@router.message(StateFilter(None), F.text)
+async def handle_free_text(message: Message, state: FSMContext):
+    """
+    Обработчик свободного текста.
+    Если сообщение похоже на товарный запрос — создаёт заявку.
+    Иначе — даёт короткую подсказку.
+    """
+    text = message.text.strip()
+
+    # Не перехватываем команды
+    if text.startswith("/"):
+        return
+
+    # Не перехватываем кнопки меню
+    if text == "🔍 Найти товар":
+        return
+
+    if is_product_request(text):
+        # Передаём в существующий process_request
+        await process_request(message, state)
+    else:
+        await message.answer(
+            "Напиши, что нужно найти.\n"
+            "Например: <i>телевизор для PS5 до 45к в Ярославле</i>",
+            parse_mode="HTML"
+)
