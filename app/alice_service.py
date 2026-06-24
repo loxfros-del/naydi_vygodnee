@@ -403,7 +403,7 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
     # известные маркеры в отдельные логические строки до основного разбора.
     inline_marker_re = re.compile(
         r"\s+(?=(?:вариант\s*\d{1,2}\b|"
-        r"название(?:\s+(?:модели|товара))?|модель|товар|"
+        r"название(?:\s+(?:модели|товара))?|модель|"
         r"цена|стоимость|стоит|магазин|продавец|"
         r"(?:прямая\s+)?ссылка(?:\s+на\s+товар)?|url|линк|"
         r"почему(?:\s+подходит|\s+брать)?|плюсы?|преимущества|"
@@ -470,6 +470,24 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
         url = match.group(0).rstrip(".,;:!?)、】【")
         return f"https://{url}" if url.lower().startswith("www.") else url
 
+    def is_bad_title(value: str) -> bool:
+        value = clean(value).strip()
+        lower = value.lower()
+
+        if not value:
+            return True
+
+        if url_from(value):
+            return True
+
+        if lower.startswith(("http://", "https://", "www.", "[www](")):
+            return True
+
+        if "ссылку нужно искать" in lower or "искать вручную" in lower:
+            return True
+
+        return False
+    
     def is_new_item_line(line: str, current_lines: list[str]) -> bool:
         if not current_lines:
             return False
@@ -540,6 +558,14 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
             value = clean(field.group("value")) if field else clean(line)
 
             if label in {"название", "название модели", "название товара", "модель", "товар", "вариант"}:
+                if is_bad_title(value):
+                    link = url_from(value)
+                    if link and not item["link"]:
+                        item["link"] = link
+                    elif "искать" in value.lower() or "вручную" in value.lower():
+                        item["notes"].append("ссылку нужно искать вручную")
+                    continue
+
                 item["name"] = value[:200]
                 continue
             if label in {"цена", "стоимость", "стоит"}:
@@ -591,7 +617,7 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
                 candidate = numbered_re.sub(r"\1", value)
                 candidate = bullet_re.sub(r"\1", candidate)
                 candidate = clean(candidate.split(" — ")[0].split(" - ")[0])
-                if candidate and not re.match(r"^(вот|ниже|подборк|вариант[ы:]|итог)", candidate, re.IGNORECASE):
+                if candidate and not is_bad_title(candidate) and not re.match(r"^(вот|ниже|подборк|вариант[ы:]|итог)", candidate, re.IGNORECASE):
                     item["name"] = candidate[:200]
                     break
 
@@ -634,7 +660,12 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
         r'huawei|honor|apple|asus|lenovo|acer|hp|dell|realme|poco|redmi|dyson|bosch|karcher|sber)',
         re.IGNORECASE,
     )
-    model_indices = [i for i, line in enumerate(lines) if model_line_re.search(line) and not field_re.match(line.strip())]
+    model_indices = [
+    i for i, line in enumerate(lines)
+    if model_line_re.search(line)
+    and not field_re.match(line.strip())
+    and not url_re.search(line)
+]
     if len(model_indices) >= 2:
         fallback_items = []
         for idx, mi in enumerate(model_indices):

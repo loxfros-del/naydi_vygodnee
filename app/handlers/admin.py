@@ -208,7 +208,18 @@ def format_alice_card(sr: SearchResult, idx: int) -> str:
     except json.JSONDecodeError:
         risks = []
     state = {
-        "BEST": "🏆 ТОП-1", "APPROVED": "✅ оставлен", "REJECTED": "❌ убран",
+        "BEST": "🏆 ТОП-1",
+        "TOP": "🏆 ТОП-1",
+        "TOP1": "🏆 ТОП-1",
+        "APPROVED": "✅ оставлен",
+        "BACKUP": "✅ Запасной",
+        "APPROVED_BACKUP": "✅ Запасной подтверждён",
+        "BUDGET": "💰 Бюджетный",
+        "APPROVED_BUDGET": "💰 Бюджетный",
+        "DO_NOT_BUY": "⚠️ Осторожно / не брать",
+        "CAUTION": "⚠️ Осторожно / не брать",
+        "REJECTED": "❌ убран",
+        "REJECTED_AUTO": "❌ авто-отклонён",
     }.get(sr.status, "🟡 на проверке")
     lines = [f"🧩 <b>Карточка {idx}</b> — {state}"]
     lines.append(f"<b>Название:</b> {html.escape(sr.title or 'не указано')}")
