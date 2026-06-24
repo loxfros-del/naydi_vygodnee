@@ -2352,6 +2352,85 @@ async def alice_edit_price_prompt(callback: CallbackQuery, state: FSMContext):
 
 # ---------- Заметка к товару ----------
 
+# ---------- Изменить магазин (карточки ИИ) ----------
+
+@router.callback_query(F.data.startswith("alicestore_"))
+async def alice_edit_store_prompt(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    result_id = int(callback.data.split("_")[1])
+    item = get_search_result(result_id)
+    if not item or item.origin != "alice":
+        await callback.answer("Карточка не найдена", show_alert=True)
+        return
+    await state.update_data(alicestore_result_id=result_id)
+    await state.set_state(AdminStates.editing_store)
+    await callback.message.answer(
+        f"Отправь новое название магазина для:\n"
+        f"<b>{html.escape(item.title[:120])}</b>\n\n"
+        f"Текущий: {html.escape(item.source or 'не указан')}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 К карточкам", callback_data=f"alicecards_{item.request_id}")]
+        ]),
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.editing_store)
+async def alice_edit_store_process(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    result_id = data.get("alicestore_result_id")
+    await state.clear()
+    if not result_id:
+        return
+
+    new_store = (message.text or "").strip()[:100]
+    if not new_store:
+        await message.answer("Название магазина не может быть пустым.")
+        return
+
+    update_search_result(result_id, source=new_store)
+    await message.answer("✅ Магазин обновлён")
+
+    item = get_search_result(result_id)
+    if item and item.origin == "alice":
+        await message.answer(
+            format_alice_card(item, _alice_card_index(item.id, item.request_id)),
+            reply_markup=kb_alice_product(item.id, item.status),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+
+# ---------- Нет в наличии (карточки ИИ) ----------
+
+@router.callback_query(F.data.startswith("aliceoutofstock_"))
+async def alice_out_of_stock(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    result_id = int(callback.data.split("_")[1])
+    item = get_search_result(result_id)
+    if not item or item.origin != "alice":
+        await callback.answer("Карточка не найдена", show_alert=True)
+        return
+
+    update_search_result(
+        result_id,
+        status="REJECTED",
+        admin_note="Нет в наличии на момент проверки",
+    )
+    item = get_search_result(result_id)
+    await _refresh_alice_card(callback.message, item)
+    await callback.answer("Товар убран: нет в наличии")
+
+
+# ---------- Заметка к товару ----------
+
 @router.callback_query(F.data.startswith("editnote_"))
 async def edit_note_prompt(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):

@@ -116,6 +116,10 @@ def kb_alice_product(result_id: int, status: str, link_check_status: str = "NEED
             InlineKeyboardButton(text="⬇️ Ниже", callback_data=f"alicedown_{result_id}"),
         ],
         [InlineKeyboardButton(text="🔎 Найти ссылку", callback_data=f"alicesearch_{result_id}")],
+        [
+            InlineKeyboardButton(text="✏️ Изменить магазин", callback_data=f"alicestore_{result_id}"),
+            InlineKeyboardButton(text="❌ Нет в наличии", callback_data=f"aliceoutofstock_{result_id}"),
+        ],
     ])
 
 

@@ -22,3 +22,4 @@ class AdminStates(StatesGroup):
     editing_market_reason = State()     # Редактирование причины проверки рынка
     editing_market_price = State()      # Редактирование цены проверки рынка
     editing_market_link = State()       # Редактирование ссылки проверки рынка
+    editing_store = State()             # Редактирование названия магазина в карточке ИИ
