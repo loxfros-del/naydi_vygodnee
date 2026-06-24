@@ -1,0 +1,212 @@
+{
+  "timestamp": "2026-06-21T22:20:58.285508",
+  "query": "Нужен телевизор для PS5 до 45к в Ярославле",
+  "clean_search_query": "телевизор 4K для PS5 до 45000 Ярославль",
+  "budget": "45000",
+  "city": "Ярославль",
+  "score": 30,
+  "total_raw": 36,
+  "normal": 0,
+  "weak": 8,
+  "rejected": 28,
+  "with_price": 0,
+  "in_budget": 0,
+  "over_budget": 0,
+  "trash": 28,
+  "duplicates": 0,
+  "sources": [
+    "avito_search",
+    "generic_web",
+    "mvideo_search",
+    "ozon_search",
+    "wildberries",
+    "yandex_market_search"
+  ],
+  "source_stats": {
+    "avito_search": {
+      "raw": 3,
+      "normal": 0,
+      "weak": 2,
+      "rejected": 1,
+      "error": ""
+    },
+    "dns_search": {
+      "raw": 4,
+      "normal": 0,
+      "weak": 0,
+      "rejected": 4,
+      "error": ""
+    },
+    "generic_web": {
+      "raw": 12,
+      "normal": 0,
+      "weak": 1,
+      "rejected": 11,
+      "error": ""
+    },
+    "mvideo_search": {
+      "raw": 3,
+      "normal": 0,
+      "weak": 1,
+      "rejected": 2,
+      "error": ""
+    },
+    "ozon_search": {
+      "raw": 6,
+      "normal": 0,
+      "weak": 2,
+      "rejected": 4,
+      "error": ""
+    },
+    "wildberries": {
+      "raw": 1,
+      "normal": 0,
+      "weak": 1,
+      "rejected": 0,
+      "error": "Wildberries вернул не-JSON ответ: Expecting property name enclosed in double quo"
+    },
+    "yandex_market_search": {
+      "raw": 7,
+      "normal": 0,
+      "weak": 1,
+      "rejected": 6,
+      "error": ""
+    }
+  },
+  "top5": [
+    {
+      "title": "Телевизор 43 Smart TV S4, 4K, Android TV, EVO TV 60 Гц, Haier",
+      "price": null,
+      "source": "wildberries",
+      "score": 40.0,
+      "status": "WEAK_CANDIDATE",
+      "risks": [
+        "нет признаков конкретной модели",
+        "HDMI не указан",
+        "цена не подтверждена",
+        "цена не найдена",
+        "точная модель не указана",
+        "классификация: WEAK — цена не найдена; HDMI не указан; точная модель не указана"
+      ],
+      "url": "https://www.wildberries.ru/catalog/337617994/detail.aspx"
+    },
+    {
+      "title": "HISENSE LED TV 460K Dodoma Area A জम - - Facebook",
+      "price": null,
+      "source": "generic_web",
+      "score": 0.0,
+      "status": "WEAK_CANDIDATE",
+      "risks": [
+        "нет признаков конкретной модели",
+        "HDMI не указан",
+        "цена не подтверждена",
+        "цена не найдена",
+        "герцовка не указана",
+        "точная модель не указана",
+        "классификация: WEAK — цена не найдена; HDMI не указан; герцовка не указана; точная модель не указана"
+      ],
+      "url": "https://www.facebook.com/groups/669401825161988/posts/1132836425485190/"
+    },
+    {
+      "title": "Tuvio Телевизор 55 дюймов, Smart TV ... - OZON",
+      "price": null,
+      "source": "ozon_search",
+      "score": 40.0,
+      "status": "WEAK_CANDIDATE",
+      "risks": [
+        "нет признаков конкретной модели",
+        "HDMI не указан",
+        "цена не подтверждена",
+        "цена не найдена",
+        "герцовка не указана",
+        "точная модель не указана",
+        "классификация: WEAK — цена не найдена; HDMI не указан; герцовка не указана; точная модель не указана"
+      ],
+      "url": "https://www.ozon.ru/product/tuvio-televizor-55-dyuymov-smart-tv-na-platforme-google-tv-qled-frameless-tq55ufgcv5-55-4k-uhd-1911911065/"
+    },
+    {
+      "title": "Tuvio Телевизор 55 дюймов, Smart TV на платформе Google TV...",
+      "price": null,
+      "source": "ozon_search",
+      "score": 40.0,
+      "status": "WEAK_CANDIDATE",
+      "risks": [
+        "нет признаков конкретной модели",
+        "HDMI не указан",
+        "цена не подтверждена",
+        "цена не найдена",
+        "герцовка не указана",
+        "точная модель не указана",
+        "классификация: WEAK — цена не найдена; HDMI не указан; герцовка не указана; точная модель не указана"
+      ],
+      "url": "https://www.ozon.ru/product/tuvio-televizor-55-dyuymov-smart-tv-na-platforme-google-tv-mini-led-frameless-yandeks-1821649932/"
+    },
+    {
+      "title": "Телевизор Hisense 43E77Q 43 дюйма Смарт ТВ 4К телевизор...",
+      "price": null,
+      "source": "yandex_market_search",
+      "score": 70.0,
+      "status": "WEAK_CANDIDATE",
+      "risks": [
+        "HDMI не указан",
+        "цена не подтверждена",
+        "цена не найдена",
+        "герцовка не указана",
+        "классификация: WEAK — цена не найдена; HDMI не указан; герцовка не указана"
+      ],
+      "url": "https://market.yandex.ru/card/televizor-hisense-43e77q-qled-colour-dolby-visionatmos-al-4k-upscaler-al-smooth-motion/4441495233"
+    }
+  ],
+  "trash_items": [
+    {
+      "title": "15 лучших 4K-телевизоров для PlayStation 5 и Xbox... — Игромания",
+      "price": null,
+      "why": "обзор/подборка, классификация: REJECTED — обзор или отзывы"
+    },
+    {
+      "title": "Телевизоры – купить телевизор на OZON по низкой цене",
+      "price": null,
+      "why": "страница категории, классификация: REJECTED — страница категории"
+    },
+    {
+      "title": "The 6 Best Monitors For PS5/PS5 Pro of 2026 - RTINGS.com",
+      "price": null,
+      "why": "не тот тип товара, классификация: REJECTED — не тот тип товара"
+    },
+    {
+      "title": "Смарт телевизоры 43 дюймов 4K - купить по низкой цене на ...",
+      "price": null,
+      "why": "страница категории, классификация: REJECTED — страница категории"
+    },
+    {
+      "title": "ТОП-15 лучших 4К телевизоров 43 дюйма – рейтинг 2026 года",
+      "price": null,
+      "why": "обзор/подборка, классификация: REJECTED — обзор или отзывы"
+    },
+    {
+      "title": "10 лучших 4К телевизоров на 43 дюйма [2025 г. — июнь 2026 г.]15 лучших телевизоров 43 дюйма 2026: рейтинг недорогих ...Телевизоры 4к 43 дюйма купить на OZON по низкой ценеТелевизоры 4K - купить по низкой цене на Яндекс Маркете12 лучших телевизоров 43 дюйма 2026 - Рейтинг по качеству ...Various OLED ",
+      "price": null,
+      "why": "страница категории, классификация: REJECTED — страница категории"
+    },
+    {
+      "title": "Телевизор Tcl 55 Дюймов Куда Крутить Кранштейн - TikTok",
+      "price": 50000,
+      "why": "обзор/подборка, классификация: REJECTED — обзор или отзывы"
+    },
+    {
+      "title": "Discover the Amazing TCL 55 Inches Google Smart TV - TikTok",
+      "price": 50000,
+      "why": "обзор/подборка, классификация: REJECTED — обзор или отзывы"
+    },
+    {
+      "title": "Обзор телевізора TCL 43C645: QLED Smart TV - TikTok",
+      "price": null,
+      "why": "обзор/подборка, классификация: REJECTED — обзор или отзывы"
+    },
+    {
+      "title": "Какой телевизор купить для PS5 в 2026 году: чек-лист без...",
+      "price": null,
+      "why": "обзор/подборка, классификация: REJECTED — обзор или отзывы"
+    }
+  ]
+}
