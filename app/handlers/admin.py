@@ -1122,8 +1122,13 @@ async def _send_report(callback: CallbackQuery, req_id: int, force_without_links
         return
 
     try:
-        await callback.bot.send_message(req.user_id, report, parse_mode="HTML",
-                                        disable_web_page_preview=True)
+        # Разбиваем на чанки по 3900 символов (ограничение Telegram)
+        chunks = _telegram_chunks(report)
+        for chunk in chunks:
+            await callback.bot.send_message(
+                req.user_id, chunk, parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
         update_request(req_id, status="REPORT_SENT", report_text=report)
         await callback.answer("Отчёт отправлен клиенту")
     except Exception as e:

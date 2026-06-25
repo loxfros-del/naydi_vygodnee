@@ -1,5 +1,5 @@
 name = "alice-parser-guardian"
-description = "Защищает парсер Алисы от регрессий."
+description = "Защищает парсер Gemini/Алисы от регрессий."
 mode = "edit"
 
 instructions = """

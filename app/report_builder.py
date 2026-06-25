@@ -70,7 +70,7 @@ def _active_alice_items(req: Request) -> list[SearchResult]:
 def _alice_item_is_report_ready(item: SearchResult) -> bool:
     """Карточка допускается к финальному клиентскому отчёту только после проверки."""
     return bool(
-        item.status in ("BEST", "APPROVED", "BACKUP", "APPROVED_BACKUP", "BUDGET")
+        item.status in ("BEST", "APPROVED", "BACKUP", "APPROVED_BACKUP", "BUDGET", "APPROVED_BUDGET")
         and item.price
         and item.price_verified
         and item.link_check_status == "VERIFIED"
@@ -196,19 +196,65 @@ def _format_alice_reason(item: SearchResult) -> str:
     return html.escape(text[:200]) if text.strip() else "не указано"
 
 
+def _format_alice_item_full(item: SearchResult) -> list[str]:
+    """Форматирует полную карточку Алисы для клиентского отчёта."""
+    lines = [f"📌 Модель: {html.escape(item.title or 'не указано')}"]
+    lines.append(f"💰 Цена: {_format_alice_price(item)}")
+    lines.append(f"🏬 Где: {_format_alice_source(item)}")
+    lines.append(f"🔗 Ссылка: {_format_link(item.url)}")
+    lines.append(f"✅ Почему подходит: {_format_alice_reason(item)}")
+    risk_text = "; ".join(_alice_risks(item)) if _alice_risks(item) else "не выявлено"
+    lines.append(f"⚠️ Риск: {html.escape(risk_text)}")
+    return lines
+
+
+def _format_alice_item_caution(item: SearchResult) -> list[str]:
+    """Форматирует карточку для блока «Осторожно»: все поля опциональны."""
+    lines = [f"📌 Модель: {html.escape(item.title or 'не указано')}"]
+    if item.price:
+        lines.append(f"💰 Цена: {_format_alice_price(item)}")
+    if item.source:
+        lines.append(f"🏬 Где: {_format_alice_source(item)}")
+    if _has_direct_link(item.url):
+        lines.append(f"🔗 Ссылка: {_format_link(item.url)}")
+    reasons = _alice_caution_reasons(item)
+    lines.append(f"Почему не лучший вариант: {html.escape(reasons)}")
+    risk_text = "; ".join(_alice_risks(item)) if _alice_risks(item) else "не указан"
+    lines.append(f"Риск: {html.escape(risk_text)}")
+    return lines
+
+
+def _alice_caution_reasons(item: SearchResult) -> str:
+    """Собирает текстовую причину для блока «Осторожно»."""
+    parts = []
+    if item.status in ("DO_NOT_BUY", "CAUTION"):
+        parts.append("помечено админом как сомнительное")
+    if item.status == "REJECTED":
+        parts.append("убран админом")
+    if not item.price:
+        parts.append("цена не указана")
+    if not _has_direct_link(item.url):
+        parts.append("нет прямой ссылки")
+    if not item.source:
+        parts.append("магазин не указан")
+    if not parts:
+        parts.append("нужно проверить детали")
+    return "; ".join(parts)
+
+
 def build_alice_client_report(req: Request) -> str:
-    """Полный отчёт клиенту — после оплаты. Красивый и человечный."""
-    active = _active_alice_items(req)
+    """Полный отчёт клиенту — после оплаты. Все роли, полные блоки."""
+    alice_items = get_alice_results(req.id)  # все, включая REJECTED
+    active = _active_alice_items(req)  # без REJECTED
     top = get_alice_top_result(req.id)
     if not active or not top:
         return "Нельзя отправить отчёт: выберите и оставьте хотя бы одну карточку Алисы."
 
-    eligible = [i for i in active if _alice_item_is_report_ready(i)]
-    if top.id not in {i.id for i in eligible}:
+    # ТОП-1 должен быть report-ready
+    if not _alice_item_is_report_ready(top):
         return "Нельзя отправить отчёт: ТОП-1 не прошёл ручную проверку ссылки и цены."
 
     budget = int(req.budget) if req.budget and req.budget.isdigit() else None
-    top_risks = _alice_risks(top)
 
     lines = [
         "✅ <b>Подборка проверена вручную</b>",
@@ -219,13 +265,7 @@ def build_alice_client_report(req: Request) -> str:
 
     # ── 🏆 ТОП-1 ──
     lines.append("🏆 <b>Лучший вариант — брать в первую очередь</b>")
-    lines.append(f"📌 Модель: {html.escape(top.title or 'не указано')}")
-    lines.append(f"💰 Цена: {_format_alice_price(top)}")
-    lines.append(f"🏬 Где: {_format_alice_source(top)}")
-    lines.append(f"🔗 Ссылка: {_format_link(top.url)}")
-    lines.append(f"✅ Почему подходит: {_format_alice_reason(top)}")
-    risk_text = "; ".join(top_risks) if top_risks else "не выявлено"
-    lines.append(f"⚠️ Риск: {html.escape(risk_text)}")
+    lines.extend(_format_alice_item_full(top))
     lines.append("")
 
     # ── 🔍 Проверка рынка ──
@@ -245,76 +285,70 @@ def build_alice_client_report(req: Request) -> str:
                 lines.append(f"Почему: {html.escape(mc.reason)}")
         lines.append("")
 
-    # ── Распределение по ролям ──
+    # ── Распределение по ролям из report-ready ──
+    eligible = [i for i in active if _alice_item_is_report_ready(i)]
     other = [i for i in eligible if i.id != top.id]
     other.sort(key=lambda i: _alice_report_item_score(i, budget), reverse=True)
 
     backup: list[SearchResult] = []
     budget_items: list[SearchResult] = []
-    caution: list[SearchResult] = []
+    approved_items: list[SearchResult] = []
     leftover: list[SearchResult] = []
 
     for item in other:
-        if item.status == "BACKUP" or item.status == "APPROVED_BACKUP":
+        st = item.status or ""
+        if st in ("BACKUP", "APPROVED_BACKUP"):
             backup.append(item)
-        elif item.status == "BUDGET":
+        elif st in ("BUDGET", "APPROVED_BUDGET"):
             budget_items.append(item)
-        elif item.status == "DO_NOT_BUY" or item.status == "CAUTION":
-            caution.append(item)
+        elif st == "APPROVED":
+            approved_items.append(item)
+        elif st in ("DO_NOT_BUY", "CAUTION"):
+            # эти не попадают в eligible для хороших блоков,
+            # обработаем ниже отдельно
+            pass
         else:
-            # Auto-classify: above budget or bad link -> caution, else -> regular
-            above_budget = bool(budget and item.price and item.price > budget)
-            bad_link = not _has_direct_link(item.url) or not item.source
-            if above_budget or bad_link:
-                caution.append(item)
-            else:
-                leftover.append(item)
+            leftover.append(item)
+
+    # ── Caution: берём из ВСЕХ active (не только eligible) со статусами DO_NOT_BUY/CAUTION ──
+    caution = [
+        i for i in active
+        if i.status in ("DO_NOT_BUY", "CAUTION") and i.id != top.id
+    ]
+    # Не исключаем caution без проверки ссылки — это блок «лучше не брать»
+    # Но REJECTED не показываем (уже отфильтровано _active_alice_items)
 
     # ── ✅ Запасной ──
     if backup:
         lines.append("✅ <b>Запасной вариант</b>")
         for item in backup[:2]:
-            lines.append(f"📌 Модель: {html.escape(item.title or 'не указано')}")
-            lines.append(f"💰 Цена: {_format_alice_price(item)}")
-            lines.append(f"🏬 Где: {_format_alice_source(item)}")
-            lines.append(f"🔗 Ссылка: {_format_link(item.url)}")
-            lines.append(f"Коротко почему можно брать: {_format_alice_reason(item)}")
+            lines.extend(_format_alice_item_full(item))
             lines.append("")
     elif leftover:
-        # Если нет явного запасного — показываем лучший из оставшихся как запасной
         best_leftover = leftover[0]
         lines.append("✅ <b>Запасной вариант</b>")
-        lines.append(f"📌 Модель: {html.escape(best_leftover.title or 'не указано')}")
-        lines.append(f"💰 Цена: {_format_alice_price(best_leftover)}")
-        lines.append(f"🏬 Где: {_format_alice_source(best_leftover)}")
-        lines.append(f"🔗 Ссылка: {_format_link(best_leftover.url)}")
-        lines.append(f"Коротко почему можно брать: {_format_alice_reason(best_leftover)}")
+        lines.extend(_format_alice_item_full(best_leftover))
         lines.append("")
 
     # ── 💰 Бюджетный ──
     if budget_items:
         lines.append("💰 <b>Бюджетный вариант</b>")
         for item in budget_items[:2]:
-            lines.append(f"📌 Модель: {html.escape(item.title or 'не указано')}")
-            lines.append(f"💰 Цена: {_format_alice_price(item)}")
-            lines.append(f"Кому подойдёт: если хотите сэкономить, но с учётом рисков.")
+            lines.extend(_format_alice_item_full(item))
             lines.append("")
 
-    # ── ⚠️ Осторожно ──
+    # ── 📌 Ещё можно рассмотреть (APPROVED) ──
+    if approved_items:
+        lines.append("📌 <b>Ещё можно рассмотреть</b>")
+        for item in approved_items[:3]:
+            lines.extend(_format_alice_item_full(item))
+            lines.append("")
+
+    # ── ⚠️ Осторожно / лучше не брать ──
     if caution:
         lines.append("⚠️ <b>Осторожно / лучше не брать</b>")
         for item in caution[:3]:
-            lines.append(f"📌 Модель: {html.escape(item.title or 'не указано')}")
-            reasons = []
-            if budget and item.price and item.price > budget:
-                reasons.append("цена выше бюджета")
-            if not _has_direct_link(item.url):
-                reasons.append("нет прямой ссылки")
-            if not item.source:
-                reasons.append("магазин не указан")
-            if item.status in ("DO_NOT_BUY", "CAUTION"):
-                reasons.append("помечено как сомнительное")
-            lines.append(f"Почему не лучший вариант: {'; '.join(reasons) if reasons else 'нужно проверить детали'}")
+            lines.extend(_format_alice_item_caution(item))
             lines.append("")
 
     # ── 🧠 Итог ──
@@ -360,6 +394,9 @@ def build_admin_preview(req: Request) -> str:
         for index, item in enumerate(alice_items, 1):
             status = {
                 "BEST": "🏆 ТОП-1", "APPROVED": "✅ оставлен", "REJECTED": "❌ убран",
+                "CAUTION": "⚠️ осторожно", "DO_NOT_BUY": "🚫 не брать",
+                "BACKUP": "🔄 запасной", "APPROVED_BACKUP": "🔄 запасной",
+                "BUDGET": "💰 бюджетный", "APPROVED_BUDGET": "💰 бюджетный",
             }.get(item.status, "🟡 на проверке")
             lines.extend(["", f"<b>{index}. {status}</b>"])
             lines.extend(_format_alice_item(item))

@@ -570,22 +570,18 @@ def is_product_request(text: str) -> bool:
     return False
 
 
-@router.message(StateFilter(None), F.text)
+@router.message(
+    StateFilter(None),
+    F.text.func(lambda text: bool(text) and not text.strip().startswith("/") and text.strip() != "🔍 Найти товар")
+)
 async def handle_free_text(message: Message, state: FSMContext):
     """
     Обработчик свободного текста.
     Если сообщение похоже на товарный запрос — создаёт заявку.
     Иначе — даёт короткую подсказку.
+    Фильтр пропускает только текст без "/" и не кнопку меню.
     """
     text = message.text.strip()
-
-    # Не перехватываем команды
-    if text.startswith("/"):
-        return
-
-    # Не перехватываем кнопки меню
-    if text == "🔍 Найти товар":
-        return
 
     if is_product_request(text):
         # Передаём в существующий process_request
