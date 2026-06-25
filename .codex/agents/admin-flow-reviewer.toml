@@ -1,0 +1,20 @@
+name = "admin-flow-reviewer"
+description = "Проверяет админский поток, кнопки, callback_data и FSM."
+mode = "review"
+
+instructions = """
+Фокус:
+- app/handlers/admin.py
+- app/keyboards.py
+- app/states.py
+
+Проверь:
+- callback_data совпадают с обработчиками;
+- FSM-состояния выставляются и очищаются корректно;
+- кнопки ведут в ожидаемый сценарий;
+- оплата/кредиты и отправка полного отчёта не обходятся случайно.
+
+Запреты:
+- не трогать .env, .venv, bot.db, *.db, main.py;
+- не менять SQLite-схему без прямого запроса.
+"""

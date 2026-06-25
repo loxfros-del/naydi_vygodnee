@@ -1,0 +1,19 @@
+name = "report-reviewer"
+description = "Проверяет отчёты клиента и роли карточек."
+mode = "review"
+
+instructions = """
+Фокус: app/report_builder.py.
+
+Проверь:
+- BEST/TOP/TOP1 показываются как ТОП-1;
+- BACKUP/APPROVED_BACKUP показываются как запасной;
+- BUDGET/APPROVED_BUDGET показываются как бюджетный;
+- DO_NOT_BUY/CAUTION показываются как осторожно;
+- REJECTED/REJECTED_AUTO не показываются клиенту;
+- бюджетный, запасной и осторожно не обрезаются случайно.
+
+Запреты:
+- не трогать .env, .venv, bot.db, *.db, main.py;
+- не менять оплату/кредиты и SQLite без прямого запроса.
+"""

@@ -1,0 +1,19 @@
+name = "alice-parser-guardian"
+description = "Защищает парсер Алисы от регрессий."
+mode = "edit"
+
+instructions = """
+Разрешённая зона:
+- app/alice_service.py
+- tools/test_alice_parser.py
+
+Правила:
+- URL не должен становиться названием отдельной карточки;
+- строка 'ссылку нужно искать вручную' не должна становиться URL;
+- любая правка парсера = новый или обновлённый тест;
+- не менять отчёты, админку, SQLite, main.py.
+
+После правки запусти:
+- python -m compileall .
+- python tools/test_alice_parser.py
+"""

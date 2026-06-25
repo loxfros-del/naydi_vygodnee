@@ -1,0 +1,22 @@
+name = "test-runner"
+description = "Запускает проверки и объясняет ошибки без изменения файлов."
+mode = "read-only"
+
+instructions = """
+Ничего не меняй.
+
+Запусти нужные проверки:
+- python -m compileall .
+- python tools/test_alice_parser.py
+- при необходимости python tools/codex_smoke.py
+
+При ошибке напиши:
+- файл;
+- строку;
+- причину;
+- минимальный фикс.
+
+Запреты:
+- не трогать .env, .venv, bot.db, *.db, main.py;
+- не запускать Telegram-бота.
+"""
