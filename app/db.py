@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Optional
 
 from app.config import settings
+from app.link_checks import LinkCheckStatus, normalize_link_check_status
 
 def to_int_price(value) -> Optional[int]:
     """Безопасно превращает цену из строки/числа в int."""
@@ -45,6 +46,9 @@ class Request:
     original_query: str = ""
     status: str = "NEW"
     found_products: str = "[]"
+    preview_text: str = ""
+    report_text: str = ""
+    alice_response: str = ""
     created_at: str = ""
     search_links: str = "[]"
     updated_at: str = ""
@@ -66,7 +70,7 @@ class SearchResult:
     origin: str = "auto"
     sort_order: int = 0
     price_verified: bool = False
-    link_check_status: str = "NEEDED"
+    link_check_status: str = LinkCheckStatus.NEEDED.value
     created_at: str = ""
     updated_at: str = ""
 
@@ -115,6 +119,18 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str):
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _run_migrations(conn: sqlite3.Connection):
+    _ensure_column(conn, "requests", "preview_text", "TEXT DEFAULT ''")
+    _ensure_column(conn, "requests", "report_text", "TEXT DEFAULT ''")
+    _ensure_column(conn, "requests", "alice_response", "TEXT DEFAULT ''")
+
+
 def init_db():
     """Создаёт таблицы, если их нет."""
     conn = get_conn()
@@ -134,6 +150,9 @@ def init_db():
             original_query TEXT DEFAULT '',
             status TEXT DEFAULT 'NEW',
             found_products TEXT DEFAULT '[]',
+            preview_text TEXT DEFAULT '',
+            report_text TEXT DEFAULT '',
+            alice_response TEXT DEFAULT '',
             search_links TEXT DEFAULT '[]',
             created_at TEXT DEFAULT '',
             updated_at TEXT DEFAULT ''
@@ -201,6 +220,7 @@ def init_db():
             FOREIGN KEY (request_id) REFERENCES requests(id)
         );
     """)
+    _run_migrations(conn)
     conn.commit()
     conn.close()
 
@@ -319,10 +339,11 @@ def create_search_result(
     source: str = "", url: str = "", snippet: str = "", score: float = 0.0,
     risk_flags: str = "[]", status: str = "CANDIDATE", admin_note: str = "",
     origin: str = "auto", sort_order: int = 0,
-    price_verified: bool = False, link_check_status: str = "NEEDED",
+    price_verified: bool = False, link_check_status: str = LinkCheckStatus.NEEDED.value,
 ) -> int:
     conn = get_conn()
     now = datetime.now().isoformat()
+    link_check_status = normalize_link_check_status(link_check_status)
     cur = conn.execute(
         """INSERT INTO search_results
            (request_id, title, price, source, url, snippet, score, risk_flags,
@@ -419,7 +440,7 @@ def replace_alice_results(request_id: int, items: list[dict]):
             if item.get("price_num") is not None
             else item.get("price")
         )
-        source = (item.get("store") or item.get("source") or "").strip()
+        source = (item.get("store") or item.get("source") or "магазин нужно уточнить").strip()
         raw_url = (item.get("link") or item.get("url") or "").strip()
 
         # Плюсы → snippet
@@ -444,7 +465,12 @@ def replace_alice_results(request_id: int, items: list[dict]):
             or raw_url in ("ссылку нужно искать вручную", ".", "-", "нет", "—")
         )
         url = "" if is_empty_link else raw_url
-        link_check_status = "CHECKED" if (url and url.startswith("http")) else "NEEDED"
+        link_check_status = (
+            LinkCheckStatus.FOUND_UNVERIFIED.value
+            if (url and url.startswith("http"))
+            else LinkCheckStatus.NEEDED.value
+        )
+        link_check_status = normalize_link_check_status(link_check_status)
 
         conn.execute(
             """INSERT INTO search_results
@@ -509,6 +535,8 @@ def get_search_result(result_id: int) -> Optional[SearchResult]:
 
 def update_search_result(result_id: int, **kwargs):
     conn = get_conn()
+    if "link_check_status" in kwargs:
+        kwargs["link_check_status"] = normalize_link_check_status(kwargs["link_check_status"])
     kwargs["updated_at"] = datetime.now().isoformat()
     sets = ", ".join(f"{k} = ?" for k in kwargs)
     vals = list(kwargs.values()) + [result_id]

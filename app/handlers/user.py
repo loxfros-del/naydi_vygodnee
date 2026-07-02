@@ -37,14 +37,21 @@ def parse_budget(text: str) -> str:
     t = text.lower()
 
     # Паттерн: число + "к" (тысячи)
-    m = re.search(r'(\d+)\s*[кК]\b', t)
+    m = re.search(r'\b(\d{1,3})\s*[кКkK]\b', t)
     if m:
         return str(int(m.group(1)) * 1000)
 
     # Паттерн: число + "тыс" / "тысяч"
-    m = re.search(r'(\d+)\s*тыс(?:яч|\.|и)?\.?\b', t)
+    m = re.search(r'\b(\d{1,3})\s*тыс(?:яч|\.|и)?\.?\b', t)
     if m:
         return str(int(m.group(1)) * 1000)
+
+    # Паттерн: "45 000"
+    m = re.search(r'\b(\d{1,3})\s+(\d{3})\b', t)
+    if m:
+        val = int(m.group(1) + m.group(2))
+        if 1000 <= val <= 999999:
+            return str(val)
 
     # Паттерн: просто число (4-6 цифр)
     m = re.search(r'\b(\d{4,6})\b', t)
@@ -135,6 +142,7 @@ def parse_product_name(text: str) -> str:
         t = re.sub(pattern, '', t)
 
     # Убираем "до <бюджет>"
+    t = re.sub(r'\s*до\s+\d{1,3}\s+\d{3}\s*', ' ', t)
     t = re.sub(r'\s*до\s+\d+\s*[кК]?\s*', ' ', t)
     t = re.sub(r'\s*до\s+\d+\s*тыс.*?\s*', ' ', t)
 

@@ -389,7 +389,7 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
     known_brand_pattern = (
         "hisense|tcl|samsung|lg|sony|xiaomi|haier|philips|"
         "skyworth|hyundai|dexp|huawei|honor|apple|iphone|ipad|macbook|asus|lenovo|"
-        "acer|hp|dell|realme|poco|redmi|dyson|bosch|karcher|sber"
+        "acer|hp|dell|realme|poco|redmi|dyson|bosch|karcher|sber|google|pixel"
     )
     field_re = re.compile(
         r"^\s*(?P<label>название(?:\s+(?:модели|товара))?|модель|товар|вариант|"
@@ -403,11 +403,11 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
     # известные маркеры в отдельные логические строки до основного разбора.
     inline_marker_re = re.compile(
         r"\s+(?=(?:вариант\s*\d{1,2}\b|"
-        r"название(?:\s+(?:модели|товара))?|модель|"
+        r"(?:название(?:\s+(?:модели|товара))?|модель|"
         r"цена|стоимость|стоит|магазин|продавец|"
-        r"(?:прямая\s+)?ссылка(?:\s+на\s+товар)?|url|линк|"
-        r"почему(?:\s+подходит|\s+брать)?|плюсы?|преимущества|"
-        r"риски?|минусы?|недостатки|нюансы)\s*:?)",
+        r"(?:прямая\s+)?ссылка(?:\s+на\s+товар)?|ссылка|url|линк|"
+        r"почему(?:\s+подходит|\s+брать)?|почему|плюсы?|преимущества|"
+        r"риски?|риск|минусы?|недостатки|нюансы)\s*:))",
         re.IGNORECASE,
     )
     normalized = inline_marker_re.sub("\n", normalized)
@@ -420,6 +420,11 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
     numbered_re = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\*{0,2})?(?:вариант\s*)?\d{1,2}[.)]\s*(.+)$", re.IGNORECASE)
     bullet_re = re.compile(r"^\s*(?:[-•*✅⭐🏆])\s+(.+)$")
     url_re = re.compile(r"(?:https?://|www\.)[^\s<>]+", re.IGNORECASE)
+    price_range_re = re.compile(
+        r"(?<!\d)(\d{1,3}(?:[\s,.]\d{3})+|\d{4,6})\s*[–—-]\s*"
+        r"(?:\d{1,3}(?:[\s,.]\d{3})+|\d{4,6})\s*(?:₽|руб(?:\.|лей)?|р\.)",
+        re.IGNORECASE,
+    )
     price_re = re.compile(
         r"(?<!\d)(\d{1,3}(?:[\s,.]\d{3})+|\d{4,6}|\d{2,3}\s*[кk])\s*(?:₽|руб(?:\.|лей)?|р\.)",
         re.IGNORECASE,
@@ -434,7 +439,9 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
         return value.strip(" \t:—–-*")
 
     def number_from(value: str, allow_plain: bool = False) -> int | None:
-        match = price_re.search(value)
+        match = price_range_re.search(value)
+        if not match:
+            match = price_re.search(value)
         if not match and allow_plain:
             match = labeled_price_re.search(value)
         if not match:
@@ -454,6 +461,13 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
             return None
         return amount if 100 <= amount <= 10_000_000 else None
 
+    def is_plain_price_line(value: str) -> bool:
+        return bool(re.fullmatch(
+            r"\s*(?:около\s*)?\d{1,3}(?:[\s,.]\d{3})?|\d{4,6}\s*",
+            value,
+            re.IGNORECASE,
+        ))
+
     def url_from(value: str) -> str:
         value_lower = value.lower()
         if any(phrase in value_lower for phrase in (
@@ -470,6 +484,45 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
         url = match.group(0).rstrip(".,;:!?)、】【")
         return f"https://{url}" if url.lower().startswith("www.") else url
 
+    def parse_pipe_item(value: str) -> dict | None:
+        """Разбирает ручной/табличный формат: name | price | store | link."""
+        if "|" not in value:
+            return None
+        parts = [clean(part.strip().strip("[]()")) for part in value.split("|")]
+        parts = [part for part in parts if part]
+        if len(parts) < 2 or is_bad_title(parts[0]):
+            return None
+        item = {
+            "name": parts[0][:200],
+            "price": "",
+            "price_num": None,
+            "store": "магазин нужно уточнить",
+            "link": "",
+            "pluses": [],
+            "risks": [],
+            "within_budget": None,
+            "notes": [],
+        }
+        amount = number_from(parts[1], allow_plain=True)
+        if amount is not None:
+            item["price_num"] = amount
+            item["price"] = format_price(amount)
+        if len(parts) > 2:
+            store = url_re.sub("", parts[2]).strip(" —–-.,")
+            if store:
+                item["store"] = store[:100]
+        if len(parts) > 3:
+            item["link"] = url_from(parts[3])
+            if not item["link"]:
+                item["notes"].append("ссылку нужно искать вручную")
+        if len(parts) > 4:
+            item["pluses"].append(parts[4])
+        if len(parts) > 5:
+            item["risks"].append(parts[5])
+        if budget is not None and item["price_num"] is not None:
+            item["within_budget"] = item["price_num"] <= budget
+        return item
+
     def is_bad_title(value: str) -> bool:
         value = clean(value).strip()
         lower = value.lower()
@@ -484,6 +537,9 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
             return True
 
         if "ссылку нужно искать" in lower or "искать вручную" in lower:
+            return True
+
+        if re.fullmatch(r"вариант\s*\d{1,2}", lower):
             return True
 
         return False
@@ -553,6 +609,10 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
             line = raw_line.strip()
             if not line:
                 continue
+            pipe_item = parse_pipe_item(line)
+            if pipe_item:
+                item.update(pipe_item)
+                continue
             field = field_re.match(line)
             label = field.group("label").lower() if field else ""
             value = clean(field.group("value")) if field else clean(line)
@@ -587,28 +647,32 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
                 continue
             if label in {"почему", "почему подходит", "почему брать", "плюс", "плюсы", "преимущества"}:
                 if value:
-                    item["pluses"].append(value[:200])
+                    item["pluses"].append(value)
                 continue
             if label in {"риск", "риски", "минус", "минусы", "недостатки", "нюансы"}:
                 if value:
-                    item["risks"].append(value[:200])
+                    item["risks"].append(value)
                 continue
 
             if not item["link"]:
                 item["link"] = url_from(value)
             if item["price_num"] is None:
-                amount = number_from(value)
+                amount = number_from(value, allow_plain=is_plain_price_line(value))
                 if amount is not None:
                     item["price_num"] = amount
                     item["price"] = format_price(amount)
+                    continue
             if not item["store"]:
                 store_match = store_re.search(value)
                 if store_match:
                     item["store"] = store_match.group(1)[:100]
+                elif item["name"] and not url_from(value) and len(value) <= 80:
+                    item["store"] = value[:100]
+                    continue
             if re.search(r"(?:почему|подходит|плюс|преимущ)", value, re.IGNORECASE):
-                item["pluses"].append(value[:200])
+                item["pluses"].append(value)
             elif re.search(r"(?:риск|минус|недостат|осторож|нюанс)", value, re.IGNORECASE):
-                item["risks"].append(value[:200])
+                item["risks"].append(value)
             else:
                 plain_lines.append(value)
 
@@ -621,8 +685,24 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
                     item["name"] = candidate[:200]
                     break
 
+        if item["name"] and not item["store"]:
+            for value in plain_lines:
+                candidate = clean(value)
+                if (
+                    candidate
+                    and candidate != item["name"]
+                    and len(candidate) <= 80
+                    and not is_bad_title(candidate)
+                    and number_from(candidate, allow_plain=is_plain_price_line(candidate)) is None
+                    and not re.search(r"^(вот|ниже|подборк|вариант[ы:]|итог)", candidate, re.IGNORECASE)
+                ):
+                    item["store"] = candidate[:100]
+                    break
+
         item["pluses"] = list(dict.fromkeys(item["pluses"]))
         item["risks"] = list(dict.fromkeys(item["risks"]))
+        if not item["store"]:
+            item["store"] = "магазин нужно уточнить"
         if budget is not None and item["price_num"] is not None:
             item["within_budget"] = item["price_num"] <= budget
 
@@ -733,13 +813,15 @@ def _parse_fallback_block(
         # Плюсы
         if re.search(r'(?:почему|подходит|плюс|преимущ|4k|120\s*гц|hdmi|smart|смарт)', stripped, re.IGNORECASE):
             if stripped not in item["pluses"]:
-                item["pluses"].append(stripped[:200])
+                item["pluses"].append(stripped)
         # Риски
         if re.search(r'(?:риск|минус|недостат|осторож|нюанс|60\s*гц|выше бюджета|мало отзыв)', stripped, re.IGNORECASE):
             if stripped not in item["risks"]:
-                item["risks"].append(stripped[:200])
+                item["risks"].append(stripped)
     if not item["name"] and block_lines:
         item["name"] = re.sub(r'^[✅⭐💸🛡❌⚠️🏆\s*#\d.)\-•]+', '', block_lines[0].strip()).strip()[:200]
+    if item["name"] and not item["store"]:
+        item["store"] = "магазин нужно уточнить"
     return item if item["name"] and len(item["name"]) >= 3 else None
 
 

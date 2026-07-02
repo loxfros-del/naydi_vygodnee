@@ -10,7 +10,7 @@ from app.db import (
     get_market_checks, MarketCheck,
 )
 from app.price_extractor import format_price
-from app.link_checks import store_url_matches
+from app.link_checks import LinkCheckStatus, store_url_matches
 
 
 
@@ -73,7 +73,7 @@ def _alice_item_is_report_ready(item: SearchResult) -> bool:
         item.status in ("BEST", "APPROVED", "BACKUP", "APPROVED_BACKUP", "BUDGET", "APPROVED_BUDGET")
         and item.price
         and item.price_verified
-        and item.link_check_status == "VERIFIED"
+        and item.link_check_status == LinkCheckStatus.VERIFIED.value
         and _has_direct_link(item.url)
         and store_url_matches(item.source, item.url) is not False
     )
@@ -89,7 +89,7 @@ def get_alice_report_issues(req: Request) -> tuple[str, int]:
         return "Нельзя отправить отчёт: выберите ТОП-1 среди карточек Алисы.", 0
     if req.budget.isdigit() and top.price and top.price > int(req.budget):
         return "Нельзя отправить отчёт: ТОП-1 выше бюджета, перенесите его в блок «Осторожно».", 0
-    if top.link_check_status != "VERIFIED":
+    if top.link_check_status != LinkCheckStatus.VERIFIED.value:
         return "Нельзя отправить отчёт: ссылка у ТОП-1 не подтверждена админом.", 0
     if not top.price or not top.price_verified:
         return "Нельзя отправить отчёт: цена у ТОП-1 не подтверждена админом.", 0
@@ -401,10 +401,10 @@ def build_admin_preview(req: Request) -> str:
             lines.extend(["", f"<b>{index}. {status}</b>"])
             lines.extend(_format_alice_item(item))
             link_status = {
-                "NEEDED": "⚠️ ссылка нужна",
-                "FOUND_UNVERIFIED": "🔍 ссылка найдена, но не проверена",
-                "VERIFIED": "✅ ссылка проверена админом",
-                "UNSUITABLE": "❌ ссылка не подходит",
+                LinkCheckStatus.NEEDED.value: "⚠️ ссылка нужна",
+                LinkCheckStatus.FOUND_UNVERIFIED.value: "🔍 ссылка найдена, но не проверена",
+                LinkCheckStatus.VERIFIED.value: "✅ ссылка проверена админом",
+                LinkCheckStatus.UNSUITABLE.value: "❌ ссылка не подходит",
             }.get(item.link_check_status, "⚠️ ссылка нужна")
             price_status = "✅ цена проверена" if item.price and item.price_verified else "⚠️ цену нужно подтвердить"
             lines.append(f"Статус проверки: {link_status}")

@@ -12,6 +12,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from app.alice_service import parse_alice_response, build_client_draft, _score_item
 from app.db import Request
+from app.request_parser import full_parse, parse_budget
 
 # ── Тестовый бюджет ──
 BUDGET = 45000
@@ -248,6 +249,86 @@ assert inline_item["store"] == "rebro-store.ru", inline_item
 assert inline_item["link"] == "", inline_item
 assert inline_item["pluses"] and inline_item["risks"], inline_item
 print("\n✅ Однострочный формат Алисы: карточка заполнена корректно.")
+
+# ── Регрессия: Telegram склеил несколько карточек в одну строку ──
+INLINE_THREE_CARDS = (
+    "Название модели: Google Pixel 6a Цена: ~17 500 – 19 500 ₽ Магазин: Ozon "
+    "Прямая ссылка на товар: https://www.ozon.ru/product/pixel-6a "
+    "Почему подходит: компактный Pixel с хорошей камерой и чистым Android без лишних оболочек. "
+    "Риски: проверить региональную версию, гарантию, состояние аккумулятора и наличие NFC; "
+    "этот длинный риск должен сохраниться полностью до самого конца фразы без жёсткой обрезки. "
+    "Название модели: Google Pixel 7a Цена: ~20 000 ₽ Магазин: Wildberries "
+    "Прямая ссылка на товар: ссылку нужно искать вручную "
+    "Почему подходит: свежее поколение, хороший баланс камеры и цены. "
+    "Риски: проверить продавца, отзывы и комплектацию. "
+    "Название модели: Google Pixel 8a Цена: цена не указана Магазин: DNS "
+    "Ссылка: https://www.dns-shop.ru/product/pixel-8a "
+    "Почему: актуальная модель с долгими обновлениями. "
+    "Риск: цена может быть выше бюджета."
+)
+
+inline_cards = parse_alice_response(INLINE_THREE_CARDS, budget=45_000)
+assert len(inline_cards) == 3, inline_cards
+assert inline_cards[0]["name"] == "Google Pixel 6a", inline_cards
+assert inline_cards[0]["price_num"] == 17500, inline_cards
+assert inline_cards[1]["name"] == "Google Pixel 7a", inline_cards
+assert inline_cards[1]["price_num"] == 20000, inline_cards
+assert inline_cards[1]["link"] == "", inline_cards
+assert inline_cards[2]["price_num"] is None, inline_cards
+assert all(not item["name"].startswith(("http://", "https://", "www.")) for item in inline_cards), inline_cards
+assert "без жёсткой обрезки" in " ".join(inline_cards[0]["risks"]), inline_cards
+assert inline_cards[0]["price_num"] < 1_000_000, inline_cards
+print("\n✅ Inline-формат Telegram: 3 карточки, диапазон цены и длинные риски разобраны корректно.")
+
+# ── Регрессия: Pixel-варианты, ссылки и pipe-формат ──
+PIXEL_VARIANTS = """Вариант 1
+Название модели: Google Pixel 8a
+Цена: 32 990 ₽
+Магазин: Gix
+Ссылка: https://gix.ru/pixel-8a
+Почему подходит: свежая модель, хороший экран, долгие обновления, нормальная камера и компактный размер.
+Риски: японская версия, нужно проверить eSIM и гарантию.
+
+2) Google Pixel 7
+Цена: 29 500 ₽
+Магазин: Ozon
+Ссылка: ссылку нужно искать вручную
+Почему подходит: всё ещё сильная камера и чистый Android.
+Риски: проверить продавца и региональную версию.
+
+3. Название модели: Google Pixel 8
+Цена: 43 000 ₽
+Магазин: DNS
+Ссылка: https://www.dns-shop.ru/product/pixel-8
+Почему подходит: лучше камера и процессор, чем у 7a.
+Риски: ближе к верхней границе бюджета.
+
+Pixel 7a | 20500 | Wildberries | [https://www.wildberries.ru/catalog/pixel-7a]
+
+Название модели: Google Pixel 6a
+Цена: 18 900 ₽
+Магазин: магазин нужно уточнить
+Ссылка: точной ссылки нет
+Почему подходит: самый бюджетный вариант.
+Риски: старая модель, проверить батарею.
+"""
+
+pixel_items = parse_alice_response(PIXEL_VARIANTS, budget=45_000)
+assert len(pixel_items) >= 5, pixel_items
+assert all(not item["name"].startswith(("http://", "https://", "www.")) for item in pixel_items), pixel_items
+assert any(item["name"] == "Pixel 7a" and item["price_num"] == 20500 for item in pixel_items), pixel_items
+assert any(item["link"].startswith("https://gix.ru/") for item in pixel_items), pixel_items
+assert any(item["name"] == "Google Pixel 7" and item["link"] == "" for item in pixel_items), pixel_items
+print("\n✅ Pixel-регрессия: карточки, pipe-формат и ссылки разобраны корректно.")
+
+# ── Регрессия: бюджет не раздувается до миллионов ──
+for raw_budget in ("45к", "45 к", "45 тысяч", "45 000", "45000"):
+    assert parse_budget(raw_budget) == "45000", raw_budget
+parsed_budget = full_parse("Нужен телевизор для PS5 до 45к в Ярославле")
+assert parsed_budget["budget"] == "45000", parsed_budget
+assert "до 45000" in parsed_budget["clean_search_query"], parsed_budget
+assert "45000000" not in parsed_budget["clean_search_query"], parsed_budget
+print("\n✅ Бюджет 45к нормализуется в 45000.")
 
 # ── НОВЫЙ ТЕСТ: Реальный ответ с 5 телевизорами ──
 print(f"\n{'='*60}")

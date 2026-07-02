@@ -1,5 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
+from app.link_checks import LinkCheckStatus, normalize_link_check_status
+
 
 def kb_start() -> ReplyKeyboardMarkup:
     """Главная клавиатура пользователя."""
@@ -64,18 +66,19 @@ def kb_admin_request(req_id: int, status: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def kb_alice_product(result_id: int, status: str, link_check_status: str = "NEEDED", price_verified: bool = False) -> InlineKeyboardMarkup:
+def kb_alice_product(result_id: int, status: str, link_check_status: str = LinkCheckStatus.NEEDED.value, price_verified: bool = False) -> InlineKeyboardMarkup:
     """Действия под одной карточкой, полученной из ответа Алисы."""
     top_label = "🏆 ТОП-1 выбран" if status == "BEST" else "🏆 ТОП-1"
     keep_label = "✅ Оставлен" if status in ("APPROVED", "BEST") else "✅ Оставить"
     remove_label = "❌ Убран" if status == "REJECTED" else "❌ Убрать"
 
     # Статус проверки ссылки
-    if link_check_status == "VERIFIED":
+    link_check_status = normalize_link_check_status(link_check_status)
+    if link_check_status == LinkCheckStatus.VERIFIED.value:
         check_label = "✅ Ссылка проверена ✓"
-    elif link_check_status == "FOUND_UNVERIFIED":
+    elif link_check_status == LinkCheckStatus.FOUND_UNVERIFIED.value:
         check_label = "✅ Проверил ссылку и цену"
-    elif link_check_status == "UNSUITABLE":
+    elif link_check_status == LinkCheckStatus.UNSUITABLE.value:
         check_label = "✅ Проверил ссылку и цену"
     else:
         check_label = "✅ Проверил ссылку и цену"
@@ -112,8 +115,8 @@ def kb_alice_product(result_id: int, status: str, link_check_status: str = "NEED
             InlineKeyboardButton(text="❌ Ссылка не подходит", callback_data=f"alicebadlink_{result_id}"),
         ],
         [
-            InlineKeyboardButton(text="⬆️ Выше", callback_data=f"aliceup_{result_id}"),
-            InlineKeyboardButton(text="⬇️ Ниже", callback_data=f"alicedown_{result_id}"),
+            InlineKeyboardButton(text="⬆️ Предыдущая карточка", callback_data=f"aliceup_{result_id}"),
+            InlineKeyboardButton(text="⬇️ Следующая карточка", callback_data=f"alicedown_{result_id}"),
         ],
         [InlineKeyboardButton(text="🔎 Найти ссылку", callback_data=f"alicesearch_{result_id}")],
         [

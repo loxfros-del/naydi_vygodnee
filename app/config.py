@@ -15,12 +15,22 @@ class Settings(BaseSettings):
     @classmethod
     def load(cls) -> "Settings":
         admin_ids_raw = os.getenv("ADMIN_IDS", "")
-        admin_ids = [int(x.strip()) for x in admin_ids_raw.split(",") if x.strip()]
+        bot_token = os.getenv("BOT_TOKEN", "").strip()
+        if not bot_token:
+            raise RuntimeError("BOT_TOKEN пустой. Заполните BOT_TOKEN в .env.")
+
+        try:
+            admin_ids = [int(x.strip()) for x in admin_ids_raw.split(",") if x.strip()]
+        except ValueError as exc:
+            raise RuntimeError("ADMIN_IDS должен содержать Telegram ID через запятую.") from exc
+        if not admin_ids:
+            raise RuntimeError("ADMIN_IDS пустой. Укажите хотя бы один Telegram ID админа.")
+
         return cls(
-    BOT_TOKEN=os.getenv("BOT_TOKEN", ""),
-    ADMIN_IDS=admin_ids,
-    DB_PATH=os.getenv("DB_PATH", "bot.db"),
-    SEARCH_RESULTS_PER_REQUEST=int(os.getenv("SEARCH_RESULTS_PER_REQUEST", "15")),
-)
+            BOT_TOKEN=bot_token,
+            ADMIN_IDS=admin_ids,
+            DB_PATH=os.getenv("DB_PATH", "bot.db"),
+            SEARCH_RESULTS_PER_REQUEST=int(os.getenv("SEARCH_RESULTS_PER_REQUEST", "15")),
+        )
 
 settings = Settings.load()

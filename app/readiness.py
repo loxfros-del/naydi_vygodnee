@@ -5,6 +5,7 @@ from app.db import (
     Request, SearchResult,
     get_alice_results, get_alice_top_result, get_market_checks,
 )
+from app.link_checks import LinkCheckStatus
 
 
 @dataclass
@@ -42,7 +43,7 @@ def check_readiness(req: Request) -> ReadinessResult:
     # 3. ТОП-1 ссылка и цена проверены
     top_verified = (
         has_top
-        and top.link_check_status == "VERIFIED"
+        and top.link_check_status == LinkCheckStatus.VERIFIED.value
         and bool(top.price)
         and top.price_verified
     )

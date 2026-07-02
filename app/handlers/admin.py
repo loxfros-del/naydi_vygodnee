@@ -1,4 +1,5 @@
 """Обработчики админа — панель управления, автопоиск, работа с вариантами."""
+import asyncio
 import html
 import json
 from aiogram.exceptions import TelegramBadRequest
@@ -24,13 +25,13 @@ from app.db import (
     delete_search_result, count_search_results, count_approved_results,
     create_search_result, get_search_result, get_search_attempts,
     get_manual_search_links, SearchResult, get_alice_results,
-    replace_alice_results, set_alice_top_result, move_alice_result,
+    replace_alice_results, set_alice_top_result,
     create_market_check, get_market_checks, get_market_check,
     update_market_check, delete_market_check, has_market_check,
     MarketCheck,
 )
 from app.search_links import generate_search_links, generate_product_search_links
-from app.link_checks import avito_warnings, store_url_warning
+from app.link_checks import LinkCheckStatus, avito_warnings, store_url_warning
 from app.product_search import run_product_search
 from app.report_builder import (
     build_preview, build_admin_preview, build_full_report, get_alice_report_issues,
@@ -167,10 +168,10 @@ def _link_status(url: str) -> str:
 
 def _link_check_status(item: SearchResult) -> str:
     return {
-        "NEEDED": "⚠️ ссылка нужна",
-        "FOUND_UNVERIFIED": "🔍 ссылка найдена, но не проверена",
-        "VERIFIED": "✅ ссылка проверена админом",
-        "UNSUITABLE": "❌ ссылка не подходит",
+        LinkCheckStatus.NEEDED.value: "⚠️ ссылка нужна",
+        LinkCheckStatus.FOUND_UNVERIFIED.value: "🔍 ссылка найдена, но не проверена",
+        LinkCheckStatus.VERIFIED.value: "✅ ссылка проверена админом",
+        LinkCheckStatus.UNSUITABLE.value: "❌ ссылка не подходит",
     }.get(item.link_check_status, "⚠️ ссылка нужна")
 
 
@@ -512,8 +513,8 @@ async def auto_search(callback: CallbackQuery):
 
     await callback.answer("Запускаю автопоиск...")
 
-    # Запускаем поиск
-    result = run_product_search(req)
+    # Запускаем поиск вне event loop, потому что внутри есть сетевые/блокирующие операции.
+    result = await asyncio.to_thread(run_product_search, req)
 
     if result["success"]:
         await callback.message.answer(
@@ -839,40 +840,70 @@ async def delete_result(callback: CallbackQuery):
 # ---------- Добавить вариант вручную ----------
 
 def _save_manual_result(req: Request, raw: str) -> tuple[int, str]:
-    """Сохраняет формат /add_result и интерактивный ввод в одну таблицу."""
-    parts = [part.strip() for part in raw.split("|")]
-    if len(parts) < 4 or not parts[0] or not parts[3]:
-        raise ValueError("Нужно минимум: Название | Цена | Магазин | Ссылка")
+    """Сохраняет ручной ввод через общий парсер ИИ-карточек."""
+    budget_num = int(req.budget) if req.budget and req.budget.isdigit() else None
+    parsed_items = parse_alice_response(raw, budget=budget_num)
+    if not parsed_items:
+        raise ValueError("Не удалось собрать карточку из текста.")
 
-    title, price_str, source, url = parts[:4]
-    plus = parts[4] if len(parts) > 4 else ""
-    minus = parts[5] if len(parts) > 5 else ""
-    note_parts = []
-    if plus:
-        note_parts.append(f"Плюсы: {plus}")
-    if minus:
-        note_parts.append(f"Минусы: {minus}")
-    note = "; ".join(note_parts)
+    first_id = 0
+    first_title = ""
+    sort_order = len(get_alice_results(req.id)) + 1
+    found = json.loads(req.found_products) if req.found_products else []
 
-    price = _extract_price(price_str)
-    result_id = create_search_result(
-        request_id=req.id,
-        title=title[:300],
-        url=url[:500],
-        source=source[:100],
-        price=price,
-        snippet=note[:500],
-        score=55.0,
-        risk_flags=json.dumps(["добавлено вручную"], ensure_ascii=False),
-        status="CANDIDATE",
-        origin="manual",
-    )
+    for offset, item in enumerate(parsed_items):
+        title = (item.get("name") or item.get("title") or "").strip()
+        if not title:
+            continue
+        price = item.get("price_num")
+        source = (item.get("store") or item.get("source") or "магазин нужно уточнить").strip()
+        url = (item.get("link") or item.get("url") or "").strip()
+        pluses = item.get("pluses") or []
+        risks = item.get("risks") or []
+        if isinstance(pluses, str):
+            pluses = [pluses]
+        if isinstance(risks, str):
+            risks = [risks]
+        snippet = "; ".join(pluses)
+        risk_flags = list(risks) + ["добавлено вручную"]
+        link_status = (
+            LinkCheckStatus.FOUND_UNVERIFIED.value
+            if url.startswith(("http://", "https://"))
+            else LinkCheckStatus.NEEDED.value
+        )
+
+        result_id = create_search_result(
+            request_id=req.id,
+            title=title[:300],
+            url=url[:500],
+            source=source[:100],
+            price=price,
+            snippet=snippet[:1000],
+            score=55.0,
+            risk_flags=json.dumps(risk_flags, ensure_ascii=False),
+            status="APPROVED",
+            origin="alice",
+            sort_order=sort_order + offset,
+            price_verified=False,
+            link_check_status=link_status,
+        )
+        if not first_id:
+            first_id = result_id
+            first_title = title
+        found.append({
+            "name": title,
+            "price": item.get("price") or (str(price) if price else ""),
+            "source": source,
+            "url": url,
+            "note": snippet,
+        })
+
+    if not first_id:
+        raise ValueError("Не удалось найти название товара.")
 
     # Legacy-поле оставляем синхронным для уже созданных заявок.
-    found = json.loads(req.found_products) if req.found_products else []
-    found.append({"name": title, "price": price_str, "source": source, "url": url, "note": note})
     update_request(req.id, found_products=json.dumps(found, ensure_ascii=False))
-    return result_id, title
+    return first_id, first_title
 
 
 @router.message(Command("add_result"))
@@ -882,10 +913,10 @@ async def cmd_add_result(message: Message):
         await message.answer("Нет доступа.")
         return
     raw = (message.text or "").partition(" ")[2].strip()
-    request_part, separator, payload = raw.partition("|")
+    request_part, separator, payload = raw.partition(" ")
     if not separator or not request_part.strip().isdigit():
         await message.answer(
-            "Формат: <code>/add_result REQUEST_ID | Название | Цена | Магазин | Ссылка | Плюсы | Риски</code>",
+            "Формат: <code>/add_result REQUEST_ID текст карточки</code>",
             parse_mode="HTML",
         )
         return
@@ -894,7 +925,7 @@ async def cmd_add_result(message: Message):
         await message.answer("Заявка не найдена.")
         return
     try:
-        _, title = _save_manual_result(req, payload.strip())
+        _, title = _save_manual_result(req, payload.strip().lstrip("|").strip())
     except ValueError as exc:
         await message.answer(f"Не добавлено: {exc}")
         return
@@ -909,11 +940,8 @@ async def add_product_prompt(callback: CallbackQuery, state: FSMContext):
     await state.update_data(addprod_req_id=req_id)
     await state.set_state(AdminStates.adding_product)
     await callback.message.answer(
-        f"Заявка #{req_id}. Введи найденный вариант в формате:\n\n"
-        "<code>Название | Цена | Магазин | Ссылка</code>\n\n"
-        "Пример:\n"
-        "<code>Hisense 55E7NQ PRO | 37 000 ₽ | Мегамаркет | https://...</code>\n\n"
-        "Можно дополнительно дописать через | плюсы | риски.",
+        f"Заявка #{req_id}.\n\n"
+        "Вставь вариант любым текстом. Можно одной строкой или блоком. Я сам соберу карточку.",
         parse_mode="HTML"
     )
     await callback.answer()
@@ -1144,12 +1172,6 @@ async def _send_report(callback: CallbackQuery, req_id: int, force_without_links
         reply_markup=kb_admin_request(req_id, req.status),
         parse_mode="HTML"
     )
-
-
-@router.callback_query(F.data.startswith("sendreport_"))
-async def send_report(callback: CallbackQuery):
-    req_id = int(callback.data.split("_")[1])
-    await _send_report(callback, req_id)
 
 
 @router.callback_query(F.data.startswith("sendreportok_"))
@@ -1863,7 +1885,11 @@ async def market_check_promote(callback: CallbackQuery):
         status="APPROVED",
         origin="market_check",
         price_verified=True,
-        link_check_status="VERIFIED" if _link_status(mc.url) == "✅ есть" else "NEEDED",
+        link_check_status=(
+            LinkCheckStatus.VERIFIED.value
+            if _link_status(mc.url) == "✅ есть"
+            else LinkCheckStatus.NEEDED.value
+        ),
     )
 
     update_market_check(check_id, promoted_to_card_id=card_id)
@@ -2195,27 +2221,41 @@ async def alice_caution(callback: CallbackQuery):
     await callback.answer("Карточка помечена как осторожно / не брать")
 
 
-async def _move_alice_card(callback: CallbackQuery, direction: int) -> None:
+async def _navigate_alice_card(callback: CallbackQuery, direction: int) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
     result_id = int(callback.data.split("_")[1])
-    item = move_alice_result(result_id, direction)
-    if not item:
+    item = get_search_result(result_id)
+    if not item or item.origin != "alice":
         await callback.answer("Карточка не найдена", show_alert=True)
         return
-    await _refresh_alice_card(callback.message, item)
-    await callback.answer("Порядок обновлён")
+    cards = get_alice_results(item.request_id)
+    ids = [card.id for card in cards]
+    try:
+        current_index = ids.index(result_id)
+    except ValueError:
+        await callback.answer("Карточка не найдена", show_alert=True)
+        return
+    target_index = current_index + direction
+    if target_index < 0:
+        await callback.answer("Это первая карточка")
+        return
+    if target_index >= len(cards):
+        await callback.answer("Это последняя карточка")
+        return
+    await _refresh_alice_card(callback.message, cards[target_index])
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("aliceup_"))
 async def alice_up(callback: CallbackQuery):
-    await _move_alice_card(callback, -1)
+    await _navigate_alice_card(callback, -1)
 
 
 @router.callback_query(F.data.startswith("alicedown_"))
 async def alice_down(callback: CallbackQuery):
-    await _move_alice_card(callback, 1)
+    await _navigate_alice_card(callback, 1)
 
 
 @router.callback_query(F.data.startswith("alicesearch_"))
@@ -2282,7 +2322,7 @@ async def alice_edit_link_process(message: Message, state: FSMContext):
     update_search_result(
         result_id,
         url=new_url[:500],
-        link_check_status="FOUND_UNVERIFIED",
+        link_check_status=LinkCheckStatus.FOUND_UNVERIFIED.value,
     )
     await state.clear()
     item = get_search_result(result_id)
@@ -2312,7 +2352,7 @@ async def alice_check_link(callback: CallbackQuery):
     if warning:
         await callback.answer(f"{warning}. Исправьте ссылку или отметьте её неподходящей.", show_alert=True)
         return
-    update_search_result(result_id, link_check_status="VERIFIED")
+    update_search_result(result_id, link_check_status=LinkCheckStatus.VERIFIED.value)
     item = get_search_result(result_id)
     await _refresh_alice_card(callback.message, item)
     await callback.answer("Ссылка подтверждена админом")
@@ -2328,7 +2368,7 @@ async def alice_bad_link(callback: CallbackQuery):
     if not item or item.origin != "alice":
         await callback.answer("Карточка не найдена", show_alert=True)
         return
-    update_search_result(result_id, link_check_status="UNSUITABLE")
+    update_search_result(result_id, link_check_status=LinkCheckStatus.UNSUITABLE.value)
     item = get_search_result(result_id)
     await _refresh_alice_card(callback.message, item)
     await callback.answer("Ссылка помечена как неподходящая")

@@ -4,8 +4,27 @@
 он только даёт админу понятные предупреждения для ручной проверки.
 """
 import re
+from enum import Enum
 from statistics import median
 from urllib.parse import urlparse
+
+
+class LinkCheckStatus(str, Enum):
+    NEEDED = "NEEDED"
+    FOUND_UNVERIFIED = "FOUND_UNVERIFIED"
+    VERIFIED = "VERIFIED"
+    UNSUITABLE = "UNSUITABLE"
+
+
+def normalize_link_check_status(value: str | LinkCheckStatus | None) -> str:
+    """Возвращает единый статус ссылки для хранения в БД."""
+    if isinstance(value, LinkCheckStatus):
+        return value.value
+    text = (value or LinkCheckStatus.NEEDED.value).strip().upper()
+    try:
+        return LinkCheckStatus(text).value
+    except ValueError:
+        return LinkCheckStatus.NEEDED.value
 
 
 _STORE_DOMAINS = {

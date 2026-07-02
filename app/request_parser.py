@@ -6,12 +6,17 @@ from app.search_links import build_search_query
 
 def parse_budget(text: str) -> str:
     t = text.lower()
-    match = re.search(r"(\d+)\s*[кК]\b", t)
+    match = re.search(r"\b(\d{1,3})\s*[кКkK]\b", t)
     if match:
         return str(int(match.group(1)) * 1000)
-    match = re.search(r"(\d+)\s*тыс(?:яч|\.|и)?\.?\b", t)
+    match = re.search(r"\b(\d{1,3})\s*тыс(?:яч|\.|и)?\.?\b", t)
     if match:
         return str(int(match.group(1)) * 1000)
+    match = re.search(r"\b(\d{1,3})\s+(\d{3})\b", t)
+    if match:
+        value = int(match.group(1) + match.group(2))
+        if 1000 <= value <= 999999:
+            return str(value)
     match = re.search(r"\b(\d{4,6})\b", t)
     if match and 1000 <= int(match.group(1)) <= 999999:
         return match.group(1)
@@ -55,6 +60,7 @@ def parse_product_name(text: str) -> str:
     result = text.lower().strip()
     for pattern in (r"^нужен\s+", r"^хочу\s+", r"^ищу\s+", r"^посоветуйте\s+", r"^подскажите\s+", r"^порекомендуйте\s+", r"^мне\s+нужен\s+", r"^мне\s+хочется\s+", r"^дайте\s+", r"^найдите\s+", r"^какой\s+", r"^какую\s+", r"^какие\s+"):
         result = re.sub(pattern, "", result)
+    result = re.sub(r"\s*до\s+\d{1,3}\s+\d{3}\s*", " ", result)
     result = re.sub(r"\s*до\s+\d+\s*[кК]?\s*", " ", result)
     result = re.sub(r"\s*до\s+\d+\s*тыс.*?\s*", " ", result)
     result = re.sub(r"\s+в\s+[А-Яа-яЁё]+\s*$", " ", result)
