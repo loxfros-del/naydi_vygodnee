@@ -18,9 +18,12 @@ from app.db import Request
 VERIFIED_GOOD = "VERIFIED_GOOD"
 VERIFIED_OK = "VERIFIED_OK"
 PRICE_MISMATCH = "PRICE_MISMATCH"
+PRICE_MISSING = "PRICE_MISSING"
 UNAVAILABLE = "UNAVAILABLE"
+REMOVED_LISTING = "REMOVED_LISTING"
 NOT_PRODUCT_PAGE = "NOT_PRODUCT_PAGE"
 WRONG_PRODUCT = "WRONG_PRODUCT"
+BAD_ENCODING = "BAD_ENCODING"
 REJECTED = "REJECTED"
 VERIFY_ERROR = "VERIFY_ERROR"
 OVER_BUDGET_SOFT = "OVER_BUDGET_SOFT"
@@ -42,11 +45,17 @@ class VerifiedCandidate:
 
 UNAVAILABLE_MARKERS = (
     "товар закончился", "этот товар закончился", "нет в наличии",
-    "товар недоступен", "нет в продаже", "снят с продажи", "распродан",
-    "похожие предложения", "out of stock", "not available",
+    "товара нет в наличии", "товар недоступен", "данный товар недоступен",
+    "нет в продаже", "снят с продажи", "распродан", "скоро снова поступит",
+    "скоро поступит", "сообщить о поступлении", "out of stock", "not available",
+)
+REMOVED_LISTING_MARKERS = (
+    "объявление снято с публикации", "объявление недоступно",
+    "страница не найдена", "ошибка 404", "страница 404", "такой страницы нет",
 )
 AVAILABLE_MARKERS = (
-    "в наличии", "доступен", "добавить в корзину", "купить", "доставка",
+    "в наличии", "доступен", "добавить в корзину", "в корзину", "купить",
+    "оформить заказ", "доставка",
 )
 BAD_URL_PARTS = (
     "/search", "/catalog/0/search", "/category/", "/categories/", "/blog/",
@@ -70,6 +79,8 @@ TV_BRANDS = (
     "sber", "sony", "philips", "asano", "hyundai", "yandex", "яндекс",
 )
 TV_FEATURE_WORDS = ("4k", "uhd", "ultra hd", "qled", "oled", "hdr", "smart tv")
+PS5_POSITIVE_WORDS = ("120 гц", "120hz", "144 гц", "144hz", "hdmi 2.1", "vrr", "mini led", "qled", "oled")
+PS5_60HZ_RE = re.compile(r"\b60\s*(?:гц|hz)\b")
 WRONG_TV_PRODUCT_WORDS = (
     "монитор", "проектор", "кронштейн", "пульт", "кабель", "подставка",
     "приставка", "консоль", "игровая приставка", "ps4", "xbox",
@@ -90,6 +101,7 @@ PRICE_GOOD_CONTEXT = (
     "цена", "price", "товар", "product", "купить", "корзин",
     "sale", "current", "final", "card-price",
 )
+MOJIBAKE_MARKERS = ("Ð", "Ñ", "Ð¢", "Ðµ", "Рџ", "�")
 
 
 def _timeout() -> int:
@@ -136,6 +148,40 @@ def _normalise_space(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def _has_bad_encoding(text: str) -> bool:
+    if not text:
+        return False
+    if any(marker in text for marker in MOJIBAKE_MARKERS):
+        return True
+    return text.count("�") >= 2
+
+
+def _repair_mojibake(text: str) -> tuple[str, bool]:
+    """Возвращает исправленный текст и флаг оставшейся битой кодировки."""
+    if not text or not _has_bad_encoding(text):
+        return text or "", False
+    attempts = []
+    for encoding in ("latin1", "cp1251"):
+        try:
+            attempts.append(text.encode(encoding).decode("utf-8"))
+        except UnicodeError:
+            continue
+    attempts.append(text)
+    best = min(attempts, key=lambda value: sum(value.count(marker) for marker in MOJIBAKE_MARKERS))
+    return best, _has_bad_encoding(best)
+
+
+def _repair_candidate_text(candidate: Any) -> bool:
+    bad = False
+    for attr in ("title", "snippet"):
+        value = str(getattr(candidate, attr, "") or "")
+        fixed, still_bad = _repair_mojibake(value)
+        if fixed and fixed != value:
+            setattr(candidate, attr, _normalise_space(fixed))
+        bad = bad or still_bad
+    return bad
+
+
 def _price_int(value: Any) -> Optional[int]:
     if value is None:
         return None
@@ -167,6 +213,8 @@ def _safe_get(url: str) -> requests.Response:
                 time.sleep(0.25)
                 continue
             response.raise_for_status()
+            if not response.encoding or response.encoding.lower() in {"iso-8859-1", "windows-1252"}:
+                response.encoding = response.apparent_encoding or "utf-8"
             return response
         except requests.HTTPError:
             raise
@@ -336,6 +384,26 @@ def extract_verified_price(source: str, html: str, text: str, title: str) -> int
 
 def extract_availability(source: str, html: str, text: str) -> str:
     lowered = _normalise_space(text or BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)).lower()
+    source = source or ""
+    if any(marker in lowered for marker in REMOVED_LISTING_MARKERS):
+        return REMOVED_LISTING
+    if source == "avito_search" and any(marker in lowered for marker in (
+        "объявление снято с публикации", "объявление недоступно", "страница не найдена", "продано",
+    )):
+        return REMOVED_LISTING
+    if source == "megamarket_search":
+        if any(marker in lowered for marker in (
+            "нет в наличии", "сообщить о поступлении", "товар закончился", "данный товар недоступен",
+        )):
+            return "UNAVAILABLE"
+        if "похожие товары" in lowered and not any(marker in lowered for marker in ("добавить в корзину", "в корзину", "купить")):
+            return "UNAVAILABLE"
+    if source == "mvideo_search" and any(marker in lowered for marker in (
+        "товар закончился", "товара нет в наличии", "нет в наличии", "скоро поступит",
+    )):
+        return "UNAVAILABLE"
+    if source == "citilink_search" and any(marker in lowered for marker in UNAVAILABLE_MARKERS):
+        return "UNAVAILABLE"
     if any(marker in lowered for marker in UNAVAILABLE_MARKERS):
         return "UNAVAILABLE"
     if any(marker in lowered for marker in AVAILABLE_MARKERS):
@@ -346,6 +414,11 @@ def extract_availability(source: str, html: str, text: str) -> str:
 def _is_tv_request(req: Request) -> bool:
     product = f"{req.product_name or req.product} {req.original_query}".lower()
     return "телевизор" in product or re.search(r"\btv\b", product) is not None
+
+
+def _is_ps5_tv_request(req: Request) -> bool:
+    text = f"{req.use_case or req.purpose} {req.original_query}".lower()
+    return _is_tv_request(req) and "ps5" in text
 
 
 def _wrong_product(candidate: Any, req: Request) -> bool:
@@ -373,20 +446,30 @@ def classify_verified_candidate(candidate: Any, req: Request) -> str:
     if _wrong_product(candidate, req):
         return WRONG_PRODUCT
     availability = getattr(candidate, "availability", "") or ""
+    if availability == REMOVED_LISTING:
+        return REMOVED_LISTING
     if availability == "UNAVAILABLE":
         return UNAVAILABLE
-    price = getattr(candidate, "price", None)
+    source = str(getattr(candidate, "source", "") or _source_from_url(getattr(candidate, "url", "")))
+    text = f"{getattr(candidate, 'title', '')} {getattr(candidate, 'snippet', '')}".lower()
     budget = _budget_value(req)
+    if _is_ps5_tv_request(req) and budget and budget >= 25_000 and any(word in text for word in ("full hd", "fullhd", "фулл hd", "1080p")):
+        return REJECTED
+    price = getattr(candidate, "price", None)
+    if price is None:
+        return PRICE_MISSING
     if price and budget:
         if price > budget * 1.15:
             return OVER_BUDGET_HARD
         if price > budget:
             return OVER_BUDGET_SOFT
-    if price and _looks_like_product_url(getattr(candidate, "url", "")):
+    if not _looks_like_product_url(getattr(candidate, "url", "")):
+        return NOT_PRODUCT_PAGE
+    if availability == "AVAILABLE":
         return VERIFIED_GOOD
-    if _looks_like_product_url(getattr(candidate, "url", "")):
+    if source in {"citilink_search", "avito_search"} and availability == "UNKNOWN":
         return VERIFIED_OK
-    return NOT_PRODUCT_PAGE
+    return REJECTED
 
 
 def _apply_verified(candidate: Any, verified: VerifiedCandidate) -> VerifiedCandidate:
@@ -434,6 +517,9 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
     """Проверяет один кандидат. Любая ошибка превращается в VERIFY_ERROR."""
     url = str(getattr(candidate, "url", "") or "")
     source = str(getattr(candidate, "source", "") or _source_from_url(url))
+    if _repair_candidate_text(candidate):
+        verified = VerifiedCandidate(candidate, BAD_ENCODING, reason="битая кодировка title/snippet")
+        return _apply_verified(candidate, verified)
     if not _looks_like_product_url(url):
         verified = VerifiedCandidate(candidate, NOT_PRODUCT_PAGE, reason="не карточка товара")
         return _apply_verified(candidate, verified)
@@ -444,8 +530,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
     try:
         response = _safe_get(url)
     except Exception as exc:
-        # Если страница не открылась, не падаем и не делаем GOOD.
-        keep = bool(getattr(candidate, "price", None) and getattr(candidate, "quality", "") in {"GOOD", "OK"})
+        # Если страница не открылась, не падаем, но не показываем как проверенный товар.
         verified = VerifiedCandidate(
             candidate,
             VERIFY_ERROR,
@@ -455,7 +540,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
             reason=f"ошибка открытия сайта: {str(exc)[:180]}",
             risk_flags=["страница не проверена"],
             html_loaded=False,
-            keep_for_admin=keep,
+            keep_for_admin=False,
         )
         return _apply_verified(candidate, verified)
 
@@ -463,6 +548,10 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(" ", strip=True)
     page_title = _page_title(soup, getattr(candidate, "title", ""))
+    page_title, bad_title = _repair_mojibake(page_title)
+    if bad_title:
+        verified = VerifiedCandidate(candidate, BAD_ENCODING, title=page_title, reason="битая кодировка title", html_loaded=True)
+        return _apply_verified(candidate, verified)
     if not is_valid_product_page(response.url or url, html, page_title):
         verified = VerifiedCandidate(candidate, NOT_PRODUCT_PAGE, title=page_title, reason="не карточка товара", html_loaded=True)
         return _apply_verified(candidate, verified)
@@ -470,6 +559,12 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
     availability = extract_availability(source, html, text)
     price = extract_verified_price(source, html, text, page_title)
     risks: list[str] = []
+    if availability == REMOVED_LISTING:
+        verified = VerifiedCandidate(
+            candidate, REMOVED_LISTING, price=price, title=page_title,
+            availability=availability, reason="объявление/страница недоступны", html_loaded=True,
+        )
+        return _apply_verified(candidate, verified)
     if availability == "UNAVAILABLE":
         verified = VerifiedCandidate(
             candidate, UNAVAILABLE, price=price, title=page_title,
@@ -477,11 +572,24 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
         )
         return _apply_verified(candidate, verified)
     if price is None:
-        risks.append("цена не подтверждена")
+        verified = VerifiedCandidate(
+            candidate, PRICE_MISSING, title=page_title,
+            availability=availability, reason="цена не подтверждена", html_loaded=True,
+        )
+        return _apply_verified(candidate, verified)
 
     old_price = getattr(candidate, "price", None)
     if old_price and price and abs(old_price - price) / max(price, 1) > 0.25:
-        risks.append(f"цена уточнена по странице: было {old_price}, стало {price}")
+        verified = VerifiedCandidate(
+            candidate,
+            PRICE_MISMATCH,
+            price=price,
+            title=page_title,
+            availability=availability,
+            reason=f"цена отличается от выдачи: было {old_price}, стало {price}",
+            html_loaded=True,
+        )
+        return _apply_verified(candidate, verified)
 
     temp = type("VerifiedTemp", (), {})()
     temp.url = response.url or url
@@ -489,12 +597,20 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
     temp.snippet = getattr(candidate, "snippet", "")
     temp.price = price
     temp.availability = availability
+    temp.source = source
     temp.verify_status = ""
     verify_status = classify_verified_candidate(temp, req)
 
     if getattr(candidate, "source", "") == "avito_search" and not req.is_used_allowed and verify_status == VERIFIED_GOOD:
         verify_status = VERIFIED_OK
         risks.extend(["проверить продавца", "проверить город", "проверить состояние", "проверить отзывы", "б/у не разрешено клиентом"])
+
+    if _is_ps5_tv_request(req):
+        combined = f"{page_title} {getattr(candidate, 'snippet', '')}".lower()
+        if any(word in combined for word in PS5_POSITIVE_WORDS):
+            risks.append("есть признаки, полезные для PS5")
+        if PS5_60HZ_RE.search(combined):
+            risks.append("60 Гц, для PS5 не идеал")
 
     keep = verify_status in {VERIFIED_GOOD, VERIFIED_OK, OVER_BUDGET_SOFT}
     if verify_status == OVER_BUDGET_HARD:

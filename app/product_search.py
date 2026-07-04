@@ -18,10 +18,12 @@ import requests
 
 from app.config import settings
 from app.candidate_verifier import (
+    BAD_ENCODING,
     OVER_BUDGET_SOFT,
+    PRICE_MISSING,
+    REMOVED_LISTING,
     VERIFIED_GOOD,
     VERIFIED_OK,
-    VERIFY_ERROR,
     verify_candidate,
     verify_candidates,
 )
@@ -108,6 +110,9 @@ class SearchCollection:
         "checked": 0,
         "VERIFY_ERROR": 0,
         "UNAVAILABLE": 0,
+        "REMOVED_LISTING": 0,
+        "PRICE_MISSING": 0,
+        "BAD_ENCODING": 0,
         "PRICE_MISMATCH": 0,
         "WRONG_PRODUCT": 0,
         "NOT_PRODUCT_PAGE": 0,
@@ -792,14 +797,27 @@ def score_result(
             flags.append("4K не подтверждён")
         if re.search(r"\b(43|50|55|65)\s*(?:\"|дюйм|''|led|qled|uhd|4k|см)\b", text):
             score += 10
-        if any(word in text for word in ("full hd", "фулл hd", "1080p")):
+        if any(word in text for word in ("full hd", "fullhd", "фулл hd", "1080p")):
             score -= 20
+            if _is_ps5_tv(req) and budget and budget >= 25_000:
+                flags.append("Full HD для PS5 не подходит")
         if not has_model:
             score -= 30
             flags.append("нет признаков конкретной модели")
         if _is_ps5_tv(req) and "hdmi" not in text:
             flags.append("HDMI не указан")
-        # Для PS5: 60 Гц допустимо, не штрафуем.
+        if _is_ps5_tv(req):
+            if any(word in text for word in ("120 гц", "120hz", "144 гц", "144hz")):
+                score += 20
+            if "hdmi 2.1" in text:
+                score += 20
+            if "vrr" in text:
+                score += 12
+            if any(word in text for word in ("qled", "oled", "mini led")):
+                score += 10
+            if re.search(r"\b60\s*(?:гц|hz)\b", text):
+                score -= 8
+                flags.append("60 Гц, для PS5 не идеал")
         # 75″ и больше не должны автоматически становиться лучшим выбором.
         if _is_ps5_tv(req) and re.search(r"\b(75|77|85|98)\s*(?:\"|дюйм)", text):
             score -= 15
@@ -1133,7 +1151,6 @@ def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, 
         VERIFIED_GOOD: 0,
         VERIFIED_OK: 1,
         OVER_BUDGET_SOFT: 2,
-        VERIFY_ERROR: 5,
     }
     budget = _budget_value(req)
     price = candidate.price or 0
@@ -1181,7 +1198,7 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
     for item in verified:
         status = item.verify_status
         stats[status] = stats.get(status, 0) + 1
-        if item.keep_for_admin:
+        if item.keep_for_admin and item.candidate.price:
             kept.append(item.candidate)
         else:
             collection.verified_rejections.append(item)
@@ -1200,6 +1217,9 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
         (
             f"VERIFY_ERROR={stats.get('VERIFY_ERROR', 0)}; "
             f"UNAVAILABLE={stats.get('UNAVAILABLE', 0)}; "
+            f"{REMOVED_LISTING}={stats.get(REMOVED_LISTING, 0)}; "
+            f"{PRICE_MISSING}={stats.get(PRICE_MISSING, 0)}; "
+            f"{BAD_ENCODING}={stats.get(BAD_ENCODING, 0)}; "
             f"PRICE_MISMATCH={stats.get('PRICE_MISMATCH', 0)}; "
             f"WRONG_PRODUCT={stats.get('WRONG_PRODUCT', 0)}; "
             f"NOT_PRODUCT_PAGE={stats.get('NOT_PRODUCT_PAGE', 0)}; "
@@ -1319,7 +1339,7 @@ def _run_compare_search(req: Request, candidates: list[ProductCandidate], attemp
                 if normalized_url in existing_urls:
                     continue
                 verified = verify_candidate(comp, req)
-                if not verified.keep_for_admin or _verified_status(comp) not in {VERIFIED_GOOD, VERIFIED_OK, OVER_BUDGET_SOFT}:
+                if not verified.keep_for_admin or not comp.price or _verified_status(comp) not in {VERIFIED_GOOD, VERIFIED_OK, OVER_BUDGET_SOFT}:
                     continue
                 existing_urls.add(normalized_url)
                 # Если цена ниже, чем у оригинального кандидата с тем же ключом

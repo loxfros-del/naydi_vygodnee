@@ -17,6 +17,12 @@ if str(ROOT) not in sys.path:
 from app.db import Request
 from app.request_parser import full_parse
 from app.product_search import collect_product_candidates, generate_search_queries
+from app.candidate_verifier import (
+    BAD_ENCODING,
+    PRICE_MISSING,
+    REMOVED_LISTING,
+    UNAVAILABLE,
+)
 
 
 def main() -> int:
@@ -70,17 +76,18 @@ def main() -> int:
     print("GOOD/OK ДАЛИ: " + (", ".join(productive_sources) if productive_sources else "нет"))
     print(
         "\nВЕРИФИКАЦИЯ СТРАНИЦ: "
-        f"Проверено страниц={verify_stats.get('checked', 0)}; "
-        f"VERIFY_ERROR={verify_stats.get('VERIFY_ERROR', 0)}; "
-        f"UNAVAILABLE={verify_stats.get('UNAVAILABLE', 0)}; "
-        f"PRICE_MISMATCH={verify_stats.get('PRICE_MISMATCH', 0)}; "
-        f"WRONG_PRODUCT={verify_stats.get('WRONG_PRODUCT', 0)}; "
-        f"NOT_PRODUCT_PAGE={verify_stats.get('NOT_PRODUCT_PAGE', 0)}; "
-        f"VERIFIED_GOOD={verify_stats.get('VERIFIED_GOOD', 0)}; "
-        f"VERIFIED_OK={verify_stats.get('VERIFIED_OK', 0)}; "
-        f"OVER_BUDGET_SOFT={verify_stats.get('OVER_BUDGET_SOFT', 0)}; "
-        f"OVER_BUDGET_HARD={verify_stats.get('OVER_BUDGET_HARD', 0)}; "
-        f"Сохранено для админа={verify_stats.get('saved', 0)}"
+        f"checked={verify_stats.get('checked', 0)}; "
+        f"verified_good={verify_stats.get('VERIFIED_GOOD', 0)}; "
+        f"verified_ok={verify_stats.get('VERIFIED_OK', 0)}; "
+        f"unavailable={verify_stats.get(UNAVAILABLE, 0)}; "
+        f"removed_listing={verify_stats.get(REMOVED_LISTING, 0)}; "
+        f"price_missing={verify_stats.get(PRICE_MISSING, 0)}; "
+        f"bad_encoding={verify_stats.get(BAD_ENCODING, 0)}; "
+        f"over_budget_soft={verify_stats.get('OVER_BUDGET_SOFT', 0)}; "
+        f"over_budget_hard={verify_stats.get('OVER_BUDGET_HARD', 0)}; "
+        f"rejected={verify_stats.get('REJECTED', 0)}; "
+        f"verify_error={verify_stats.get('VERIFY_ERROR', 0)}; "
+        f"saved_for_admin={verify_stats.get('saved', 0)}"
     )
 
     budget = int(parsed["budget"]) if str(parsed.get("budget", "")).isdigit() else None
@@ -89,7 +96,7 @@ def main() -> int:
         1 for item in raw_candidates
         if item.price and budget and item.price > budget * 1.15
     )
-    print(f"\nКАНДИДАТОВ К СОХРАНЕНИЮ: {len(saved_candidates)}")
+    print(f"\nОсновные кандидаты для админа: {len(saved_candidates)}")
     if budget:
         print(f"Среди RAW — в бюджете: {in_budget}; сильно выше бюджета: {strongly_over_budget}")
     if verify_stats.get("VERIFIED_GOOD", 0) + verify_stats.get("VERIFIED_OK", 0) < 3:
@@ -128,8 +135,13 @@ def main() -> int:
         or "/articles/" in item.url.lower()
         or "/article/" in item.url.lower()
         or "journal.citilink.ru" in item.url.lower()
+        or item.price is None
+        or getattr(item, "availability", "") in {"UNAVAILABLE", REMOVED_LISTING}
         or item.quality == "TRASH"
-        or getattr(item, "verify_status", "") in {"UNAVAILABLE", "PRICE_MISMATCH", "NOT_PRODUCT_PAGE", "WRONG_PRODUCT", "REJECTED"}
+        or getattr(item, "verify_status", "") in {
+            "UNAVAILABLE", REMOVED_LISTING, PRICE_MISSING, BAD_ENCODING,
+            "PRICE_MISMATCH", "NOT_PRODUCT_PAGE", "WRONG_PRODUCT", "REJECTED", "VERIFY_ERROR",
+        }
         or any("обзор/подборка" in flag or "страница категории" in flag for flag in item.risk_flags)
     ]
     print("\nПРОВЕРКИ")
