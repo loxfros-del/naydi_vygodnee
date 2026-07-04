@@ -32,9 +32,9 @@ def main() -> int:
     parsed = full_parse(raw_query)
     request = Request(
         id=0,
-        product=parsed["product_name"],
-        purpose=parsed["use_case"],
-        criteria=parsed["important_criteria"],
+        user_id=0,
+        username="test",
+        product=parsed.get("product_name", ""),
         **parsed,
     )
 
@@ -46,30 +46,99 @@ def main() -> int:
 
     collection = collect_product_candidates(request, max_results=15)
     stats = collection.quality_stats
+    verify_stats = collection.verify_stats
+    raw_candidates = collection.raw_candidates
+    saved_candidates = collection.candidates
+    trash = [item for item in raw_candidates if item.quality == "TRASH"]
+    good = [item for item in raw_candidates if item.quality == "GOOD"]
+    ok = [item for item in raw_candidates if item.quality == "OK"]
+    weak = [item for item in raw_candidates if item.quality == "WEAK"]
     print(
         "\nКАЧЕСТВО ВЫДАЧИ: "
-        f"RAW={len(collection.raw_candidates)}; категории={stats['categories']}; "
-        f"статьи={stats['articles']}; не тот товар={stats['wrong_type']}; "
-        f"NORMAL={stats['normal']}; WEAK={stats['weak']}"
+        f"RAW={len(raw_candidates)}; TRASH={len(trash)}; "
+        f"GOOD={len(good)}; OK={len(ok)}; WEAK={len(weak)}; "
+        f"сохранено={len(saved_candidates)}"
     )
-    normal = [item for item in collection.candidates if item.status == "CANDIDATE"]
-    weak = [item for item in collection.candidates if item.status == "WEAK_CANDIDATE"]
+    print(
+        "ФИЛЬТРЫ: "
+        f"категории={stats['categories']}; статьи={stats['articles']}; "
+        f"не тот товар={stats['wrong_type']}"
+    )
+    failed_sources = sorted({attempt.source for attempt in collection.attempts if attempt.status == "ERROR"})
+    productive_sources = sorted({item.source for item in raw_candidates if item.quality in {"GOOD", "OK"}})
+    print("УПАЛИ ИСТОЧНИКИ: " + (", ".join(failed_sources) if failed_sources else "нет"))
+    print("GOOD/OK ДАЛИ: " + (", ".join(productive_sources) if productive_sources else "нет"))
+    print(
+        "\nВЕРИФИКАЦИЯ СТРАНИЦ: "
+        f"Проверено страниц={verify_stats.get('checked', 0)}; "
+        f"VERIFY_ERROR={verify_stats.get('VERIFY_ERROR', 0)}; "
+        f"UNAVAILABLE={verify_stats.get('UNAVAILABLE', 0)}; "
+        f"PRICE_MISMATCH={verify_stats.get('PRICE_MISMATCH', 0)}; "
+        f"WRONG_PRODUCT={verify_stats.get('WRONG_PRODUCT', 0)}; "
+        f"NOT_PRODUCT_PAGE={verify_stats.get('NOT_PRODUCT_PAGE', 0)}; "
+        f"VERIFIED_GOOD={verify_stats.get('VERIFIED_GOOD', 0)}; "
+        f"VERIFIED_OK={verify_stats.get('VERIFIED_OK', 0)}; "
+        f"OVER_BUDGET_SOFT={verify_stats.get('OVER_BUDGET_SOFT', 0)}; "
+        f"OVER_BUDGET_HARD={verify_stats.get('OVER_BUDGET_HARD', 0)}; "
+        f"Сохранено для админа={verify_stats.get('saved', 0)}"
+    )
+
     budget = int(parsed["budget"]) if str(parsed.get("budget", "")).isdigit() else None
-    in_budget = sum(1 for item in collection.raw_candidates if item.price and budget and item.price <= budget)
+    in_budget = sum(1 for item in raw_candidates if item.price and budget and item.price <= budget)
     strongly_over_budget = sum(
-        1 for item in collection.raw_candidates
+        1 for item in raw_candidates
         if item.price and budget and item.price > budget * 1.15
     )
-    print(f"\nКАНДИДАТОВ: {len(collection.candidates)} (NORMAL={len(normal)}, WEAK={len(weak)})")
+    print(f"\nКАНДИДАТОВ К СОХРАНЕНИЮ: {len(saved_candidates)}")
     if budget:
         print(f"Среди RAW — в бюджете: {in_budget}; сильно выше бюджета: {strongly_over_budget}")
-    for index, item in enumerate(normal + weak, 1):
+    if verify_stats.get("VERIFIED_GOOD", 0) + verify_stats.get("VERIFIED_OK", 0) < 3:
+        print("Нормальных проверенных вариантов мало. Нужно ручное уточнение / Алиса / Gemini.")
+    for index, item in enumerate(saved_candidates, 1):
         price = f"{item.price} ₽" if item.price else "цена не найдена"
         if item.price and budget and item.price > budget:
             price += " — выше бюджета"
         risks = ", ".join(item.risk_flags) if item.risk_flags else "нет"
-        label = "WEAK" if item.status == "WEAK_CANDIDATE" else "NORMAL"
-        print(f"{index}. [{label}] {item.title}\n   {item.source} | {price} | score {int(round(item.score))}\n   {item.url}\n   причины: {risks}")
+        verify_status = getattr(item, "verify_status", item.quality)
+        print(
+            f"{index}. [{verify_status}] {item.title}\n"
+            f"   {item.source} / {item.source_type} | {price} | score {int(round(item.score))}\n"
+            f"   {item.url}\n"
+            f"   причины: {risks}"
+        )
+
+    if collection.verified_rejections:
+        print("\nDEBUG ОТБРАКОВКИ VERIFY")
+        for item in collection.verified_rejections[:20]:
+            cand = item.candidate
+            print(
+                f"- [{item.verify_status}] {cand.source}: {cand.title[:120]}\n"
+                f"  причина: {item.reason or ', '.join(item.risk_flags) or item.verify_status}\n"
+                f"  {cand.url}"
+            )
+
+    bad_saved = [
+        item for item in saved_candidates
+        if "bing.com/aclick" in item.url.lower()
+        or "amazon." in item.url.lower()
+        or "ebay." in item.url.lower()
+        or "/otzyv" in item.url.lower()
+        or "/reviews" in item.url.lower()
+        or "/review" in item.url.lower()
+        or "/articles/" in item.url.lower()
+        or "/article/" in item.url.lower()
+        or "journal.citilink.ru" in item.url.lower()
+        or item.quality == "TRASH"
+        or getattr(item, "verify_status", "") in {"UNAVAILABLE", "PRICE_MISMATCH", "NOT_PRODUCT_PAGE", "WRONG_PRODUCT", "REJECTED"}
+        or any("обзор/подборка" in flag or "страница категории" in flag for flag in item.risk_flags)
+    ]
+    print("\nПРОВЕРКИ")
+    if bad_saved:
+        print("FAIL: в кандидатах есть реклама/статьи/категории/иностранный мусор:")
+        for item in bad_saved:
+            print(f"- [{item.quality}] {item.title} — {item.url}")
+    else:
+        print("OK: в кандидатах нет Bing Ads, Amazon/eBay, статей, категорий и TRASH.")
 
     print("\nDEBUG ПО ИСТОЧНИКАМ")
     for attempt in collection.attempts:
@@ -84,7 +153,7 @@ def main() -> int:
         print("\nРУЧНЫЕ FALLBACK-ССЫЛКИ (не кандидаты)")
         for link in collection.manual_links:
             print(f"- {link['site']}: {link['url']}")
-    return 0
+    return 1 if bad_saved else 0
 
 
 if __name__ == "__main__":

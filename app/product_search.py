@@ -10,11 +10,21 @@ from datetime import datetime
 import json
 import logging
 import re
+import time
 from typing import Iterable, Optional
 from urllib.parse import urlparse, urlunparse, urlencode
 
 import requests
 
+from app.config import settings
+from app.candidate_verifier import (
+    OVER_BUDGET_SOFT,
+    VERIFIED_GOOD,
+    VERIFIED_OK,
+    VERIFY_ERROR,
+    verify_candidate,
+    verify_candidates,
+)
 from app.db import (
     Request,
     create_search_attempt,
@@ -50,6 +60,15 @@ class ProductCandidate:
     score: float = 0.0
     risk_flags: list[str] = field(default_factory=list)
     status: str = "CANDIDATE"
+    quality: str = "WEAK"
+    source_type: str = "web"
+    origin: str = "auto"
+    rating: Optional[float] = None
+    reviews_count: Optional[int] = None
+    seller: str = ""
+    city: str = ""
+    availability: str = ""
+    description: str = ""
     created_at: str = ""
 
 
@@ -71,32 +90,79 @@ class SearchCollection:
     raw_candidates: list[ProductCandidate] = field(default_factory=list)
     attempts: list[SearchAttemptData] = field(default_factory=list)
     manual_links: list[dict] = field(default_factory=list)
+    verified_rejections: list[object] = field(default_factory=list)
     quality_stats: dict[str, int] = field(default_factory=lambda: {
+        "raw": 0,
         "total_found": 0,
+        "trash": 0,
+        "good": 0,
+        "ok": 0,
         "categories": 0,
         "articles": 0,
         "wrong_type": 0,
         "weak": 0,
         "normal": 0,
+        "saved": 0,
+    })
+    verify_stats: dict[str, int] = field(default_factory=lambda: {
+        "checked": 0,
+        "VERIFY_ERROR": 0,
+        "UNAVAILABLE": 0,
+        "PRICE_MISMATCH": 0,
+        "WRONG_PRODUCT": 0,
+        "NOT_PRODUCT_PAGE": 0,
+        "REJECTED": 0,
+        "VERIFIED_GOOD": 0,
+        "VERIFIED_OK": 0,
+        "OVER_BUDGET_SOFT": 0,
+        "OVER_BUDGET_HARD": 0,
+        "saved": 0,
     })
 
 
+@dataclass(frozen=True)
+class SearchSourceDefinition:
+    key: str
+    source: str
+    display_name: str
+    domains: tuple[str, ...]
+    source_type: str
+    enabled_attr: str
+    priority: int
+
+
+QUALITY_GOOD = "GOOD"
+QUALITY_OK = "OK"
+QUALITY_WEAK = "WEAK"
+QUALITY_TRASH = "TRASH"
+QUALITY_TO_STATUS = {
+    QUALITY_GOOD: "CANDIDATE",
+    QUALITY_OK: "CANDIDATE",
+    QUALITY_WEAK: "WEAK_CANDIDATE",
+    QUALITY_TRASH: "REJECTED_AUTO",
+}
+
+
+SEARCH_SOURCES: tuple[SearchSourceDefinition, ...] = (
+    SearchSourceDefinition("ozon", "ozon_search", "Ozon", ("ozon.ru",), "marketplace", "ENABLE_SEARCH_OZON", 1),
+    SearchSourceDefinition("yandex_market", "yandex_market_search", "Яндекс Маркет", ("market.yandex.ru",), "marketplace", "ENABLE_SEARCH_YANDEX_MARKET", 1),
+    SearchSourceDefinition("wildberries", "wildberries", "Wildberries", ("wildberries.ru",), "marketplace_api", "ENABLE_SEARCH_WILDBERRIES", 0),
+    SearchSourceDefinition("avito", "avito_search", "Avito", ("avito.ru",), "classifieds", "ENABLE_SEARCH_AVITO", 2),
+    SearchSourceDefinition("dns", "dns_search", "DNS", ("dns-shop.ru",), "retail", "ENABLE_SEARCH_DNS", 1),
+    SearchSourceDefinition("mvideo", "mvideo_search", "М.Видео", ("mvideo.ru",), "retail", "ENABLE_SEARCH_MVIDEO", 1),
+    SearchSourceDefinition("citilink", "citilink_search", "Ситилинк", ("citilink.ru",), "retail", "ENABLE_SEARCH_CITILINK", 1),
+    SearchSourceDefinition("megamarket", "megamarket_search", "Мегамаркет", ("megamarket.ru",), "marketplace", "ENABLE_SEARCH_MEGAMARKET", 1),
+)
 
 MARKETPLACE_SOURCES = {
-    "wildberries.ru": "wildberries",
-    "ozon.ru": "ozon_search",
-    "market.yandex.ru": "yandex_market_search",
-    "dns-shop.ru": "dns_search",
-    "mvideo.ru": "mvideo_search",
-    "avito.ru": "avito_search",
+    domain: source.source
+    for source in SEARCH_SOURCES
+    for domain in source.domains
 }
-SITE_SOURCES = (
-    ("ozon.ru", "ozon_search"),
-    ("market.yandex.ru", "yandex_market_search"),
-    ("dns-shop.ru", "dns_search"),
-    ("mvideo.ru", "mvideo_search"),
-    ("avito.ru", "avito_search"),
-)
+SITE_SOURCES = tuple((source.domains[0], source.source) for source in SEARCH_SOURCES if source.key != "wildberries")
+SOURCE_TYPE_BY_SOURCE = {source.source: source.source_type for source in SEARCH_SOURCES}
+SOURCE_PRIORITY = {source.source: source.priority for source in SEARCH_SOURCES}
+TRUSTED_PRODUCT_SOURCES = {source.source for source in SEARCH_SOURCES}
 KNOWN_TV_BRANDS = ("tcl", "hisense", "haier", "lg", "samsung", "xiaomi", "tuvio", "sber", "sony", "philips", "asano")
 # Ориентир для score. Низкий score переводит товарную карточку в WEAK,
 # а не в REJECTED_AUTO: администратор должен иметь возможность её проверить.
@@ -108,10 +174,21 @@ COMPARE_SITES = (
     ("wildberries.ru", "wildberries"),
     ("dns-shop.ru", "dns_search"),
     ("mvideo.ru", "mvideo_search"),
+    ("citilink.ru", "citilink_search"),
+    ("megamarket.ru", "megamarket_search"),
 )
 # Иностранные домены производителей: их витрины/каталоги не являются
 # карточкой товара для покупки в РФ.
 FOREIGN_VENDOR_DOMAINS = ("tcl.com", "lg.com", "samsung.com", "sony.com", "philips.com", "hisense.com", "haier.com")
+FOREIGN_SHOP_DOMAINS = (
+    "amazon.com", "amazon.de", "amazon.co.uk", "ebay.com", "ebay.co.uk",
+    "walmart.com", "target.com", "bestbuy.com", "newegg.com", "alibaba.com",
+    "aliexpress.com", "temu.com",
+)
+AD_REDIRECT_DOMAINS = (
+    "bing.com", "googleadservices.com", "googleads.g.doubleclick.net",
+    "doubleclick.net", "yabs.yandex.ru",
+)
 NON_PURCHASE_URL_MARKERS = {
     "/opinion/": "страница мнений/отзывов",
     "/reviews/": "страница отзывов",
@@ -122,22 +199,79 @@ NON_PURCHASE_URL_MARKERS = {
     "/support": "страница поддержки",
     "/manual": "инструкция, не страница покупки",
     "/compare": "страница сравнения",
+    "/search": "страница поиска",
+    "/articles/": "статья, не карточка товара",
 }
 CATEGORY_MARKERS = (
     "купить по низкой цене", "купить на ozon", "купить на яндекс маркете",
     "телевизоры 4k купить", "каталог", "все товары", "низкие цены",
     "большой ассортимент", "быстрая доставка", "оригинальные товары",
-    "распродажа", "скидки и акции",
+    "распродажа", "скидки и акции", "найдено товаров", "результаты поиска",
 )
 ARTICLE_MARKERS = (
     "лучшие телевизоры", "топ", "рейтинг", "обзор", "подборка", "как выбрать",
     "ign", "игромания", "ixbt", "vc.ru", "dzen", "tiktok", "youtube", "rutube",
+    "lifehacker", "лайфхакер", "какой телевизор выбрать", "что купить",
 )
 WRONG_TV_PRODUCT_MARKERS = (
     "консоль", "игровая приставка", "ретро-игры", "проектор", "кронштейн",
     "подсветка", "пульт", "кабель", "подставка", "приставка", "монитор",
-    "console", "projector", "bracket", "remote", "cable", "tv stand",
+    "ps4", "xbox", "playstation", "dualshock", "gamepad", "nintendo",
+    "ufc", "fifa", "igra", "console", "projector", "bracket", "remote",
+    "cable", "tv stand",
 )
+
+
+def _search_timeout() -> int:
+    return max(2, int(getattr(settings, "SEARCH_TIMEOUT_SECONDS", 8) or 8))
+
+
+def _is_source_enabled(source: SearchSourceDefinition) -> bool:
+    return bool(getattr(settings, source.enabled_attr, True))
+
+
+def _is_source_name_enabled(source_name: str) -> bool:
+    source = next((item for item in SEARCH_SOURCES if item.source == source_name), None)
+    return _is_source_enabled(source) if source else True
+
+
+def _enabled_site_sources() -> list[SearchSourceDefinition]:
+    return [source for source in SEARCH_SOURCES if source.key != "wildberries" and _is_source_enabled(source)]
+
+
+def _is_generic_enabled() -> bool:
+    return bool(getattr(settings, "ENABLE_SEARCH_GENERIC", True))
+
+
+def _safe_get(url: str, *, params: Optional[dict] = None, headers: Optional[dict] = None) -> requests.Response:
+    """HTTP GET с timeout, proxy из окружения и одним повтором без долбёжки 429."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=_search_timeout(),
+            )
+            if response.status_code == 429:
+                response.raise_for_status()
+            if response.status_code in {500, 502, 503, 504} and attempt == 0:
+                time.sleep(0.25)
+                continue
+            response.raise_for_status()
+            return response
+        except requests.HTTPError:
+            raise
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(0.25)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("HTTP-запрос не выполнен")
 
 
 def _request_product(req: Request) -> str:
@@ -204,7 +338,7 @@ def generate_search_queries(req: Request) -> list[str]:
         site_base += f" {req.use_case or req.purpose}"
     if budget:
         site_base += f" до {budget}"
-    queries.extend(f"site:{domain} {site_base}" for domain, _ in SITE_SOURCES)
+    queries.extend(f"site:{source.domains[0]} {site_base}" for source in _enabled_site_sources())
 
     unique: list[str] = []
     seen: set[str] = set()
@@ -350,18 +484,90 @@ def _is_yandex_market_non_product(parsed) -> bool:
     return any(part in path for part in ("/offers/", "/reviews", "/cc/", "/search")) or "/offers/" in path or path.endswith("/reviews")
 
 
+def _domain_matches(domain: str, known: str) -> bool:
+    return domain == known or domain.endswith(f".{known}")
+
+
+def _is_ad_redirect(url: str) -> bool:
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower().removeprefix("www.")
+    path = parsed.path.lower()
+    if any(_domain_matches(domain, item) for item in AD_REDIRECT_DOMAINS):
+        return True
+    return any(marker in path for marker in ("/aclick", "/adclick", "/ads/", "/clk"))
+
+
+def _is_foreign_shop(url: str) -> bool:
+    domain = extract_domain(url)
+    return any(_domain_matches(domain, item) for item in FOREIGN_SHOP_DOMAINS)
+
+
+def _is_direct_product_url(source: str, url: str) -> bool:
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower().removeprefix("www.")
+    path = parsed.path.lower().rstrip("/")
+    query = parsed.query.lower()
+    if not parsed.scheme or not parsed.netloc or _is_ad_redirect(url):
+        return False
+    if any(marker in path for marker in (
+        "/search", "/catalog/0/search", "/offers", "/reviews", "/review",
+        "/otzyv", "/otzyvy", "/compare", "/characteristics", "/specification",
+    )):
+        return False
+    if any(key in query for key in ("q=", "text=", "search=", "query=")):
+        return False
+    source = source or _source_from_url(url)
+    if source == "wildberries":
+        return "wildberries.ru" in domain and "/catalog/" in path and "/detail" in path
+    if source == "ozon_search":
+        return "ozon.ru" in domain and ("/product/" in path or "/context/detail/id/" in path)
+    if source == "yandex_market_search":
+        return "market.yandex.ru" in domain and ("/product--" in path or "/card/" in path or "/product/" in path)
+    if source == "dns_search":
+        return "dns-shop.ru" in domain and "/product/" in path
+    if source == "mvideo_search":
+        return "mvideo.ru" in domain and ("/products/" in path or "/product/" in path)
+    if source == "avito_search":
+        return "avito.ru" in domain and bool(re.search(r"_\d{5,}$", path))
+    if source == "citilink_search":
+        return "citilink.ru" in domain and ("/product/" in path or bool(re.search(r"-\d{5,}$", path)))
+    if source == "megamarket_search":
+        return "megamarket.ru" in domain and ("/catalog/details/" in path or "/product/" in path)
+    return False
+
+
+def _is_search_or_listing_url(url: str) -> bool:
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    query = parsed.query.lower()
+    if _is_direct_product_url(_source_from_url(url), url):
+        return False
+    return (
+        "/search" in path
+        or "/catalog/0/search" in path
+        or "/catalog/" in path
+        or "/category/" in path
+        or "/f/" in path
+        or "/recipe/" in path
+        or any(key in query for key in ("q=", "text=", "search=", "query="))
+    )
+
+
 def is_category_page(title: str, snippet: str, url: str) -> bool:
     """Определяет витрины/категории, а не карточки одного товара."""
     text = _candidate_text(title, snippet, url)
     parsed = urlparse(url)
     path = parsed.path.lower()
+    if _is_direct_product_url(_source_from_url(url), url):
+        return False
     is_plural_tv_title = bool(re.search(r"\bтелевизоры\b", title.lower()))
-    is_catalog_path = "/catalog/" in path and not ("wildberries" in url.lower() and "/detail" in path)
+    is_catalog_path = "/catalog/" in path
     is_filter_path = "/f/" in path or "/recipe/" in path
     is_avito_listing = "avito.ru" in url.lower() and "/televizory-as" in path
     is_avito_search = _is_avito_search_page(parsed)
     return (
         any(marker in text for marker in CATEGORY_MARKERS)
+        or _is_search_or_listing_url(url)
         or "/category/" in path
         or is_catalog_path
         or is_filter_path
@@ -373,10 +579,14 @@ def is_category_page(title: str, snippet: str, url: str) -> bool:
 
 def is_article_or_review(title: str, snippet: str, url: str) -> bool:
     """Определяет статьи, видео и обзоры, которые нельзя выдавать за товар."""
+    if _is_direct_product_url(_source_from_url(url), url):
+        return False
     text = _candidate_text(title, snippet, url)
     parsed = urlparse(url)
     path = parsed.path.lower()
-    is_editorial_url = any(part in path for part in ("/blog/", "/digest/", "/article/", "/reviews/")) or "club.dns-shop.ru" in url.lower()
+    is_editorial_url = any(part in path for part in (
+        "/blog/", "/digest/", "/article/", "/articles/", "/reviews/", "/review/",
+    )) or "club.dns-shop.ru" in url.lower() or "journal.citilink.ru" in url.lower()
     is_ym_non_product = _is_yandex_market_non_product(parsed)
     return any(marker in text for marker in ARTICLE_MARKERS) or is_editorial_url or is_ym_non_product
 
@@ -401,6 +611,8 @@ def _is_untrusted_for_russian_request(url: str, request: Request) -> bool:
     domain = extract_domain(url)
     if domain == "facebook.com" or domain.endswith(".facebook.com"):
         return True
+    if _is_foreign_shop(url):
+        return True
     # Проект ищет товар в указанном российском городе; Citrus и домены .ua
     # не являются релевантной точкой покупки для такого запроса.
     return bool(request.city) and (domain == "citrus.ua" or domain.endswith(".citrus.ua") or domain.endswith(".ua"))
@@ -422,9 +634,7 @@ def is_wrong_product_type(candidate: ProductCandidate, request: Request) -> bool
     wrong_marker_found = any(marker in text_without_allowed_context for marker in WRONG_TV_PRODUCT_MARKERS)
     has_brand = any(brand in text for brand in KNOWN_TV_BRANDS)
     has_tv_feature = any(marker in text for marker in ("4k", "uhd", "ultra hd", "qled", "oled"))
-    trusted_store = candidate.source in {
-        "wildberries", "ozon_search", "yandex_market_search", "dns_search", "mvideo_search"
-    }
+    trusted_store = candidate.source in TRUSTED_PRODUCT_SOURCES
     # Поисковая карточка магазина может называться только кодом модели
     # («Samsung UE55U8000»). Это не неправильный тип товара: оставляем её
     # для WEAK-проверки, если есть бренд + признаки ТВ/модель.
@@ -453,26 +663,49 @@ def is_real_product_candidate(candidate: ProductCandidate, request: Request) -> 
     )
 
 
-def classify_candidate(candidate: ProductCandidate, request: Request) -> tuple[str, list[str]]:
-    """Возвращает REJECTED_AUTO только для явного мусора/не-товара."""
-    non_purchase_reason = _non_purchase_url_reason(candidate.url)
-    if non_purchase_reason:
-        return "REJECTED_AUTO", [non_purchase_reason, f"классификация: REJECTED — {non_purchase_reason}"]
-    if _is_untrusted_for_russian_request(candidate.url, request):
-        return "REJECTED_AUTO", ["нерелевантный зарубежный/социальный источник", "классификация: REJECTED — источник не для покупки в РФ"]
-    if is_wrong_product_type(candidate, request):
-        return "REJECTED_AUTO", ["не тот тип товара", "классификация: REJECTED — не тот тип товара"]
-    if is_category_page(candidate.title, candidate.snippet, candidate.url):
-        return "REJECTED_AUTO", ["страница категории", "классификация: REJECTED — страница категории"]
-    if is_article_or_review(candidate.title, candidate.snippet, candidate.url):
-        return "REJECTED_AUTO", ["обзор/подборка", "классификация: REJECTED — обзор или отзывы"]
-    if _is_foreign_vendor_site(candidate.url):
-        return "REJECTED_AUTO", ["сайт производителя, не точка покупки", "классификация: REJECTED — не точка покупки"]
+def _avito_risk_flags(request: Request) -> list[str]:
+    flags = [
+        "проверить продавца",
+        "проверить город",
+        "проверить состояние",
+        "проверить отзывы",
+    ]
+    if not request.is_used_allowed:
+        flags.append("б/у не разрешено клиентом")
+    return flags
 
-    # URL отзывов/характеристик отсекаются выше. В сниппете прямой карточки
-    # часто встречаются слова «отзывы» и «характеристики», поэтому здесь
-    # оставляем только признаки недоступного товара.
-    trash_markers = [
+
+def _extract_avito_city(url: str, snippet: str = "") -> str:
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if parts and parts[0] not in {"rossiya", "all", "audio_i_video", "bytovaya_tehnika"}:
+        return parts[0].replace("_", " ").title()
+    match = re.search(r"\b(?:г\.|город)\s*([А-Яа-яЁё-]{3,})", snippet or "")
+    return match.group(1) if match else ""
+
+
+def classify_candidate(candidate: ProductCandidate, request: Request) -> tuple[str, list[str]]:
+    """Классифицирует карточку в GOOD/OK/WEAK/TRASH без изменения схемы БД."""
+    title_lower = candidate.title.lower()
+    snippet_lower = candidate.snippet.lower()
+    url_lower = candidate.url.lower()
+    if _is_ad_redirect(candidate.url) or "huge selection" in title_lower or re.search(r"\bshop\b.*\bhuge selection\b", title_lower):
+        return QUALITY_TRASH, ["рекламная redirect-ссылка", "классификация: TRASH — реклама"]
+    non_purchase_reason = _non_purchase_url_reason(candidate.url)
+    if non_purchase_reason and not _is_direct_product_url(candidate.source, candidate.url):
+        return QUALITY_TRASH, [non_purchase_reason, f"классификация: TRASH — {non_purchase_reason}"]
+    if _is_untrusted_for_russian_request(candidate.url, request):
+        return QUALITY_TRASH, ["нерелевантный зарубежный/социальный источник", "классификация: TRASH — источник не для покупки в РФ"]
+    if is_wrong_product_type(candidate, request):
+        return QUALITY_TRASH, ["не тот тип товара", "классификация: TRASH — не тот тип товара"]
+    if is_category_page(candidate.title, candidate.snippet, candidate.url):
+        return QUALITY_TRASH, ["страница категории", "классификация: TRASH — страница категории"]
+    if is_article_or_review(candidate.title, candidate.snippet, candidate.url):
+        return QUALITY_TRASH, ["обзор/подборка", "классификация: TRASH — обзор или отзывы"]
+    if _is_foreign_vendor_site(candidate.url):
+        return QUALITY_TRASH, ["сайт производителя, не точка покупки", "классификация: TRASH — не точка покупки"]
+
+    unavailable_markers = [
         ("нет в наличии", "нет в наличии"),
         ("продаж прекращен", "продажи прекращены"),
         ("товар закончил", "товар закончился"),
@@ -480,27 +713,39 @@ def classify_candidate(candidate: ProductCandidate, request: Request) -> tuple[s
         ("no longer available", "нет в наличии"),
         ("out of stock", "нет в наличии"),
     ]
-    title_lower = candidate.title.lower()
-    snippet_lower = candidate.snippet.lower()
-    url_lower = candidate.url.lower()
-    for marker, label in trash_markers:
+    for marker, label in unavailable_markers:
         if marker in title_lower or marker in snippet_lower or marker in url_lower:
-            # URL отзывов/характеристик уже отклонён выше. Здесь допускаем
-            # карточку с моделью только для текстовых упоминаний в сниппете.
-            if _has_concrete_model(candidate):
-                return "CANDIDATE", [label]
-            return "REJECTED_AUTO", [label, f"классификация: REJECTED — {label}"]
+            return QUALITY_WEAK, [label, f"классификация: WEAK — {label}"]
 
-    # Товар с известной ценой выше бюджета не должен попадать в NORMAL.
     budget = _budget_value(request)
     if budget and candidate.price and candidate.price > budget:
         over_budget_pct = (candidate.price - budget) / budget
-        # Сильное превышение не имеет смысла показывать для фиксированного бюджета.
         if over_budget_pct > 0.15:
-            return "REJECTED_AUTO", [f"выше бюджета ({candidate.price} > {budget})", "классификация: REJECTED — сильно выше бюджета"]
-        if over_budget_pct > 0.10:
-            return "WEAK_CANDIDATE", [f"сильно выше бюджета ({candidate.price} > {budget})", "классификация: WEAK — выше бюджета более чем на 10%"]
-    return "CANDIDATE", []
+            return QUALITY_TRASH, [f"выше бюджета ({candidate.price} > {budget})", "классификация: TRASH — сильно выше бюджета"]
+        return QUALITY_WEAK, [f"выше бюджета ({candidate.price} > {budget})", "классификация: WEAK — выше бюджета"]
+
+    direct_product = _is_direct_product_url(candidate.source, candidate.url)
+    has_model = _has_concrete_model(candidate)
+    source_is_known_store = candidate.source in TRUSTED_PRODUCT_SOURCES
+
+    flags: list[str] = []
+    if candidate.source == "avito_search":
+        flags.extend(_avito_risk_flags(request))
+        if not request.is_used_allowed:
+            return QUALITY_WEAK, flags + ["классификация: WEAK — Avito только после ручной проверки"]
+
+    if direct_product and has_model and candidate.price and source_is_known_store:
+        return QUALITY_GOOD, flags + ["классификация: GOOD — модель, цена и прямая ссылка"]
+    if direct_product and has_model:
+        reason = "цена не найдена" if candidate.price is None else "источник требует ручной проверки"
+        return QUALITY_OK, flags + [reason, f"классификация: OK — есть модель и прямая ссылка, {reason}"]
+
+    weak_reasons = []
+    if not direct_product:
+        weak_reasons.append("не подтверждена прямая карточка товара")
+    if not has_model:
+        weak_reasons.append("нет признаков конкретной модели")
+    return QUALITY_WEAK, flags + weak_reasons + [f"классификация: WEAK — {'; '.join(weak_reasons) or 'нужна ручная проверка'}"]
 
 
 
@@ -569,7 +814,7 @@ def score_result(
         score -= 20
         flags.append("выше бюджета")
 
-    if source in {"wildberries", "ozon_search", "yandex_market_search", "dns_search", "mvideo_search"}:
+    if source in TRUSTED_PRODUCT_SOURCES:
         score += 10
     if source == "generic_web" and not has_model:
         score = min(score, 40)
@@ -604,7 +849,10 @@ class GenericSearchAdapter:
     def search(self, query: str, limit: int = 5) -> list[dict]:
         if DDGS is None:
             raise RuntimeError("DDGS не установлен (нужен пакет ddgs или duckduckgo-search)")
-        client = DDGS()
+        try:
+            client = DDGS(timeout=_search_timeout())
+        except TypeError:
+            client = DDGS()
         try:
             return list(client.text(query, max_results=limit) or [])[:limit]
         finally:
@@ -644,7 +892,7 @@ class WildberriesAdapter:
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
 
-        response = requests.get(
+        response = _safe_get(
             self.endpoint,
             params={
                 "appType": 1,
@@ -657,10 +905,8 @@ class WildberriesAdapter:
                 "suppressSpellcheck": "false",
                 "page": 1,
             },
-            timeout=8,
             headers={"User-Agent": "Mozilla/5.0 (compatible; NaydiVygodneeBot/2.0)"},
         )
-        response.raise_for_status()
         payload = self._parse_payload(response)
         if not payload:
             return []
@@ -686,6 +932,9 @@ class WildberriesAdapter:
                 "href": f"https://www.wildberries.ru/catalog/{product_id}/detail.aspx",
                 "body": ", ".join(snippet_bits),
                 "price": price,
+                "rating": item.get("rating"),
+                "reviews_count": item.get("feedbacks"),
+                "availability": "есть в выдаче",
             })
         return rows
 
@@ -706,33 +955,108 @@ def _candidate_from_row(row: dict, req: Request, default_source: str) -> Optiona
     if not isinstance(price, int) or not min_price <= price <= max_price:
         price = extract_price(f"{title} {snippet}", min_price=min_price, max_price=max_price)
     source = _source_from_url(url, default_source)
+    rating = row.get("rating")
+    try:
+        rating_value = float(rating) if rating not in (None, "") else None
+    except (TypeError, ValueError):
+        rating_value = None
+    reviews = row.get("reviews_count") or row.get("feedbacks")
+    try:
+        reviews_count = int(reviews) if reviews not in (None, "") else None
+    except (TypeError, ValueError):
+        reviews_count = None
+    city = str(row.get("city") or "").strip()
+    if source == "avito_search" and not city:
+        city = _extract_avito_city(url, snippet)
     candidate = ProductCandidate(
         request_id=req.id,
         title=title[:300],
         url=url[:500],
         source=source,
+        source_type=SOURCE_TYPE_BY_SOURCE.get(source, "web"),
         price=price,
         snippet=snippet[:500],
+        rating=rating_value,
+        reviews_count=reviews_count,
+        seller=str(row.get("seller") or "").strip()[:200],
+        city=city[:120],
+        availability=str(row.get("availability") or "").strip()[:120],
+        description=str(row.get("description") or snippet or "").strip()[:500],
         created_at=datetime.now().isoformat(),
     )
-    status, classification_flags = classify_candidate(candidate, req)
+    quality, classification_flags = classify_candidate(candidate, req)
+    status = QUALITY_TO_STATUS[quality]
     score, risks = score_result(title, snippet, price, req, source, status, classification_flags)
     if isinstance(raw_price, int) and not min_price <= raw_price <= max_price and re.search(r"\b(?:[A-Za-z]{1,6}\d{2,}[A-Za-z0-9-]*|\d{2,}[A-Za-z]{1,6}\d+)\b", title):
         risks.append("цена похожа на номер модели")
-    # Неполная карточка магазина — не мусор. Оставляем её как WEAK для
-    # проверки администратором вместо прежнего автоматического отклонения.
-    if status == "CANDIDATE":
-        weak_reasons = _weak_reasons(candidate, req, score)
-        if weak_reasons:
-            status = "WEAK_CANDIDATE"
-            risks.extend(weak_reasons)
-            risks.append(f"классификация: WEAK — {'; '.join(weak_reasons)}")
-        else:
-            risks.append("классификация: NORMAL — товарная карточка с достаточными признаками")
+    if quality == QUALITY_WEAK:
+        risks.extend(_weak_reasons(candidate, req, score))
+    if candidate.city:
+        risks.append(f"город: {candidate.city}")
+    if candidate.rating is not None:
+        risks.append(f"рейтинг: {candidate.rating:g}")
+    if candidate.reviews_count is not None:
+        risks.append(f"отзывов: {candidate.reviews_count}")
+    candidate.quality = quality
     candidate.status = status
     candidate.score = score
     candidate.risk_flags = list(dict.fromkeys(risks))
     return candidate
+
+
+def _is_rate_limited_exception(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", None) == 429:
+        return True
+    return "429" in str(exc).lower() or "too many requests" in str(exc).lower()
+
+
+def _is_temporary_exception(exc: Exception) -> bool:
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError, TimeoutError)):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in (
+        "timeout", "timed out", "connection", "temporarily", "temporary",
+        "dns", "name resolution", "429", "too many requests", "503", "502", "504",
+    ))
+
+
+def _search_with_retry(adapter: GenericSearchAdapter | WildberriesAdapter, query: str, limit: int) -> list[dict]:
+    last_exc: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            return adapter.search(query, limit=limit)
+        except Exception as exc:
+            last_exc = exc
+            if _is_rate_limited_exception(exc) or not _is_temporary_exception(exc) or attempt == 1:
+                break
+            time.sleep(0.25)
+    if last_exc:
+        raise last_exc
+    return []
+
+
+def _bump_quality_stats(collection: SearchCollection, candidate: ProductCandidate) -> None:
+    stats = collection.quality_stats
+    stats["raw"] += 1
+    stats["total_found"] += 1
+    if candidate.quality == QUALITY_TRASH:
+        stats["trash"] += 1
+        if "страница категории" in candidate.risk_flags:
+            stats["categories"] += 1
+        elif "обзор/подборка" in candidate.risk_flags:
+            stats["articles"] += 1
+        elif "не тот тип товара" in candidate.risk_flags:
+            stats["wrong_type"] += 1
+        return
+    if candidate.quality == QUALITY_GOOD:
+        stats["good"] += 1
+        stats["normal"] += 1
+    elif candidate.quality == QUALITY_OK:
+        stats["ok"] += 1
+        stats["normal"] += 1
+    else:
+        stats["weak"] += 1
 
 
 
@@ -746,13 +1070,14 @@ def _collect_from_adapter(
     seen_urls: set[str],
 ) -> None:
     try:
-        rows = adapter.search(query, limit=limit)
+        rows = _search_with_retry(adapter, query, limit)
     except Exception as exc:  # каждый источник изолирован от остальных
         logger.warning("Автопоиск: %s не выполнил %r: %s", source, query, exc)
         collection.attempts.append(SearchAttemptData(source, query, "ERROR", error_text=str(exc)))
         return
 
     kept = 0
+    quality_counts = {QUALITY_GOOD: 0, QUALITY_OK: 0, QUALITY_WEAK: 0, QUALITY_TRASH: 0}
     for row in rows:
         try:
             candidate = _candidate_from_row(row, req, source)
@@ -767,23 +1092,124 @@ def _collect_from_adapter(
             continue
         seen_urls.add(normalized_url)
         collection.raw_candidates.append(candidate)
-        collection.candidates.append(candidate)
-        collection.quality_stats["total_found"] += 1
-        if candidate.status == "REJECTED_AUTO":
-            if "страница категории" in candidate.risk_flags:
-                collection.quality_stats["categories"] += 1
-            elif "обзор/подборка" in candidate.risk_flags:
-                collection.quality_stats["articles"] += 1
-            elif "не тот тип товара" in candidate.risk_flags:
-                collection.quality_stats["wrong_type"] += 1
-        elif candidate.status == "WEAK_CANDIDATE":
-            collection.quality_stats["weak"] += 1
-            kept += 1
-        else:
-            collection.quality_stats["normal"] += 1
+        _bump_quality_stats(collection, candidate)
+        quality_counts[candidate.quality] += 1
+        if candidate.quality != QUALITY_TRASH:
+            collection.candidates.append(candidate)
             kept += 1
     status = "OK" if rows else "EMPTY"
-    collection.attempts.append(SearchAttemptData(source, query, status, len(rows), kept))
+    collection.attempts.append(SearchAttemptData(
+        source,
+        query,
+        status,
+        len(rows),
+        kept,
+        (
+            f"GOOD={quality_counts[QUALITY_GOOD]}; OK={quality_counts[QUALITY_OK]}; "
+            f"WEAK={quality_counts[QUALITY_WEAK]}; TRASH={quality_counts[QUALITY_TRASH]}"
+        ),
+    ))
+
+
+def _verified_status(candidate: ProductCandidate) -> str:
+    return str(getattr(candidate, "verify_status", "") or "")
+
+
+def _model_dedupe_key(candidate: ProductCandidate) -> str:
+    model_key = extract_model_key(candidate.title).lower()
+    if model_key and len(model_key) >= 5:
+        return model_key
+    text = re.sub(r"[^a-zа-яё0-9]+", " ", candidate.title.lower())
+    stop = {
+        "телевизор", "smart", "tv", "led", "qled", "oled", "ultra", "hd",
+        "черный", "чёрный", "купить", "см", "дюйм", "дюймов",
+    }
+    words = [word for word in text.split() if word not in stop]
+    return " ".join(words[:6]) or candidate.url.lower()
+
+
+def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, int, int, float, str]:
+    order = {
+        VERIFIED_GOOD: 0,
+        VERIFIED_OK: 1,
+        OVER_BUDGET_SOFT: 2,
+        VERIFY_ERROR: 5,
+    }
+    budget = _budget_value(req)
+    price = candidate.price or 0
+    over_budget = 0
+    if budget and price:
+        over_budget = 0 if price <= budget else 1 if price <= budget * 1.15 else 2
+    return (
+        order.get(_verified_status(candidate), 9),
+        over_budget,
+        price or 10_000_000,
+        -float(candidate.score or 0),
+        candidate.title.lower(),
+    )
+
+
+def _dedupe_verified_candidates(req: Request, candidates: list[ProductCandidate]) -> list[ProductCandidate]:
+    grouped: dict[str, list[ProductCandidate]] = {}
+    for candidate in candidates:
+        grouped.setdefault(_model_dedupe_key(candidate), []).append(candidate)
+
+    result: list[ProductCandidate] = []
+    for items in grouped.values():
+        items.sort(key=lambda item: _verification_rank(req, item))
+        kept_for_group = items[:2]
+        hidden = max(0, len(items) - len(kept_for_group))
+        if hidden:
+            kept_for_group[0].risk_flags = list(dict.fromkeys(
+                list(kept_for_group[0].risk_flags) + [f"скрыто дублей: {hidden}"]
+            ))
+        result.extend(kept_for_group)
+    result.sort(key=lambda item: _verification_rank(req, item))
+    return result
+
+
+def _apply_verification(collection: SearchCollection, req: Request) -> None:
+    candidates_to_verify = [
+        item for item in collection.candidates
+        if item.status != "REJECTED_AUTO" and item.quality != QUALITY_TRASH
+    ]
+    verified = verify_candidates(candidates_to_verify, req, limit=30)
+    stats = collection.verify_stats
+    stats["checked"] = len(verified)
+
+    kept: list[ProductCandidate] = []
+    for item in verified:
+        status = item.verify_status
+        stats[status] = stats.get(status, 0) + 1
+        if item.keep_for_admin:
+            kept.append(item.candidate)
+        else:
+            collection.verified_rejections.append(item)
+
+    kept = _dedupe_verified_candidates(req, kept)
+    # В админку отправляем не весь хвост поисковой выдачи, а только лучшие.
+    collection.candidates = kept[:10]
+    stats["saved"] = len(collection.candidates)
+    collection.quality_stats["saved"] = len(collection.candidates)
+    collection.attempts.append(SearchAttemptData(
+        "candidate_verifier",
+        "verify candidate pages",
+        "OK",
+        stats["checked"],
+        stats["saved"],
+        (
+            f"VERIFY_ERROR={stats.get('VERIFY_ERROR', 0)}; "
+            f"UNAVAILABLE={stats.get('UNAVAILABLE', 0)}; "
+            f"PRICE_MISMATCH={stats.get('PRICE_MISMATCH', 0)}; "
+            f"WRONG_PRODUCT={stats.get('WRONG_PRODUCT', 0)}; "
+            f"NOT_PRODUCT_PAGE={stats.get('NOT_PRODUCT_PAGE', 0)}; "
+            f"VERIFIED_GOOD={stats.get('VERIFIED_GOOD', 0)}; "
+            f"VERIFIED_OK={stats.get('VERIFIED_OK', 0)}; "
+            f"OVER_BUDGET_SOFT={stats.get('OVER_BUDGET_SOFT', 0)}; "
+            f"OVER_BUDGET_HARD={stats.get('OVER_BUDGET_HARD', 0)}; "
+            f"saved={stats['saved']}"
+        ),
+    ))
 
 
 def collect_product_candidates(req: Request, max_results: int = 15) -> SearchCollection:
@@ -793,101 +1219,44 @@ def collect_product_candidates(req: Request, max_results: int = 15) -> SearchCol
     seen_urls: set[str] = set()
     generic = GenericSearchAdapter()
 
-    # Веб-поиск и site-поиск не зависят от Wildberries и наоборот.
-    for query in (query for query in queries if not query.startswith("site:")):
-        _collect_from_adapter(generic, req, "generic_web", query, 5, collection, seen_urls)
+    # Веб-поиск и site-поиск не зависят от Wildberries и друг от друга.
+    if _is_generic_enabled():
+        generic_queries = [query for query in queries if not query.startswith("site:")]
+        for query in generic_queries[:3]:
+            _collect_from_adapter(generic, req, "generic_web", query, 5, collection, seen_urls)
 
     wb_query = (req.clean_search_query or "").strip() or build_search_query(
         _request_product(req), req.use_case or req.purpose, req.budget, "", req.important_criteria or req.criteria,
     )
-    _collect_from_adapter(WildberriesAdapter(), req, "wildberries", wb_query, 10, collection, seen_urls)
+    wb_source = next((source for source in SEARCH_SOURCES if source.key == "wildberries"), None)
+    if wb_source and _is_source_enabled(wb_source):
+        _collect_from_adapter(WildberriesAdapter(), req, "wildberries", wb_query, 10, collection, seen_urls)
 
     site_adapter = SearchBySiteAdapter()
     for query in (query for query in queries if query.startswith("site:")):
         domain_match = re.match(r"site:([^\s]+)", query)
         source = MARKETPLACE_SOURCES.get(domain_match.group(1), "generic_web") if domain_match else "generic_web"
-        _collect_from_adapter(site_adapter, req, source, query, 5, collection, seen_urls)
+        _collect_from_adapter(site_adapter, req, source, query, 6, collection, seen_urls)
+
+    _apply_verification(collection, req)
+    collection.candidates = collection.candidates[:min(max_results, 10)]
+    collection.verify_stats["saved"] = len(collection.candidates)
+    collection.quality_stats["saved"] = len(collection.candidates)
 
     stats = collection.quality_stats
     collection.attempts.append(SearchAttemptData(
         "quality_filter",
         "candidate classification",
         "OK",
-        stats["total_found"],
-        stats["normal"] + stats["weak"],
+        stats["raw"],
+        stats["saved"],
         (
-            f"categories={stats['categories']}; articles={stats['articles']}; "
-            f"wrong_type={stats['wrong_type']}; weak={stats['weak']}; normal={stats['normal']}"
-
+            f"RAW={stats['raw']}; TRASH={stats['trash']}; GOOD={stats['good']}; "
+            f"OK={stats['ok']}; WEAK={stats['weak']}; saved={stats['saved']}; "
+            f"categories={stats['categories']}; articles={stats['articles']}; wrong_type={stats['wrong_type']}"
         ),
     ))
 
-    source_priority = {
-        "wildberries": 0, "ozon_search": 1, "yandex_market_search": 1,
-        "dns_search": 1, "mvideo_search": 1, "avito_search": 2, "generic_web": 3,
-    }
-    budget = _budget_value(req)
-    trusted_sources = {"wildberries", "ozon_search", "yandex_market_search", "dns_search", "mvideo_search", "avito_search"}
-
-    # По умолчанию в список идут только полноценные NORMAL/WEAK карточки.
-    active_candidates = [item for item in collection.candidates if item.status != "REJECTED_AUTO"]
-    has_normal = any(item.status == "CANDIDATE" for item in active_candidates)
-
-    # Если выдача не дала ни одной NORMAL-карточки, можно показать в самом
-    # низу несколько product-like страниц отзывов/характеристик. Это не
-    # «готовый товар»: у каждой будет явная причина WEAK для ручной проверки.
-    if not has_normal and len(active_candidates) < 8:
-        for item in collection.raw_candidates:
-            if len(active_candidates) >= 8:
-                break
-            if item.status != "REJECTED_AUTO" or not _non_purchase_url_reason(item.url):
-                continue
-            item_text = f"{item.title} {item.snippet}".lower()
-            has_identity = (
-                _has_concrete_model(item)
-                or (any(brand in item_text for brand in KNOWN_TV_BRANDS) and bool(re.search(r"\b(43|50|55|65)\b", item_text)))
-            )
-            if item.source not in trusted_sources or not has_identity:
-                continue
-            fallback_reason = _non_purchase_url_reason(item.url)
-            if "обзор/подборка" in item.risk_flags:
-                collection.quality_stats["articles"] = max(0, collection.quality_stats["articles"] - 1)
-            item.status = "WEAK_CANDIDATE"
-            item.score = min(item.score, 5.0)
-            item.risk_flags = list(dict.fromkeys(item.risk_flags + [
-                f"fallback без NORMAL: {fallback_reason}",
-                f"классификация: WEAK — {fallback_reason}, проверьте основную карточку",
-            ]))
-            active_candidates.append(item)
-            collection.quality_stats["weak"] += 1
-
-    # Отражаем fallback в Debug поиска: RAW не меняется, но число пригодных
-    # NORMAL/WEAK обновляется.
-    for attempt in reversed(collection.attempts):
-        if attempt.source == "quality_filter":
-            attempt.kept_count = sum(item.status != "REJECTED_AUTO" for item in collection.raw_candidates)
-            attempt.error_text = (
-                f"categories={collection.quality_stats['categories']}; articles={collection.quality_stats['articles']}; "
-                f"wrong_type={collection.quality_stats['wrong_type']}; weak={collection.quality_stats['weak']}; "
-                f"normal={collection.quality_stats['normal']}"
-            )
-            break
-
-    def candidate_rank(item: ProductCandidate) -> tuple[int, float, int, str]:
-        in_budget = bool(item.price and budget and item.price <= budget)
-        if item.status == "CANDIDATE":
-            # Лучшие: NORMAL в бюджете, затем NORMAL без цены.
-            group = 0 if in_budget else 1 if item.price is None else 2
-        elif item.status == "WEAK_CANDIDATE":
-            # После NORMAL — карточки доверенных магазинов, затем прочие без цены.
-            is_fallback = any(flag.startswith("fallback без NORMAL:") for flag in item.risk_flags)
-            group = 6 if is_fallback else 3 if item.source in trusted_sources else 4 if item.price is None else 5
-        else:
-            group = 9
-        return group, -item.score, source_priority.get(item.source, 4), item.title.lower()
-
-    active_candidates.sort(key=candidate_rank)
-    collection.candidates = active_candidates[:max_results]
     if not collection.candidates:
         # Эти ссылки никогда не становятся ProductCandidate: они лишь помогут
         # админу продолжить поиск и останутся видны в Debug поиска.
@@ -900,7 +1269,7 @@ def collect_product_candidates(req: Request, max_results: int = 15) -> SearchCol
             clean_search_query=req.clean_search_query or "",
         )
         collection.attempts.append(SearchAttemptData("manual_fallback", wb_query, "OK", len(collection.manual_links), 0,
-                                                     "Реальных карточек не получено; сохранены ручные поисковые ссылки."))
+                                                     "Проверенных вариантов мало или нет; сохранены ручные поисковые ссылки."))
     return collection
 
 
@@ -928,9 +1297,11 @@ def _run_compare_search(req: Request, candidates: list[ProductCandidate], attemp
             seen_model_keys[normalized_key] = candidate.price or 999999
 
         for domain, source in COMPARE_SITES:
+            if not _is_source_name_enabled(source):
+                continue
             query = f"{model_key} site:{domain}"
             try:
-                rows = generic.search(query, limit=3)
+                rows = _search_with_retry(generic, query, limit=3)
             except Exception as exc:
                 logger.debug("Compare search: %s не выполнил %r: %s", source, query, exc)
                 attempts.append(SearchAttemptData(f"compare_{source}", query, "ERROR", error_text=str(exc)))
@@ -946,6 +1317,9 @@ def _run_compare_search(req: Request, candidates: list[ProductCandidate], attemp
                     continue
                 normalized_url = _normalise_url(comp.url)
                 if normalized_url in existing_urls:
+                    continue
+                verified = verify_candidate(comp, req)
+                if not verified.keep_for_admin or _verified_status(comp) not in {VERIFIED_GOOD, VERIFIED_OK, OVER_BUDGET_SOFT}:
                     continue
                 existing_urls.add(normalized_url)
                 # Если цена ниже, чем у оригинального кандидата с тем же ключом
@@ -978,11 +1352,6 @@ def run_product_search(req: Request, max_results: int = 15) -> dict:
     """Собирает и сохраняет кандидатов и диагностику в SQLite."""
     collection = collect_product_candidates(req, max_results=max_results)
 
-    for attempt in collection.attempts:
-        create_search_attempt(
-            req.id, attempt.source, attempt.query, attempt.status,
-            attempt.found_count, attempt.kept_count, attempt.error_text,
-        )
     if collection.manual_links:
         replace_manual_search_links(req.id, collection.manual_links)
 
@@ -1007,7 +1376,7 @@ def run_product_search(req: Request, max_results: int = 15) -> dict:
             added += 1
 
     # Compare search: ищем ту же модель дешевле на других площадках
-    normal_candidates = [c for c in collection.candidates if c.status != "REJECTED_AUTO"]
+    normal_candidates = [c for c in collection.candidates if c.quality in {QUALITY_GOOD, QUALITY_OK}]
     compare_found = _run_compare_search(req, normal_candidates, collection.attempts)
     stats = collection.quality_stats
     stats["compare_total"] = len([a for a in collection.attempts if a.source.startswith("compare_")])
@@ -1021,13 +1390,22 @@ def run_product_search(req: Request, max_results: int = 15) -> dict:
         f"compare_total={stats['compare_total']}; compare_found_cheaper={compare_found}",
     ))
 
+    for attempt in collection.attempts:
+        create_search_attempt(
+            req.id, attempt.source, attempt.query, attempt.status,
+            attempt.found_count, attempt.kept_count, attempt.error_text,
+        )
+
     total = sum(1 for result in get_search_results(req.id) if result.status != "REJECTED_AUTO")
     if total:
+        message = f"Найдено {added} новых кандидатов, всего {total}."
+        if collection.verify_stats.get("saved", 0) < 3:
+            message += " Нормальных проверенных вариантов мало. Нужно ручное уточнение / Алиса / Gemini."
         return {
             "success": True,
             "found": added,
             "total": total,
-            "message": f"Найдено {added} новых кандидатов, всего {total}.",
+            "message": message,
         }
     return {
         "success": False,
