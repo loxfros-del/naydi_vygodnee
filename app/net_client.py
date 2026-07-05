@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import requests
 
@@ -24,6 +24,26 @@ class FetchResult:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class DomainPolicy:
+    min_delay: int | None = None
+    max_retries: int | None = None
+    browser_fallback: bool = True
+    manual_check_friendly: bool = False
+
+
+DOMAIN_POLICIES: dict[str, DomainPolicy] = {
+    "ozon.ru": DomainPolicy(min_delay=1, max_retries=0, browser_fallback=True, manual_check_friendly=True),
+    "dns-shop.ru": DomainPolicy(min_delay=1, max_retries=0, browser_fallback=True, manual_check_friendly=True),
+    "wildberries.ru": DomainPolicy(min_delay=1, max_retries=0, browser_fallback=True, manual_check_friendly=True),
+    "avito.ru": DomainPolicy(min_delay=1, max_retries=0, browser_fallback=True, manual_check_friendly=True),
+    "market.yandex.ru": DomainPolicy(min_delay=1, max_retries=1, browser_fallback=True, manual_check_friendly=True),
+    "mvideo.ru": DomainPolicy(min_delay=1, max_retries=1, browser_fallback=True, manual_check_friendly=True),
+    "citilink.ru": DomainPolicy(min_delay=1, max_retries=1, browser_fallback=True, manual_check_friendly=True),
+    "megamarket.ru": DomainPolicy(min_delay=1, max_retries=0, browser_fallback=True, manual_check_friendly=True),
+}
+
+
 _CACHE: dict[str, FetchResult] = {}
 _LAST_DOMAIN_HIT: dict[str, float] = {}
 
@@ -42,12 +62,31 @@ def _domain(url: str) -> str:
         return ""
 
 
-def _sleep_for_domain(url: str) -> None:
+def get_domain_policy(url: str) -> DomainPolicy:
+    domain = _domain(url)
+    for policy_domain, policy in DOMAIN_POLICIES.items():
+        if domain == policy_domain or domain.endswith(f".{policy_domain}"):
+            return policy
+    return DomainPolicy()
+
+
+def _cache_key(url: str, params: dict | None = None) -> str:
+    if not params:
+        return url
+    query = urlencode(sorted(params.items()), doseq=True)
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}{query}"
+
+
+def _sleep_for_domain(url: str, policy: DomainPolicy) -> None:
     domain = _domain(url)
     if not domain:
         return
 
-    delay = max(0, int(getattr(settings, "DOMAIN_RATE_LIMIT_SECONDS", 2) or 0))
+    delay_value = policy.min_delay
+    if delay_value is None:
+        delay_value = int(getattr(settings, "DOMAIN_RATE_LIMIT_SECONDS", 2) or 0)
+    delay = max(0, int(delay_value or 0))
     if delay <= 0:
         return
 
@@ -101,14 +140,23 @@ def fetch_http(
     *,
     params: dict | None = None,
     headers: dict | None = None,
+    timeout: int | None = None,
+    retries: int | None = None,
     use_cache: bool = True,
 ) -> FetchResult:
-    if use_cache and url in _CACHE:
-        cached = _CACHE[url]
+    cache_key = _cache_key(url, params)
+    if use_cache and cache_key in _CACHE:
+        cached = _CACHE[cache_key]
         return FetchResult(**{**cached.__dict__, "fetch_provider": "http_cache"})
 
-    timeout = max(2, int(getattr(settings, "FETCH_TIMEOUT_SECONDS", 20) or 20))
-    retries = max(0, int(getattr(settings, "FETCH_RETRIES", 2) or 2))
+    policy = get_domain_policy(url)
+    request_timeout = max(2, int(timeout if timeout is not None else getattr(settings, "FETCH_TIMEOUT_SECONDS", 20) or 20))
+    retries_value = policy.max_retries
+    if retries_value is None:
+        retries_value = retries
+    if retries_value is None:
+        retries_value = int(getattr(settings, "FETCH_RETRIES", 2) or 2)
+    request_retries = max(0, int(retries_value or 0))
     proxies = _proxy_config()
     used_proxy = proxies is not None
 
@@ -122,15 +170,15 @@ def fetch_http(
 
     last_error = ""
 
-    for attempt in range(retries + 1):
+    for attempt in range(request_retries + 1):
         try:
-            _sleep_for_domain(url)
+            _sleep_for_domain(url, policy)
 
             response = requests.get(
                 url,
                 params=params,
                 headers=request_headers,
-                timeout=timeout,
+                timeout=request_timeout,
                 allow_redirects=True,
                 proxies=proxies,
             )
@@ -149,10 +197,10 @@ def fetch_http(
                     used_proxy=used_proxy,
                     retry_count=attempt,
                 )
-                _CACHE[url] = result
+                _CACHE[cache_key] = result
                 return result
 
-            if 500 <= status_code <= 599 and attempt < retries:
+            if 500 <= status_code <= 599 and attempt < request_retries:
                 time.sleep(0.5 * (attempt + 1))
                 continue
 
@@ -169,12 +217,12 @@ def fetch_http(
                 used_proxy=used_proxy,
                 retry_count=attempt,
             )
-            _CACHE[url] = result
+            _CACHE[cache_key] = result
             return result
 
         except requests.Timeout as exc:
             last_error = f"timeout: {exc}"
-            if attempt < retries:
+            if attempt < request_retries:
                 time.sleep(0.5 * (attempt + 1))
                 continue
 
@@ -186,7 +234,7 @@ def fetch_http(
                 retry_count=attempt,
                 error=last_error,
             )
-            _CACHE[url] = result
+            _CACHE[cache_key] = result
             return result
 
         except requests.RequestException as exc:
@@ -200,13 +248,13 @@ def fetch_http(
                 retry_count=attempt,
                 error=last_error,
             )
-            _CACHE[url] = result
+            _CACHE[cache_key] = result
             return result
 
     return FetchResult(
         ok=False,
         blocked_reason="unknown_error",
         used_proxy=used_proxy,
-        retry_count=retries,
+        retry_count=request_retries,
         error=last_error,
     )

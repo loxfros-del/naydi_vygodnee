@@ -11,7 +11,7 @@ from urllib.parse import unquote, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from app.net_client import fetch_http
+from app.net_client import fetch_http, get_domain_policy
 from app.config import settings
 from app.db import Request
 
@@ -835,9 +835,12 @@ def _is_blocked_error(exc: Exception) -> bool:
 def _looks_safe_for_manual_check(candidate: Any, req: Request, source: str, url: str) -> bool:
     title = str(getattr(candidate, "title", "") or "").strip()
     price = getattr(candidate, "price", None)
-    if not title or not price or not url:
+    policy = get_domain_policy(url)
+    if not title or not url:
         return False
-    if source not in TRUSTED_BLOCKED_SOURCES and source != "avito_search":
+    if not price and source != "avito_search":
+        return False
+    if source not in TRUSTED_BLOCKED_SOURCES and not policy.manual_check_friendly:
         return False
     if not _looks_like_product_url(url):
         return False
@@ -849,7 +852,7 @@ def _looks_safe_for_manual_check(candidate: Any, req: Request, source: str, url:
     try:
         price_value = int(price)
     except (TypeError, ValueError):
-        return False
+        return source == "avito_search"
     return 1_000 <= price_value <= 10_000_000
 
 
@@ -982,9 +985,11 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
     temp.verify_status = ""
     verify_status = classify_verified_candidate(temp, req)
 
-    if getattr(candidate, "source", "") == "avito_search" and not req.is_used_allowed and verify_status == VERIFIED_GOOD:
+    if getattr(candidate, "source", "") == "avito_search" and verify_status == VERIFIED_GOOD:
         verify_status = VERIFIED_OK
-        risks.extend(["проверить продавца", "проверить город", "проверить состояние", "проверить отзывы", "б/у не разрешено клиентом"])
+        risks.extend(["проверить продавца", "проверить город", "проверить состояние", "проверить отзывы"])
+        if not req.is_used_allowed:
+            risks.append("б/у не разрешено клиентом")
 
     if _is_ps5_tv_request(req):
         combined = f"{page_title} {getattr(candidate, 'snippet', '')}".lower()

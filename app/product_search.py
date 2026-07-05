@@ -11,7 +11,7 @@ import json
 import logging
 import re
 import time
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 from urllib.parse import urlparse, urlunparse, urlencode
 
 import requests
@@ -19,12 +19,15 @@ import requests
 from app.config import settings
 from app.candidate_verifier import (
     BAD_ENCODING,
+    NOT_PRODUCT_PAGE,
     OVER_BUDGET_SOFT,
     PRICE_MISSING,
     REMOVED_LISTING,
+    UNAVAILABLE,
     VERIFIED_GOOD,
     VERIFIED_OK,
     VERIFY_BLOCKED,
+    detect_product_category,
     verify_candidate,
     verify_candidates,
 )
@@ -35,6 +38,7 @@ from app.db import (
     get_search_results,
     replace_manual_search_links,
 )
+from app.net_client import FetchResult, fetch_http
 from app.playwright_verifier import verify_with_playwright_fallback
 from app.price_extractor import extract_price
 from app.search_links import build_search_query, generate_search_links
@@ -129,8 +133,13 @@ class SearchCollection:
         "playwright_used": 0,
         "playwright_verified": 0,
         "playwright_failed": 0,
+        "playwright_skipped": 0,
+        "browser_provider": "",
+        "browser_provider_fallback_reason": "",
         "manual_check_after_playwright": 0,
         "manual_check_saved_without_price": 0,
+        "low_price_suspect": 0,
+        "city_mismatch": 0,
         "saved": 0,
     })
 
@@ -178,6 +187,30 @@ SITE_SOURCES = tuple((source.domains[0], source.source) for source in SEARCH_SOU
 SOURCE_TYPE_BY_SOURCE = {source.source: source.source_type for source in SEARCH_SOURCES}
 SOURCE_PRIORITY = {source.source: source.priority for source in SEARCH_SOURCES}
 TRUSTED_PRODUCT_SOURCES = {source.source for source in SEARCH_SOURCES}
+RANK_TRUSTED_SOURCES = {
+    "yandex_market_search",
+    "mvideo_search",
+    "citilink_search",
+    "dns_search",
+    "ozon_search",
+    "wildberries",
+    "megamarket_search",
+}
+LOW_PRICE_LIMITS = {
+    "laptop": 10_000,
+    "phone": 5_000,
+    "tv": 5_000,
+    "chair": 1_000,
+    "headphones": 300,
+}
+LOW_PRICE_RISK = "подозрительно низкая цена"
+CITY_MISMATCH_RISK = "город объявления не совпадает с запросом"
+GENERIC_TITLE_RISK = "слишком общий title"
+AVITO_CITY_SLUGS = {
+    "москва": {"moskva", "moscow"},
+    "ярославль": {"yaroslavl"},
+}
+AVITO_NON_CITY_PATHS = {"rossiya", "all", "audio_i_video", "bytovaya_tehnika", "transport"}
 KNOWN_TV_BRANDS = ("tcl", "hisense", "haier", "lg", "samsung", "xiaomi", "tuvio", "sber", "sony", "philips", "asano")
 # Ориентир для score. Низкий score переводит товарную карточку в WEAK,
 # а не в REJECTED_AUTO: администратор должен иметь возможность её проверить.
@@ -241,6 +274,42 @@ def _search_timeout() -> int:
     return max(2, int(getattr(settings, "SEARCH_TIMEOUT_SECONDS", 8) or 8))
 
 
+class _FetchHttpResponse:
+    def __init__(self, result: FetchResult, fallback_url: str):
+        self.text = result.html or ""
+        self.url = result.final_url or fallback_url
+        self.status_code = result.status_code or 0
+        self.fetch_result = result
+
+    def json(self, **kwargs: Any) -> Any:
+        return json.loads(self.text, **kwargs)
+
+
+def _response_from_fetch_result(result: FetchResult, url: str) -> _FetchHttpResponse:
+    if result.ok:
+        return _FetchHttpResponse(result, url)
+
+    if result.blocked_reason == "timeout":
+        exc = requests.Timeout(result.error or f"timeout for url: {url}")
+        exc.fetch_result = result
+        raise exc
+
+    if result.blocked:
+        response = requests.Response()
+        response.status_code = result.status_code or 0
+        response.url = result.final_url or url
+        error = requests.HTTPError(
+            f"{result.status_code or ''} blocked: {result.blocked_reason or 'blocked'} for url: {url}".strip()
+        )
+        error.response = response
+        error.fetch_result = result
+        raise error
+
+    exc = requests.RequestException(result.error or result.blocked_reason or "HTTP-запрос не выполнен")
+    exc.fetch_result = result
+    raise exc
+
+
 def _is_source_enabled(source: SearchSourceDefinition) -> bool:
     return bool(getattr(settings, source.enabled_attr, True))
 
@@ -256,37 +325,6 @@ def _enabled_site_sources() -> list[SearchSourceDefinition]:
 
 def _is_generic_enabled() -> bool:
     return bool(getattr(settings, "ENABLE_SEARCH_GENERIC", True))
-
-
-def _safe_get(url: str, *, params: Optional[dict] = None, headers: Optional[dict] = None) -> requests.Response:
-    """HTTP GET с timeout, proxy из окружения и одним повтором без долбёжки 429."""
-    last_exc: Optional[Exception] = None
-    for attempt in range(2):
-        try:
-            response = requests.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=_search_timeout(),
-            )
-            if response.status_code == 429:
-                response.raise_for_status()
-            if response.status_code in {500, 502, 503, 504} and attempt == 0:
-                time.sleep(0.25)
-                continue
-            response.raise_for_status()
-            return response
-        except requests.HTTPError:
-            raise
-        except (requests.Timeout, requests.ConnectionError) as exc:
-            last_exc = exc
-            if attempt == 0:
-                time.sleep(0.25)
-                continue
-            raise
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("HTTP-запрос не выполнен")
 
 
 def _request_product(req: Request) -> str:
@@ -772,6 +810,139 @@ def _budget_value(req: Request) -> Optional[int]:
         return None
 
 
+def _normalise_city_key(value: str) -> str:
+    value = (value or "").lower().replace("ё", "е").strip()
+    return re.sub(r"[^a-zа-я0-9]+", "_", value).strip("_")
+
+
+def _avito_url_city_slug(url: str) -> str:
+    parsed = urlparse(url)
+    parts = [part.lower() for part in parsed.path.strip("/").split("/") if part]
+    if not parts or parts[0] in AVITO_NON_CITY_PATHS:
+        return ""
+    return parts[0].replace("_", "-")
+
+
+def _is_low_price_suspect(req: Request, candidate: ProductCandidate) -> bool:
+    price = getattr(candidate, "price", None)
+    if price is None:
+        return False
+    try:
+        price_value = int(price)
+    except (TypeError, ValueError):
+        return False
+    category = detect_product_category(req, candidate)
+    limit = LOW_PRICE_LIMITS.get(category)
+    return bool(limit and price_value < limit)
+
+
+def _is_avito_city_mismatch(req: Request, candidate: ProductCandidate) -> bool:
+    if candidate.source != "avito_search" or not req.city:
+        return False
+    slug = _avito_url_city_slug(candidate.url)
+    if not slug:
+        return False
+    expected = AVITO_CITY_SLUGS.get(_normalise_city_key(req.city))
+    return bool(expected and slug not in expected)
+
+
+def _has_risk_flag(candidate: ProductCandidate, risk: str) -> bool:
+    return risk in {str(item).strip() for item in (candidate.risk_flags or [])}
+
+
+def _add_risk_flag(candidate: ProductCandidate, risk: str) -> None:
+    risks = list(candidate.risk_flags or [])
+    if risk not in risks:
+        risks.append(risk)
+    candidate.risk_flags = list(dict.fromkeys(str(item) for item in risks if str(item).strip()))
+
+
+def _has_generic_title(candidate: ProductCandidate) -> bool:
+    title = (candidate.title or "").strip().lower()
+    if not title:
+        return True
+    normalized = re.sub(r"[^a-zа-яё0-9]+", " ", title).strip()
+    if normalized in {
+        "ноутбуки", "ноутбуки купить", "телевизоры", "смартфоны",
+        "мобильные телефоны", "наушники", "офисные кресла",
+        "компьютерные кресла",
+    }:
+        return True
+    if not _has_concrete_model(candidate) and any(marker in normalized for marker in (
+        "каталог", "результаты поиска", "интернет магазин", "купить в",
+    )):
+        return True
+    return False
+
+
+def _candidate_budget_status(req: Request, candidate: ProductCandidate) -> str:
+    price = getattr(candidate, "price", None)
+    if price is None:
+        return PRICE_MISSING
+    try:
+        price_value = int(price)
+    except (TypeError, ValueError):
+        return PRICE_MISSING
+    budget = _budget_value(req)
+    if not budget:
+        return ""
+    return "IN_BUDGET" if price_value <= budget else OVER_BUDGET_SOFT if price_value <= budget * 1.15 else "OVER_BUDGET_HARD"
+
+
+def _candidate_rank_score(req: Request, candidate: ProductCandidate) -> float:
+    status = _verified_status(candidate)
+    score = {
+        VERIFIED_GOOD: 100.0,
+        VERIFIED_OK: 70.0,
+        VERIFY_BLOCKED: 50.0,
+        OVER_BUDGET_SOFT: 35.0,
+    }.get(status, 20.0)
+
+    price = getattr(candidate, "price", None)
+    budget_status = _candidate_budget_status(req, candidate)
+    if price is None:
+        score -= 40
+    else:
+        score += 30
+    if budget_status == "IN_BUDGET":
+        score += 20
+    elif budget_status == OVER_BUDGET_SOFT:
+        score -= 10
+    elif budget_status == "OVER_BUDGET_HARD":
+        score -= 40
+
+    if candidate.source in RANK_TRUSTED_SOURCES:
+        score += 10
+    elif candidate.source == "avito_search":
+        score += 5
+
+    if _has_risk_flag(candidate, LOW_PRICE_RISK):
+        score = min(score - 50, 80)
+    if _has_risk_flag(candidate, CITY_MISMATCH_RISK):
+        score = min(score - 50, 75)
+    if status in {NOT_PRODUCT_PAGE, UNAVAILABLE, REMOVED_LISTING, PRICE_MISSING}:
+        score -= 80 if status != PRICE_MISSING else 40
+    if _has_risk_flag(candidate, GENERIC_TITLE_RISK):
+        score -= 30
+    if not candidate.title or not candidate.url:
+        score -= 80
+
+    return max(0.0, min(200.0, score))
+
+
+def _apply_ranking_sanity(req: Request, candidate: ProductCandidate) -> None:
+    if _is_low_price_suspect(req, candidate):
+        _add_risk_flag(candidate, LOW_PRICE_RISK)
+    if _is_avito_city_mismatch(req, candidate):
+        _add_risk_flag(candidate, CITY_MISMATCH_RISK)
+    if _has_generic_title(candidate):
+        _add_risk_flag(candidate, GENERIC_TITLE_RISK)
+
+    if _has_risk_flag(candidate, LOW_PRICE_RISK) or _has_risk_flag(candidate, CITY_MISMATCH_RISK):
+        candidate.quality = QUALITY_WEAK if candidate.quality != QUALITY_TRASH else candidate.quality
+    candidate.score = _candidate_rank_score(req, candidate)
+
+
 def score_result(
     title: str,
     snippet: str,
@@ -895,7 +1066,7 @@ class WildberriesAdapter:
     endpoint = "https://search.wb.ru/exactmatch/ru/common/v13/search"
 
     @staticmethod
-    def _parse_payload(response: requests.Response) -> dict:
+    def _parse_payload(response: _FetchHttpResponse) -> dict:
         """WB иногда отдаёт не-JSON (антибот/HTML) с неверным Content-Type.
 
         Поэтому разбор делаем терпимым: сначала пробуем response.json(),
@@ -920,7 +1091,7 @@ class WildberriesAdapter:
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
 
-        response = _safe_get(
+        fetch_result = fetch_http(
             self.endpoint,
             params={
                 "appType": 1,
@@ -934,7 +1105,10 @@ class WildberriesAdapter:
                 "page": 1,
             },
             headers={"User-Agent": "Mozilla/5.0 (compatible; NaydiVygodneeBot/2.0)"},
+            timeout=_search_timeout(),
+            retries=1,
         )
+        response = _response_from_fetch_result(fetch_result, self.endpoint)
         payload = self._parse_payload(response)
         if not payload:
             return []
@@ -1156,23 +1330,31 @@ def _model_dedupe_key(candidate: ProductCandidate) -> str:
     return " ".join(words[:6]) or candidate.url.lower()
 
 
-def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, int, int, float, str]:
+def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[float, int, int, int, int, int, str]:
     order = {
         VERIFIED_GOOD: 0,
         VERIFIED_OK: 1,
-        OVER_BUDGET_SOFT: 2,
-        VERIFY_BLOCKED: 3,
+        VERIFY_BLOCKED: 2,
+        OVER_BUDGET_SOFT: 3,
     }
-    budget = _budget_value(req)
-    price = candidate.price or 0
-    over_budget = 0
-    if budget and price:
-        over_budget = 0 if price <= budget else 1 if price <= budget * 1.15 else 2
+    try:
+        price = int(candidate.price or 0)
+    except (TypeError, ValueError):
+        price = 0
+    budget_status = _candidate_budget_status(req, candidate)
+    budget_order = 0 if budget_status == "IN_BUDGET" else 1 if budget_status == "" else 2
+    risk_order = int(
+        _has_risk_flag(candidate, LOW_PRICE_RISK)
+        or _has_risk_flag(candidate, CITY_MISMATCH_RISK)
+        or _has_risk_flag(candidate, GENERIC_TITLE_RISK)
+    )
     return (
-        order.get(_verified_status(candidate), 9),
-        over_budget,
-        price or 10_000_000,
         -float(candidate.score or 0),
+        risk_order,
+        order.get(_verified_status(candidate), 9),
+        1 if candidate.price is None else 0,
+        budget_order,
+        price or 10_000_000,
         candidate.title.lower(),
     )
 
@@ -1208,6 +1390,10 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
     stats["playwright_used"] = playwright_summary.used
     stats["playwright_verified"] = playwright_summary.verified
     stats["playwright_failed"] = playwright_summary.failed
+    stats["playwright_skipped"] = playwright_summary.skipped
+    stats["playwright_skipped_reason"] = playwright_summary.skipped_reason or {}
+    stats["browser_provider"] = playwright_summary.browser_provider
+    stats["browser_provider_fallback_reason"] = playwright_summary.browser_provider_fallback_reason
     stats["manual_check_after_playwright"] = playwright_summary.manual_check
 
     kept: list[ProductCandidate] = []
@@ -1227,9 +1413,13 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
         kept.extend(extra)
         stats["manual_check_saved_without_price"] = len(extra)
 
+    for candidate in kept:
+        _apply_ranking_sanity(req, candidate)
     kept = _dedupe_verified_candidates(req, kept)
     # В админку отправляем не весь хвост поисковой выдачи, а только лучшие.
     collection.candidates = kept[:10]
+    stats["low_price_suspect"] = sum(1 for item in collection.candidates if _has_risk_flag(item, LOW_PRICE_RISK))
+    stats["city_mismatch"] = sum(1 for item in collection.candidates if _has_risk_flag(item, CITY_MISMATCH_RISK))
     stats["saved"] = len(collection.candidates)
     collection.quality_stats["saved"] = len(collection.candidates)
     collection.attempts.append(SearchAttemptData(
@@ -1255,8 +1445,14 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
             f"playwright_used={stats.get('playwright_used', 0)}; "
             f"playwright_verified={stats.get('playwright_verified', 0)}; "
             f"playwright_failed={stats.get('playwright_failed', 0)}; "
+            f"playwright_skipped={stats.get('playwright_skipped', 0)}; "
+            f"playwright_skipped_reason={stats.get('playwright_skipped_reason', {})}; "
+            f"browser_provider={stats.get('browser_provider', '')}; "
+            f"browser_provider_fallback_reason={stats.get('browser_provider_fallback_reason', '')}; "
             f"manual_check_after_playwright={stats.get('manual_check_after_playwright', 0)}; "
             f"manual_check_saved_without_price={stats.get('manual_check_saved_without_price', 0)}; "
+            f"low_price_suspect={stats.get('low_price_suspect', 0)}; "
+            f"city_mismatch={stats.get('city_mismatch', 0)}; "
             f"saved={stats['saved']}"
         ),
     ))

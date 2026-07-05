@@ -146,6 +146,9 @@ def main() -> int:
                 f"  {cand.url}"
             )
 
+    def is_manual_check_without_price(item) -> bool:
+        return item.price is None and getattr(item, "verify_status", "") in {VERIFY_BLOCKED, "NEED_MANUAL_CHECK"}
+
     bad_saved = [
         item for item in saved_candidates
         if "bing.com/aclick" in item.url.lower()
@@ -157,7 +160,7 @@ def main() -> int:
         or "/articles/" in item.url.lower()
         or "/article/" in item.url.lower()
         or "journal.citilink.ru" in item.url.lower()
-        or item.price is None
+        or (item.price is None and not is_manual_check_without_price(item))
         or getattr(item, "availability", "") in {"UNAVAILABLE", REMOVED_LISTING}
         or item.quality == "TRASH"
         or getattr(item, "verify_status", "") in {
