@@ -26,6 +26,7 @@ WRONG_PRODUCT = "WRONG_PRODUCT"
 BAD_ENCODING = "BAD_ENCODING"
 REJECTED = "REJECTED"
 VERIFY_ERROR = "VERIFY_ERROR"
+VERIFY_BLOCKED = "VERIFY_BLOCKED"
 OVER_BUDGET_SOFT = "OVER_BUDGET_SOFT"
 OVER_BUDGET_HARD = "OVER_BUDGET_HARD"
 
@@ -39,6 +40,7 @@ class VerifiedCandidate:
     availability: str = ""
     reason: str = ""
     risk_flags: list[str] = field(default_factory=list)
+    facts: dict[str, Any] = field(default_factory=dict)
     html_loaded: bool = False
     keep_for_admin: bool = False
 
@@ -102,6 +104,28 @@ PRICE_GOOD_CONTEXT = (
     "sale", "current", "final", "card-price",
 )
 MOJIBAKE_MARKERS = ("Ð", "Ñ", "Ð¢", "Ðµ", "Рџ", "�")
+TRUSTED_BLOCKED_SOURCES = {
+    "yandex_market_search", "mvideo_search", "citilink_search",
+    "wildberries", "dns_search", "ozon_search",
+}
+BRAND_NAMES = {
+    "tcl": "TCL",
+    "hisense": "Hisense",
+    "haier": "Haier",
+    "lg": "LG",
+    "samsung": "Samsung",
+    "xiaomi": "Xiaomi",
+    "tuvio": "Tuvio",
+    "sber": "Sber",
+    "sony": "Sony",
+    "philips": "Philips",
+    "asano": "Asano",
+    "hyundai": "Hyundai",
+    "yandex": "Yandex",
+    "яндекс": "Яндекс",
+    "starwind": "StarWind",
+    "redmi": "Redmi",
+}
 
 
 def _timeout() -> int:
@@ -411,6 +435,272 @@ def extract_availability(source: str, html: str, text: str) -> str:
     return "UNKNOWN"
 
 
+def _budget_status(price: Optional[int], req: Request) -> str:
+    budget = _budget_value(req)
+    if price is None:
+        return PRICE_MISSING
+    if not budget:
+        return ""
+    if price <= budget:
+        return "IN_BUDGET"
+    if price <= budget * 1.15:
+        return OVER_BUDGET_SOFT
+    return OVER_BUDGET_HARD
+
+
+def _extract_brand(text: str) -> str:
+    lowered = text.lower()
+    for key, display in BRAND_NAMES.items():
+        if re.search(rf"(?<![a-zа-яё0-9]){re.escape(key)}(?![a-zа-яё0-9])", lowered):
+            return display
+    return ""
+
+
+def _extract_model(text: str, brand: str = "") -> tuple[str, str]:
+    matches = [match.group(0) for match in TV_MODEL_RE.finditer(text)]
+    model_code = ""
+    for value in matches:
+        lower = value.lower()
+        if lower in {"1080p"} or lower.endswith("hz") or lower.endswith("гц"):
+            continue
+        if value.lower() in {"fullhd"}:
+            continue
+        model_code = value
+        break
+    if not model_code:
+        return "", ""
+    model_key = model_code.upper()
+    model = f"{brand} {model_key}".strip() if brand and brand.lower() not in model_key.lower() else model_key
+    return model, model_key
+
+
+def _extract_diagonal(text: str, model_key: str = "") -> str:
+    patterns = [
+        r"(?<!\d)(\d{2,3})\s*(?:\"|”|″|дюйм|дюймов|дюйма)",
+        r"(?<!\d)(\d{2,3})\s*(?:см)?\)\s*телевизор",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            value = int(match.group(1))
+            if 24 <= value <= 100:
+                return str(value)
+    match = re.search(r"(?<!\d)(\d{2})(?=[A-ZА-Я])", model_key or "")
+    if match:
+        value = int(match.group(1))
+        if 24 <= value <= 100:
+            return str(value)
+    return ""
+
+
+def _extract_resolution(text: str) -> str:
+    lowered = text.lower()
+    if any(word in lowered for word in ("full hd", "fullhd", "1080p", "1920x1080", "1920 x 1080")):
+        return "Full HD"
+    if any(word in lowered for word in ("4k", "uhd", "ultra hd", "3840x2160", "3840 x 2160")):
+        return "4K"
+    return ""
+
+
+def _extract_refresh_rate(text: str) -> str:
+    match = re.search(r"\b(144|120|100|60|50)\s*(?:гц|hz)\b", text, flags=re.IGNORECASE)
+    return f"{match.group(1)} Гц" if match else ""
+
+
+def _extract_hdmi(text: str) -> str:
+    lowered = text.lower()
+    if re.search(r"hdmi\s*2[.,]1", lowered):
+        return "HDMI 2.1"
+    if "hdmi" in lowered:
+        return "HDMI"
+    return ""
+
+
+def _extract_matrix_type(text: str) -> str:
+    lowered = text.lower()
+    if "mini led" in lowered or "mini-led" in lowered or "мини led" in lowered:
+        return "Mini LED"
+    if "oled" in lowered:
+        return "OLED"
+    if "qled" in lowered:
+        return "QLED"
+    if re.search(r"\bled\b", lowered):
+        return "LED"
+    return ""
+
+
+def _extract_smart_tv(text: str) -> Any:
+    lowered = text.lower()
+    if "smart tv" in lowered or "смарт тв" in lowered or "смарт-тв" in lowered:
+        return True
+    return "unknown"
+
+
+def _extract_os(text: str) -> str:
+    lowered = text.lower()
+    options = (
+        ("google tv", "Google TV"),
+        ("android tv", "Android TV"),
+        ("tizen", "Tizen"),
+        ("webos", "webOS"),
+        ("web os", "webOS"),
+        ("yaos", "YaOS"),
+        ("яндекс тв", "Яндекс ТВ"),
+        ("салют", "Салют ТВ"),
+    )
+    for marker, value in options:
+        if marker in lowered:
+            return value
+    return ""
+
+
+def _extract_rating_reviews(text: str) -> tuple[Optional[float], Optional[int]]:
+    rating = None
+    reviews = None
+    rating_match = re.search(r"(?:рейтинг|rating)\D{0,20}([1-5](?:[.,]\d)?)", text, flags=re.IGNORECASE)
+    if rating_match:
+        try:
+            rating = float(rating_match.group(1).replace(",", "."))
+        except ValueError:
+            rating = None
+    reviews_match = re.search(r"(\d{1,6})\s*(?:отзыв|reviews?)", text, flags=re.IGNORECASE)
+    if reviews_match:
+        reviews = int(reviews_match.group(1))
+    return rating, reviews
+
+
+def _availability_bool(availability: str) -> Optional[bool]:
+    if availability == "AVAILABLE":
+        return True
+    if availability in {"UNAVAILABLE", REMOVED_LISTING}:
+        return False
+    return None
+
+
+def _category_from_text(text: str) -> str:
+    lowered = (text or "").lower()
+    if any(word in lowered for word in ("ноутбук", "ноут", "laptop", "macbook")):
+        return "laptop"
+    if any(word in lowered for word in ("iphone", "айфон", "смартфон", "телефон")):
+        return "phone"
+    if any(word in lowered for word in ("наушник", "гарнитур", "headphone", "earbuds", "airpods")):
+        return "headphones"
+    if any(word in lowered for word in ("кресло", "стул", "chair")):
+        return "chair"
+    if any(word in lowered for word in ("телевизор", " smart tv", " tv ", " qled", " oled")):
+        return "tv"
+    return "unknown"
+
+
+def detect_product_category(req: Request, candidate: Any = None, text: str = "") -> str:
+    request_text = f"{req.product_name or req.product} {req.original_query}"
+    request_category = _category_from_text(request_text)
+    if request_category != "unknown":
+        return request_category
+    candidate_text = " ".join([
+        str(getattr(candidate, "title", "") or ""),
+        str(getattr(candidate, "snippet", "") or ""),
+        text or "",
+    ])
+    return _category_from_text(candidate_text)
+
+
+def extract_product_facts(
+    candidate: Any,
+    req: Request,
+    html: str = "",
+    text: str = "",
+    title: str = "",
+    price: Optional[int] = None,
+    availability: str = "",
+) -> dict[str, Any]:
+    """Собирает структурированные факты товара без генерации описания."""
+    soup_text = text or BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)
+    combined = _normalise_space(
+        " ".join([
+            title or getattr(candidate, "title", "") or "",
+            getattr(candidate, "snippet", "") or "",
+            soup_text[:6000],
+        ])
+    )
+    brand = _extract_brand(combined)
+    model, model_key = _extract_model(combined, brand)
+    diagonal = _extract_diagonal(combined, model_key)
+    resolution = _extract_resolution(combined)
+    refresh_rate = _extract_refresh_rate(combined)
+    hdmi = _extract_hdmi(combined)
+    matrix_type = _extract_matrix_type(combined)
+    smart_tv = _extract_smart_tv(combined)
+    os_name = _extract_os(combined)
+    rating, reviews_count = _extract_rating_reviews(combined)
+    actual_price = price if price is not None else getattr(candidate, "price", None)
+    source = str(getattr(candidate, "source", "") or _source_from_url(getattr(candidate, "url", "")))
+    url = str(getattr(candidate, "url", "") or "")
+    category = detect_product_category(req, candidate, combined)
+    if category != "tv":
+        return {
+            "category": category,
+            "brand": brand,
+            "model": model,
+            "model_key": model_key,
+            "price": actual_price,
+            "store": source,
+            "url": url,
+            "available": _availability_bool(availability),
+            "availability_text": availability or "UNKNOWN",
+            "rating": rating,
+            "reviews_count": reviews_count,
+            "budget_status": _budget_status(actual_price, req),
+            "warnings": [],
+        }
+    facts = {
+        "category": category,
+        "brand": brand,
+        "model": model,
+        "model_key": model_key,
+        "diagonal": diagonal,
+        "resolution": resolution,
+        "refresh_rate": refresh_rate,
+        "hdmi": hdmi,
+        "matrix_type": matrix_type,
+        "smart_tv": smart_tv,
+        "os": os_name,
+        "price": actual_price,
+        "store": source,
+        "url": url,
+        "available": _availability_bool(availability),
+        "availability_text": availability or "UNKNOWN",
+        "rating": rating,
+        "reviews_count": reviews_count,
+        "budget_status": _budget_status(actual_price, req),
+        "ps5_flags": [],
+        "warnings": [],
+    }
+    if _is_ps5_tv_request(req):
+        lowered = combined.lower()
+        if resolution == "4K":
+            facts["ps5_flags"].append("4K")
+        if refresh_rate in {"120 Гц", "144 Гц"}:
+            facts["ps5_flags"].append(refresh_rate)
+        if hdmi == "HDMI 2.1":
+            facts["ps5_flags"].append("HDMI 2.1")
+        if "vrr" in lowered:
+            facts["ps5_flags"].append("VRR")
+        if matrix_type in {"QLED", "OLED", "Mini LED"}:
+            facts["ps5_flags"].append(matrix_type)
+        if refresh_rate == "60 Гц":
+            facts["warnings"].append("60 Гц, для PS5 не идеал")
+        if not refresh_rate:
+            facts["warnings"].append("герцовка не подтверждена")
+        if hdmi != "HDMI 2.1":
+            facts["warnings"].append("HDMI 2.1 не подтверждён")
+        if resolution == "Full HD":
+            facts["warnings"].append("Full HD слабый вариант для PS5")
+    facts["ps5_flags"] = list(dict.fromkeys(facts["ps5_flags"]))
+    facts["warnings"] = list(dict.fromkeys(facts["warnings"]))
+    return facts
+
+
 def _is_tv_request(req: Request) -> bool:
     product = f"{req.product_name or req.product} {req.original_query}".lower()
     return "телевизор" in product or re.search(r"\btv\b", product) is not None
@@ -495,13 +785,16 @@ def _apply_verified(candidate: Any, verified: VerifiedCandidate) -> VerifiedCand
     if verified.price is not None:
         candidate.price = verified.price
     candidate.availability = verified.availability
+    if verified.facts:
+        candidate.product_facts = verified.facts
+        candidate.facts_json = json.dumps(verified.facts, ensure_ascii=False)
     candidate.description = getattr(candidate, "description", "") or getattr(candidate, "snippet", "")
     candidate.verify_status = verified.verify_status
     if verified.verify_status == VERIFIED_GOOD:
         candidate.quality = "GOOD"
         candidate.status = "CANDIDATE"
         candidate.score = min(float(getattr(candidate, "score", 0) or 0) + 15, 99)
-    elif verified.verify_status in {VERIFIED_OK, OVER_BUDGET_SOFT}:
+    elif verified.verify_status in {VERIFIED_OK, OVER_BUDGET_SOFT, VERIFY_BLOCKED}:
         candidate.quality = "OK"
         candidate.status = "CANDIDATE"
     elif verified.keep_for_admin:
@@ -511,6 +804,43 @@ def _apply_verified(candidate: Any, verified: VerifiedCandidate) -> VerifiedCand
         candidate.quality = "TRASH"
         candidate.status = "REJECTED_AUTO"
     return verified
+
+
+def _is_blocked_error(exc: Exception) -> bool:
+    if isinstance(exc, requests.HTTPError):
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code in {401, 403, 429, 498}:
+            return True
+    if isinstance(exc, requests.Timeout):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in (
+        "401", "403", "429", "498", "forbidden", "unauthorized",
+        "too many requests", "timeout", "timed out", "captcha",
+        "access denied", "доступ запрещ", "robot", "anti-bot",
+    ))
+
+
+def _looks_safe_for_manual_check(candidate: Any, req: Request, source: str, url: str) -> bool:
+    title = str(getattr(candidate, "title", "") or "").strip()
+    price = getattr(candidate, "price", None)
+    if not title or not price or not url:
+        return False
+    if source not in TRUSTED_BLOCKED_SOURCES and source != "avito_search":
+        return False
+    if not _looks_like_product_url(url):
+        return False
+    lowered = title.lower()
+    if any(marker in lowered for marker in ARTICLE_WORDS):
+        return False
+    if _wrong_product(candidate, req):
+        return False
+    try:
+        price_value = int(price)
+    except (TypeError, ValueError):
+        return False
+    return 1_000 <= price_value <= 10_000_000
 
 
 def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
@@ -530,7 +860,37 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
     try:
         response = _safe_get(url)
     except Exception as exc:
+        if _is_blocked_error(exc) and _looks_safe_for_manual_check(candidate, req, source, url):
+            risks = [
+                "страница заблокировала проверку",
+                "цена найдена в выдаче, нужна ручная проверка",
+            ]
+            if source == "avito_search":
+                risks.extend(["проверить продавца", "проверить город", "проверить состояние", "проверить отзывы"])
+                if not req.is_used_allowed:
+                    risks.append("б/у не разрешено клиентом")
+            facts = extract_product_facts(
+                candidate, req, title=getattr(candidate, "title", ""),
+                price=getattr(candidate, "price", None), availability="UNKNOWN",
+            )
+            verified = VerifiedCandidate(
+                candidate,
+                VERIFY_BLOCKED,
+                price=getattr(candidate, "price", None),
+                title=getattr(candidate, "title", ""),
+                availability="UNKNOWN",
+                reason="страница заблокировала проверку",
+                risk_flags=risks,
+                facts=facts,
+                html_loaded=False,
+                keep_for_admin=True,
+            )
+            return _apply_verified(candidate, verified)
         # Если страница не открылась, не падаем, но не показываем как проверенный товар.
+        facts = extract_product_facts(
+            candidate, req, title=getattr(candidate, "title", ""),
+            price=getattr(candidate, "price", None), availability="UNKNOWN",
+        )
         verified = VerifiedCandidate(
             candidate,
             VERIFY_ERROR,
@@ -539,6 +899,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
             availability="UNKNOWN",
             reason=f"ошибка открытия сайта: {str(exc)[:180]}",
             risk_flags=["страница не проверена"],
+            facts=facts,
             html_loaded=False,
             keep_for_admin=False,
         )
@@ -553,28 +914,30 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
         verified = VerifiedCandidate(candidate, BAD_ENCODING, title=page_title, reason="битая кодировка title", html_loaded=True)
         return _apply_verified(candidate, verified)
     if not is_valid_product_page(response.url or url, html, page_title):
-        verified = VerifiedCandidate(candidate, NOT_PRODUCT_PAGE, title=page_title, reason="не карточка товара", html_loaded=True)
+        facts = extract_product_facts(candidate, req, html, text, page_title, price=getattr(candidate, "price", None), availability="UNKNOWN")
+        verified = VerifiedCandidate(candidate, NOT_PRODUCT_PAGE, title=page_title, reason="не карточка товара", facts=facts, html_loaded=True)
         return _apply_verified(candidate, verified)
 
     availability = extract_availability(source, html, text)
     price = extract_verified_price(source, html, text, page_title)
+    facts = extract_product_facts(candidate, req, html, text, page_title, price=price, availability=availability)
     risks: list[str] = []
     if availability == REMOVED_LISTING:
         verified = VerifiedCandidate(
             candidate, REMOVED_LISTING, price=price, title=page_title,
-            availability=availability, reason="объявление/страница недоступны", html_loaded=True,
+            availability=availability, reason="объявление/страница недоступны", facts=facts, html_loaded=True,
         )
         return _apply_verified(candidate, verified)
     if availability == "UNAVAILABLE":
         verified = VerifiedCandidate(
             candidate, UNAVAILABLE, price=price, title=page_title,
-            availability=availability, reason="товар недоступен", html_loaded=True,
+            availability=availability, reason="товар недоступен", facts=facts, html_loaded=True,
         )
         return _apply_verified(candidate, verified)
     if price is None:
         verified = VerifiedCandidate(
             candidate, PRICE_MISSING, title=page_title,
-            availability=availability, reason="цена не подтверждена", html_loaded=True,
+            availability=availability, reason="цена не подтверждена", facts=facts, html_loaded=True,
         )
         return _apply_verified(candidate, verified)
 
@@ -587,6 +950,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
             title=page_title,
             availability=availability,
             reason=f"цена отличается от выдачи: было {old_price}, стало {price}",
+            facts=facts,
             html_loaded=True,
         )
         return _apply_verified(candidate, verified)
@@ -625,6 +989,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
         availability=availability,
         reason="" if keep else verify_status,
         risk_flags=risks,
+        facts=facts,
         html_loaded=True,
         keep_for_admin=keep,
     )

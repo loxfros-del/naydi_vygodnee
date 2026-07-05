@@ -20,6 +20,8 @@ from app.candidate_verifier import (
     PRICE_MISSING,
     REMOVED_LISTING,
     UNAVAILABLE,
+    VERIFY_BLOCKED,
+    detect_product_category,
 )
 from app.db import Request
 from app.product_search import collect_product_candidates
@@ -104,11 +106,24 @@ def _facts_summary(facts: dict[str, Any]) -> str:
     if not facts:
         return "нет facts_json"
     parts = []
-    for key in ("model_key", "diagonal", "resolution", "refresh_rate", "matrix_type"):
+    for key in ("category", "model_key", "diagonal", "resolution", "refresh_rate", "matrix_type"):
         value = facts.get(key)
         if value:
             parts.append(f"{key}={value}")
     return "; ".join(parts) if parts else "facts есть, ключевые поля пустые"
+
+
+def _bad_facts_count(candidates: list[Any], expected_category: str) -> int:
+    tv_fields = ("diagonal", "resolution", "refresh_rate", "hdmi", "matrix_type")
+    total = 0
+    for item in candidates:
+        facts = _facts(item)
+        category = facts.get("category") or "unknown"
+        if expected_category != "tv" and (category == "tv" or any(facts.get(field) for field in tv_fields)):
+            total += 1
+        elif category != "tv" and any(facts.get(field) for field in tv_fields):
+            total += 1
+    return total
 
 
 def _print_top_candidates(candidates: list[Any]) -> None:
@@ -125,6 +140,7 @@ def _print_top_candidates(candidates: list[Any]) -> None:
         print(f"    {index}. {title}")
         print(f"       price: {price_text}")
         print(f"       source: {getattr(item, 'source', '')}")
+        print(f"       saved_as: {getattr(item, 'verify_status', getattr(item, 'quality', '-'))}")
         print(f"       url: {getattr(item, 'url', '')}")
         print(f"       budget_status: {facts.get('budget_status') or '-'}")
         print(f"       availability: {facts.get('availability_text') or getattr(item, 'availability', '') or '-'}")
@@ -148,7 +164,11 @@ def run_one(raw_query: str, index: int) -> dict[str, Any]:
     print(f"{index}. {raw_query}")
     request, parsed = _make_request(raw_query, index)
     budget = _budget_value(parsed)
-    print(f"  parsed: product={parsed.get('product_name')}; budget={parsed.get('budget')}; city={parsed.get('city')}")
+    category = detect_product_category(request)
+    print(
+        f"  parsed: product={parsed.get('product_name')}; "
+        f"category={category}; budget={parsed.get('budget')}; city={parsed.get('city')}"
+    )
 
     try:
         collection = collect_product_candidates(request, max_results=15)
@@ -166,11 +186,16 @@ def run_one(raw_query: str, index: int) -> dict[str, Any]:
     has_missing_price = _has_missing_price(saved)
     quality = _quality_label(len(saved), has_missing_price)
     stats = {
+        "parsed_product_name": parsed.get("product_name") or "",
+        "category": category,
         "RAW": len(raw_candidates),
         "checked": verify_stats.get("checked", 0),
         "saved_for_admin": len(saved),
         "verified_good": verify_stats.get("VERIFIED_GOOD", 0),
         "verified_ok": verify_stats.get("VERIFIED_OK", 0),
+        "need_manual_check": verify_stats.get(VERIFY_BLOCKED, 0),
+        "verify_blocked": verify_stats.get(VERIFY_BLOCKED, 0),
+        "blocked_by_site": verify_stats.get(VERIFY_BLOCKED, 0),
         "in_budget": _in_budget_count(saved, budget),
         "over_budget_soft": verify_stats.get("OVER_BUDGET_SOFT", 0),
         "over_budget_hard": verify_stats.get("OVER_BUDGET_HARD", 0),
@@ -180,6 +205,7 @@ def run_one(raw_query: str, index: int) -> dict[str, Any]:
         "removed_listing_hidden": verify_stats.get(REMOVED_LISTING, 0),
         "duplicates_hidden": hidden_duplicates,
         "verify_error": verify_stats.get("VERIFY_ERROR", 0),
+        "bad_facts_count": _bad_facts_count(saved, category),
     }
     print(f"  QUALITY: {quality}")
     print("  Статистика:")

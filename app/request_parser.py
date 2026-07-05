@@ -58,16 +58,23 @@ def parse_use_case(text: str) -> str:
 
 def parse_product_name(text: str) -> str:
     result = text.lower().strip()
-    for pattern in (r"^нужен\s+", r"^хочу\s+", r"^ищу\s+", r"^посоветуйте\s+", r"^подскажите\s+", r"^порекомендуйте\s+", r"^мне\s+нужен\s+", r"^мне\s+хочется\s+", r"^дайте\s+", r"^найдите\s+", r"^какой\s+", r"^какую\s+", r"^какие\s+"):
+    for pattern in (
+        r"^нуж(?:ен|на|но|ны)\s+",
+        r"^хочу\s+", r"^ищу\s+", r"^посоветуйте\s+", r"^подскажите\s+",
+        r"^порекомендуйте\s+", r"^мне\s+нуж(?:ен|на|но|ны)\s+",
+        r"^мне\s+хочется\s+", r"^дайте\s+", r"^найдите\s+",
+        r"^какой\s+", r"^какую\s+", r"^какие\s+",
+    ):
         result = re.sub(pattern, "", result)
     result = re.sub(r"\s*до\s+\d{1,3}\s+\d{3}\s*", " ", result)
     result = re.sub(r"\s*до\s+\d+\s*[кК]?\s*", " ", result)
     result = re.sub(r"\s*до\s+\d+\s*тыс.*?\s*", " ", result)
     result = re.sub(r"\s+в\s+[А-Яа-яЁё]+\s*$", " ", result)
-    result = re.sub(r"\s+для\s+[^\s]+", " ", result)
+    result = re.sub(r"\s+для\s+.+?(?=\s+до\s|\s+в\s|$)", " ", result)
     result = re.sub(r"\s*купить\s*", " ", result)
-    result = re.sub(r"\s*б/?у\s*", " ", result)
-    result = re.sub(r"\s*новый?\s*", " ", result)
+    result = re.sub(r"(?<![а-яёa-z0-9])б/?у(?![а-яёa-z0-9])", " ", result)
+    result = re.sub(r"(?<![а-яёa-z0-9])бу(?![а-яёa-z0-9])", " ", result)
+    result = re.sub(r"(?<![а-яёa-z0-9])новый?(?![а-яёa-z0-9])", " ", result)
     result = re.sub(r"\s+", " ", result).strip()
     words = result.split()
     return " ".join(words[:4])[:40] if words else text[:40]

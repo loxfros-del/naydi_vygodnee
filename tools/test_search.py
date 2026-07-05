@@ -22,6 +22,7 @@ from app.candidate_verifier import (
     PRICE_MISSING,
     REMOVED_LISTING,
     UNAVAILABLE,
+    VERIFY_BLOCKED,
 )
 
 
@@ -79,6 +80,7 @@ def main() -> int:
         f"checked={verify_stats.get('checked', 0)}; "
         f"verified_good={verify_stats.get('VERIFIED_GOOD', 0)}; "
         f"verified_ok={verify_stats.get('VERIFIED_OK', 0)}; "
+        f"need_manual_check={verify_stats.get(VERIFY_BLOCKED, 0)}; "
         f"unavailable={verify_stats.get(UNAVAILABLE, 0)}; "
         f"removed_listing={verify_stats.get(REMOVED_LISTING, 0)}; "
         f"price_missing={verify_stats.get(PRICE_MISSING, 0)}; "
@@ -107,12 +109,32 @@ def main() -> int:
             price += " — выше бюджета"
         risks = ", ".join(item.risk_flags) if item.risk_flags else "нет"
         verify_status = getattr(item, "verify_status", item.quality)
+        facts = getattr(item, "product_facts", {}) or {}
+        if not facts and getattr(item, "facts_json", ""):
+            try:
+                facts = json.loads(item.facts_json)
+            except json.JSONDecodeError:
+                facts = {}
         print(
             f"{index}. [{verify_status}] {item.title}\n"
             f"   {item.source} / {item.source_type} | {price} | score {int(round(item.score))}\n"
             f"   {item.url}\n"
             f"   причины: {risks}"
         )
+        if facts:
+            print(
+                "   facts: "
+                f"model_key={facts.get('model_key') or '-'}; "
+                f"price={facts.get('price')}; "
+                f"budget_status={facts.get('budget_status') or '-'}; "
+                f"availability={facts.get('availability_text') or '-'}; "
+                f"diagonal={facts.get('diagonal') or '-'}; "
+                f"resolution={facts.get('resolution') or '-'}; "
+                f"refresh_rate={facts.get('refresh_rate') or '-'}; "
+                f"matrix_type={facts.get('matrix_type') or '-'}; "
+                f"ps5_flags={facts.get('ps5_flags') or []}; "
+                f"warnings={facts.get('warnings') or []}"
+            )
 
     if collection.verified_rejections:
         print("\nDEBUG ОТБРАКОВКИ VERIFY")

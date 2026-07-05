@@ -24,6 +24,7 @@ from app.candidate_verifier import (
     REMOVED_LISTING,
     VERIFIED_GOOD,
     VERIFIED_OK,
+    VERIFY_BLOCKED,
     verify_candidate,
     verify_candidates,
 )
@@ -71,6 +72,8 @@ class ProductCandidate:
     city: str = ""
     availability: str = ""
     description: str = ""
+    product_facts: dict[str, object] = field(default_factory=dict)
+    facts_json: str = ""
     created_at: str = ""
 
 
@@ -109,6 +112,7 @@ class SearchCollection:
     verify_stats: dict[str, int] = field(default_factory=lambda: {
         "checked": 0,
         "VERIFY_ERROR": 0,
+        "VERIFY_BLOCKED": 0,
         "UNAVAILABLE": 0,
         "REMOVED_LISTING": 0,
         "PRICE_MISSING": 0,
@@ -1151,6 +1155,7 @@ def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, 
         VERIFIED_GOOD: 0,
         VERIFIED_OK: 1,
         OVER_BUDGET_SOFT: 2,
+        VERIFY_BLOCKED: 3,
     }
     budget = _budget_value(req)
     price = candidate.price or 0
@@ -1216,6 +1221,7 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
         stats["saved"],
         (
             f"VERIFY_ERROR={stats.get('VERIFY_ERROR', 0)}; "
+            f"{VERIFY_BLOCKED}={stats.get(VERIFY_BLOCKED, 0)}; "
             f"UNAVAILABLE={stats.get('UNAVAILABLE', 0)}; "
             f"{REMOVED_LISTING}={stats.get(REMOVED_LISTING, 0)}; "
             f"{PRICE_MISSING}={stats.get(PRICE_MISSING, 0)}; "
@@ -1339,7 +1345,7 @@ def _run_compare_search(req: Request, candidates: list[ProductCandidate], attemp
                 if normalized_url in existing_urls:
                     continue
                 verified = verify_candidate(comp, req)
-                if not verified.keep_for_admin or not comp.price or _verified_status(comp) not in {VERIFIED_GOOD, VERIFIED_OK, OVER_BUDGET_SOFT}:
+                if not verified.keep_for_admin or not comp.price or _verified_status(comp) not in {VERIFIED_GOOD, VERIFIED_OK, OVER_BUDGET_SOFT, VERIFY_BLOCKED}:
                     continue
                 existing_urls.add(normalized_url)
                 # Если цена ниже, чем у оригинального кандидата с тем же ключом
@@ -1361,6 +1367,7 @@ def _run_compare_search(req: Request, candidates: list[ProductCandidate], attemp
                     score=comp.score,
                     risk_flags=json.dumps(comp.risk_flags, ensure_ascii=False),
                     status=comp.status,
+                    facts_json=getattr(comp, "facts_json", "") or json.dumps(getattr(comp, "product_facts", {}) or {}, ensure_ascii=False),
                 )
                 kept += 1
             status = "OK" if rows else "EMPTY"
@@ -1390,6 +1397,7 @@ def run_product_search(req: Request, max_results: int = 15) -> dict:
             score=candidate.score,
             risk_flags=json.dumps(candidate.risk_flags, ensure_ascii=False),
             status=candidate.status,
+            facts_json=getattr(candidate, "facts_json", "") or json.dumps(getattr(candidate, "product_facts", {}) or {}, ensure_ascii=False),
         )
         existing_urls.add(_normalise_url(candidate.url))
         if candidate.status != "REJECTED_AUTO":
