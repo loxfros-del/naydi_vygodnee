@@ -25,6 +25,17 @@ def _env_int(name: str, default: int) -> int:
 class Settings(BaseSettings):
     BOT_TOKEN: str
     ADMIN_IDS: list[int]
+    PROXY_URL: str = ""
+    USE_PROXY: bool = False
+    PROXY_FOR_HTTP: bool = True
+    PROXY_FOR_BROWSER: bool = True
+    BROWSER_PROVIDER: str = "local"
+    BROWSERBASE_API_KEY: str = ""
+    BROWSERBASE_PROJECT_ID: str = ""
+    FETCH_TIMEOUT_SECONDS: int = 20
+    FETCH_RETRIES: int = 2
+    DOMAIN_RATE_LIMIT_SECONDS: int = 2
+    ENABLE_BROWSER_FALLBACK: bool = True
     DB_PATH: str = "bot.db"
     SEARCH_RESULTS_PER_REQUEST: int = 15
     SEARCH_TIMEOUT_SECONDS: int = 8
@@ -64,6 +75,19 @@ class Settings(BaseSettings):
             raise RuntimeError("ADMIN_IDS пустой. Укажите хотя бы один Telegram ID админа.")
 
         return cls(
+            PROXY_URL=os.getenv("PROXY_URL", "").strip(),
+            USE_PROXY=_env_bool("USE_PROXY", False),
+            PROXY_FOR_HTTP=_env_bool("PROXY_FOR_HTTP", True),
+            PROXY_FOR_BROWSER=_env_bool("PROXY_FOR_BROWSER", True),
+
+            BROWSER_PROVIDER=os.getenv("BROWSER_PROVIDER", "local").strip(),
+            BROWSERBASE_API_KEY=os.getenv("BROWSERBASE_API_KEY", "").strip(),
+            BROWSERBASE_PROJECT_ID=os.getenv("BROWSERBASE_PROJECT_ID", "").strip(),
+
+            FETCH_TIMEOUT_SECONDS=_env_int("FETCH_TIMEOUT_SECONDS", 20),
+            FETCH_RETRIES=_env_int("FETCH_RETRIES", 2),
+            DOMAIN_RATE_LIMIT_SECONDS=_env_int("DOMAIN_RATE_LIMIT_SECONDS", 2),
+            ENABLE_BROWSER_FALLBACK=_env_bool("ENABLE_BROWSER_FALLBACK", True),
             BOT_TOKEN=bot_token,
             ADMIN_IDS=admin_ids,
             DB_PATH=os.getenv("DB_PATH", "bot.db"),

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ from app.candidate_verifier import (
     detect_product_category,
 )
 from app.db import Request
-from app.product_search import collect_product_candidates
+from app.product_search import CITY_MISMATCH_RISK, LOW_PRICE_RISK, collect_product_candidates
 from app.request_parser import full_parse
 
 
@@ -69,6 +70,79 @@ def _facts(candidate: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _risk_flags(candidate: Any) -> list[str]:
+    return [str(item) for item in (getattr(candidate, "risk_flags", []) or [])]
+
+
+def _has_risk(candidate: Any, risk: str) -> bool:
+    return risk in {item.strip() for item in _risk_flags(candidate)}
+
+
+def _diag_text(value: Any) -> str:
+    text = str(value or "").strip()
+    return text if text else "-"
+
+
+def _diag_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fetch_diagnostics(candidate: Any) -> dict[str, Any]:
+    return {
+        "fetch_provider": _diag_text(getattr(candidate, "fetch_provider", "")),
+        "fetch_status_code": _diag_int(getattr(candidate, "fetch_status_code", 0)),
+        "blocked_reason": _diag_text(getattr(candidate, "blocked_reason", "")),
+        "used_proxy": bool(getattr(candidate, "used_proxy", False)),
+        "retry_count": _diag_int(getattr(candidate, "retry_count", 0)),
+    }
+
+
+def _print_fetch_diagnostics(candidate: Any, prefix: str = "       ") -> None:
+    diagnostics = _fetch_diagnostics(candidate)
+    for key in ("fetch_provider", "fetch_status_code", "blocked_reason", "used_proxy", "retry_count"):
+        print(f"{prefix}{key}: {diagnostics[key]}")
+
+
+def _verified_candidates(collection: Any) -> list[Any]:
+    candidates = list(getattr(collection, "candidates", []) or [])
+    for item in getattr(collection, "verified_rejections", []) or []:
+        candidate = getattr(item, "candidate", None)
+        if candidate is not None:
+            candidates.append(candidate)
+    return candidates
+
+
+def _fetch_stats(candidates: list[Any]) -> dict[str, Any]:
+    providers: Counter[str] = Counter()
+    blocked_reasons: Counter[str] = Counter()
+    used_proxy = 0
+    retry_count_total = 0
+
+    for item in candidates:
+        diagnostics = _fetch_diagnostics(item)
+        provider = diagnostics["fetch_provider"]
+        if provider == "http":
+            providers["http_fetch"] += 1
+        elif provider == "http_cache":
+            providers["http_cache"] += 1
+        if diagnostics["blocked_reason"] != "-":
+            blocked_reasons[diagnostics["blocked_reason"]] += 1
+        if diagnostics["used_proxy"]:
+            used_proxy += 1
+        retry_count_total += diagnostics["retry_count"]
+
+    return {
+        "used_proxy": used_proxy,
+        "http_fetch": providers["http_fetch"],
+        "http_cache": providers["http_cache"],
+        "blocked_reasons": dict(blocked_reasons) if blocked_reasons else "-",
+        "retry_count_total": retry_count_total,
+    }
+
+
 def _hidden_count_from_risks(candidates: list[Any]) -> int:
     total = 0
     for item in candidates:
@@ -88,6 +162,10 @@ def _in_budget_count(candidates: list[Any], budget: int | None) -> int:
     if not budget:
         return 0
     return sum(1 for item in candidates if getattr(item, "price", None) and item.price <= budget)
+
+
+def _has_price_count(candidates: list[Any]) -> int:
+    return sum(1 for item in candidates if getattr(item, "price", None) is not None)
 
 
 def _has_missing_price(candidates: list[Any]) -> bool:
@@ -141,11 +219,18 @@ def _print_top_candidates(candidates: list[Any]) -> None:
         playwright_used = bool(getattr(item, "playwright_used", False))
         playwright_verified = bool(getattr(item, "playwright_verified", False))
         price_source = getattr(item, "price_source", "") or facts.get("price_source") or "-"
+        score = float(getattr(item, "score", 0) or 0)
+        risks = _risk_flags(item)
         print(f"    {index}. {title}")
+        print(f"       score/rank: {score:.0f} / #{index}")
         print(f"       price: {price_text}")
         print(f"       source: {getattr(item, 'source', '')}")
         print(f"       verify_status: {verify_status}")
+        print(f"       risk_flags: {risks}")
+        print(f"       low_price_suspect: {_has_risk(item, LOW_PRICE_RISK)}")
+        print(f"       city_mismatch: {_has_risk(item, CITY_MISMATCH_RISK)}")
         print(f"       playwright: used={playwright_used}; verified={playwright_verified}")
+        _print_fetch_diagnostics(item)
         print(f"       price_source: {price_source}")
         print(f"       url: {getattr(item, 'url', '')}")
         print(f"       budget_status: {facts.get('budget_status') or '-'}")
@@ -163,6 +248,7 @@ def _print_debug_reasons(collection: Any) -> None:
         candidate = item.candidate
         reason = item.reason or ", ".join(getattr(candidate, "risk_flags", []) or []) or item.verify_status
         print(f"    - [{item.verify_status}] {getattr(candidate, 'source', '')}: {reason}")
+        _print_fetch_diagnostics(candidate, prefix="      ")
 
 
 def run_one(raw_query: str, index: int) -> dict[str, Any]:
@@ -190,6 +276,8 @@ def run_one(raw_query: str, index: int) -> dict[str, Any]:
     saved = collection.candidates
     hidden_duplicates = _hidden_count_from_risks(saved)
     has_missing_price = _has_missing_price(saved)
+    ranked_top = saved[:3]
+    fetch_stats = _fetch_stats(_verified_candidates(collection))
     quality = _quality_label(len(saved), has_missing_price)
     stats = {
         "parsed_product_name": parsed.get("product_name") or "",
@@ -203,6 +291,10 @@ def run_one(raw_query: str, index: int) -> dict[str, Any]:
         "verify_blocked": verify_stats.get(VERIFY_BLOCKED, 0),
         "blocked_by_site": verify_stats.get(VERIFY_BLOCKED, 0),
         "in_budget": _in_budget_count(saved, budget),
+        "low_price_suspect": sum(1 for item in saved if _has_risk(item, LOW_PRICE_RISK)),
+        "city_mismatch": sum(1 for item in saved if _has_risk(item, CITY_MISMATCH_RISK)),
+        "ranked_top_has_price": _has_price_count(ranked_top),
+        "ranked_top_in_budget": _in_budget_count(ranked_top, budget),
         "over_budget_soft": verify_stats.get("OVER_BUDGET_SOFT", 0),
         "over_budget_hard": verify_stats.get("OVER_BUDGET_HARD", 0),
         "price_missing_hidden": verify_stats.get(PRICE_MISSING, 0),
@@ -216,6 +308,11 @@ def run_one(raw_query: str, index: int) -> dict[str, Any]:
         "playwright_failed": verify_stats.get("playwright_failed", 0),
         "manual_check_after_playwright": verify_stats.get("manual_check_after_playwright", 0),
         "manual_check_saved_without_price": verify_stats.get("manual_check_saved_without_price", 0),
+        "used_proxy": fetch_stats["used_proxy"],
+        "http_fetch": fetch_stats["http_fetch"],
+        "http_cache": fetch_stats["http_cache"],
+        "blocked_reasons": fetch_stats["blocked_reasons"],
+        "retry_count_total": fetch_stats["retry_count_total"],
         "bad_facts_count": _bad_facts_count(saved, category),
     }
     print(f"  QUALITY: {quality}")

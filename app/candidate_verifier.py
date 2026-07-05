@@ -11,6 +11,7 @@ from urllib.parse import unquote, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from app.net_client import fetch_http
 from app.config import settings
 from app.db import Request
 
@@ -223,35 +224,37 @@ def _price_int(value: Any) -> Optional[int]:
     return price if 1_000 <= price <= 10_000_000 else None
 
 
-def _safe_get(url: str) -> requests.Response:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; NaydiVygodneeBot/2.0)",
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.5",
-    }
-    last_exc: Optional[Exception] = None
-    for attempt in range(2):
-        try:
-            response = requests.get(url, headers=headers, timeout=_timeout(), allow_redirects=True)
-            if response.status_code == 429:
-                response.raise_for_status()
-            if response.status_code in {500, 502, 503, 504} and attempt == 0:
-                time.sleep(0.25)
-                continue
-            response.raise_for_status()
-            if not response.encoding or response.encoding.lower() in {"iso-8859-1", "windows-1252"}:
-                response.encoding = response.apparent_encoding or "utf-8"
-            return response
-        except requests.HTTPError:
-            raise
-        except (requests.Timeout, requests.ConnectionError) as exc:
-            last_exc = exc
-            if attempt == 0:
-                time.sleep(0.25)
-                continue
-            raise
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("страница не открылась")
+class _FetchResponse:
+    def __init__(self, result):
+        self.text = result.html or ""
+        self.url = result.final_url or ""
+        self.status_code = result.status_code
+        self.encoding = "utf-8"
+        self.apparent_encoding = "utf-8"
+        self.fetch_result = result
+
+
+def _safe_get(url: str) -> _FetchResponse:
+    result = fetch_http(url)
+
+    if result.ok:
+        return _FetchResponse(result)
+
+    if result.blocked:
+        response = requests.Response()
+        response.status_code = result.status_code or 0
+        response.url = result.final_url or url
+
+        error = requests.HTTPError(
+            f"{result.status_code or ''} blocked: {result.blocked_reason} for url: {url}".strip()
+        )
+        error.response = response
+        error.fetch_result = result
+        raise error
+
+    error = requests.RequestException(result.error or result.blocked_reason or "HTTP-запрос не выполнен")
+    error.fetch_result = result
+    raise error
 
 
 def _looks_like_product_url(url: str) -> bool:
@@ -866,7 +869,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
 
     try:
         response = _safe_get(url)
-    except Exception as exc:
+    except Exception as exc:    
         if _is_blocked_error(exc) and _looks_safe_for_manual_check(candidate, req, source, url):
             risks = [
                 "страница заблокировала проверку",
@@ -911,7 +914,14 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
             keep_for_admin=False,
         )
         return _apply_verified(candidate, verified)
-
+    fetch_result = getattr(response, "fetch_result", None)
+    if fetch_result is not None:
+        candidate.used_proxy = fetch_result.used_proxy
+        candidate.used_browser = fetch_result.used_browser
+        candidate.fetch_status_code = fetch_result.status_code
+        candidate.blocked_reason = fetch_result.blocked_reason
+        candidate.fetch_provider = fetch_result.fetch_provider
+        candidate.retry_count = fetch_result.retry_count
     html = response.text or ""
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(" ", strip=True)
