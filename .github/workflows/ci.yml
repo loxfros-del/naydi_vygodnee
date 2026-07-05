@@ -18,6 +18,8 @@ jobs:
         run: python -m compileall .
       - name: Alice parser
         run: python tools/test_alice_parser.py
+      - name: AI cards
+        run: python tools/test_ai_cards.py
       - name: Report readiness
         run: python tools/test_report_readiness.py
       - name: DB migration

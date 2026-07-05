@@ -13,6 +13,9 @@ Autosearch currently produces many product-looking URLs, but some have no curren
 - [x] Integrate verification, deduplication, and ranking into `app/product_search.py` before final candidate selection and DB save.
 - [x] Update `tools/test_search.py` to print verification stats and reject reasons.
 - [x] (2026-07-04) Tighten verifier after Telegram QA: reject missing price, unavailable/removed listings, bad encoding, unconfirmed pages, and FullHD for PS5.
+- [x] (2026-07-04) Add product facts extraction and persistence through `facts_json`.
+- [x] (2026-07-04) Show compact facts in admin result lists and detailed facts on product view.
+- [x] (2026-07-04) Pass structured facts to AI-card prompts when available.
 - [x] Validate with `python -m compileall .`, `python tools/test_alice_parser.py`, and target `tools/test_search.py`.
 
 ## Surprises & Discoveries
@@ -38,10 +41,13 @@ Autosearch currently produces many product-looking URLs, but some have no curren
 - Decision: Keep Citilink with verified price and unknown availability as `VERIFIED_OK`, but require stronger availability signals elsewhere.
   Rationale: The user explicitly called out Citilink price+direct card as acceptable even when explicit availability text is missing.
   Date/Author: 2026-07-04 / Codex
+- Decision: Store structured product facts in a dedicated `search_results.facts_json` column.
+  Rationale: This keeps the old snippet/admin_note behavior intact and gives AI cards/reporting a stable machine-readable source.
+  Date/Author: 2026-07-04 / Codex
 
 ## Outcomes & Retrospective
 
-Implemented. The target test now keeps unavailable, removed, price-missing, mojibake, FullHD-for-PS5, blocked, and mismatched-price pages out of the admin candidate list and shows those reasons in debug. In the latest network run, the verifier saved zero admin candidates because available verified pages were blocked or rejected; the test completed successfully and printed manual fallback links instead of showing questionable products.
+Implemented. The target test now keeps unavailable, removed, price-missing, mojibake, FullHD-for-PS5, blocked, and mismatched-price pages out of the admin candidate list and shows those reasons in debug. `extract_product_facts()` now builds `brand`, `model`, `model_key`, TV specs, budget status, PS5 flags, and warnings from title/snippet/html. Auto candidates save facts into `facts_json`; admin UI shows them; AI-card prompts receive them. In the latest network run, verified pages were blocked or price-missing, so no admin candidates were saved; the test completed successfully and printed manual fallback links instead of showing questionable products.
 
 ## Context and Orientation
 

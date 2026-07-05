@@ -6,3 +6,5 @@ requests
 beautifulsoup4
 ddgs
 duckduckgo-search
+playwright
+

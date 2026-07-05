@@ -41,6 +41,7 @@ def kb_admin_request(req_id: int, status: str) -> InlineKeyboardMarkup:
         # Автопоиск и работа с вариантами
         buttons.append([InlineKeyboardButton(text="🔎 Запустить автопоиск", callback_data=f"autosearch_{req_id}")])
         buttons.append([InlineKeyboardButton(text="📦 Показать найденные варианты", callback_data=f"showresults_{req_id}")])
+        buttons.append([InlineKeyboardButton(text="🤖 Сделать ИИ-карточки из автопоиска", callback_data=f"aicards_{req_id}")])
         buttons.append([InlineKeyboardButton(text="🧪 Debug поиска", callback_data=f"debugsearch_{req_id}")])
         buttons.append([InlineKeyboardButton(text="➕ Добавить вариант вручную", callback_data=f"addprod_{req_id}")])
         buttons.append([InlineKeyboardButton(text="🧩 Карточки ИИ", callback_data=f"alicecards_{req_id}")])

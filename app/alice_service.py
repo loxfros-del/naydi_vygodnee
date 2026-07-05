@@ -1,6 +1,7 @@
 """Сервис для сценария «Проверить через Алису» — промпт, парсинг, черновик."""
 import re
 from app.db import Request
+from app.ai_cards_service import parse_ai_cards_json
 from app.price_extractor import format_price
 
 # ──────────────────────────────────────────────
@@ -46,26 +47,24 @@ def build_alice_prompt(req: Request) -> str:
     lines.append("")
     lines.append("Дай только конкретные модели, не категории и не подборки.")
     lines.append("")
-    lines.append("Для каждого варианта обязательно укажи отдельными строками:")
-    lines.append("Название модели;")
-    lines.append("Цена;")
-    lines.append("Магазин;")
-    lines.append("Прямая ссылка на товар;")
-    lines.append("Почему подходит;")
-    lines.append("Риски.")
+    lines.append("Ответь строгим JSON без Markdown и без текста вокруг:")
+    lines.append('{"cards":[{"role":"BEST","title":"","price":0,"store":"","url":"","why":"","risks":[],"manual_check":[],"confidence":"medium"}]}')
+    lines.append("")
+    lines.append("Допустимые role: BEST, BACKUP, BUDGET, CAUTION, REJECTED.")
     lines.append("")
     lines.append("Требования:")
-    lines.append("• Дай 5–7 вариантов.")
+    lines.append("• Дай 3–5 вариантов для проверки админом.")
     if not is_used:
         lines.append("• Не предлагай б/у, если клиент просит новое.")
-    lines.append("• Не предлагай товары сильно выше бюджета.")
+    lines.append("• Не предлагай товары сильно выше бюджета и не ставь BEST выше бюджета.")
     if budget_num:
         lower_bound = int(budget_num * 0.8)
         lines.append(
             f"• Если бюджет высокий, добавь варианты ближе к верхней границе бюджета "
             f"(примерно {format_price(lower_bound)}–{format_price(budget_num)})."
         )
-    lines.append("• Если точной ссылки нет — напиши «ссылку нужно искать вручную», но не выдумывай её.")
+    lines.append("• Если точной ссылки нет — оставь url пустым, но не выдумывай её.")
+    lines.append("• Не выдумывай цены.")
     lines.append("• Не пиши длинный вывод в конце.")
     if criteria:
         lines.append(f"• Учти критерии клиента: {criteria}")
@@ -381,6 +380,14 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
         return []
 
     normalized = text.replace("\r", "").replace("\u00a0", " ").strip()
+    if '"cards"' in normalized or "'cards'" in normalized:
+        try:
+            json_items = parse_ai_cards_json(normalized, budget=budget)
+            if json_items:
+                return json_items
+        except Exception:
+            pass
+
     # Очистка мусора Алисы: +1, повторные домены в конце строк
     normalized = re.sub(r'\s*\+1\b', '', normalized)
     normalized = re.sub(r'\s+\b[\w.-]+\.[a-z]{2,}\b(?:\s*\+\s*1)?\s*$', '', normalized, flags=re.IGNORECASE)

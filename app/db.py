@@ -71,6 +71,7 @@ class SearchResult:
     sort_order: int = 0
     price_verified: bool = False
     link_check_status: str = LinkCheckStatus.NEEDED.value
+    facts_json: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -129,6 +130,7 @@ def _run_migrations(conn: sqlite3.Connection):
     _ensure_column(conn, "requests", "preview_text", "TEXT DEFAULT ''")
     _ensure_column(conn, "requests", "report_text", "TEXT DEFAULT ''")
     _ensure_column(conn, "requests", "alice_response", "TEXT DEFAULT ''")
+    _ensure_column(conn, "search_results", "facts_json", "TEXT DEFAULT ''")
 
 
 def init_db():
@@ -174,6 +176,7 @@ def init_db():
             sort_order INTEGER DEFAULT 0,
             price_verified INTEGER DEFAULT 0,
             link_check_status TEXT DEFAULT 'NEEDED',
+            facts_json TEXT DEFAULT '',
             created_at TEXT DEFAULT '',
             updated_at TEXT DEFAULT '',
             FOREIGN KEY (request_id) REFERENCES requests(id)
@@ -340,6 +343,7 @@ def create_search_result(
     risk_flags: str = "[]", status: str = "CANDIDATE", admin_note: str = "",
     origin: str = "auto", sort_order: int = 0,
     price_verified: bool = False, link_check_status: str = LinkCheckStatus.NEEDED.value,
+    facts_json: str = "",
 ) -> int:
     conn = get_conn()
     now = datetime.now().isoformat()
@@ -348,11 +352,11 @@ def create_search_result(
         """INSERT INTO search_results
            (request_id, title, price, source, url, snippet, score, risk_flags,
             status, admin_note, origin, sort_order, price_verified,
-            link_check_status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            link_check_status, facts_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (request_id, title, price, source, url, snippet, score, risk_flags,
          status, admin_note, origin, sort_order, int(price_verified),
-         link_check_status, now, now),
+         link_check_status, facts_json, now, now),
     )
     conn.commit()
     result_id = cur.lastrowid
@@ -440,6 +444,7 @@ def replace_alice_results(request_id: int, items: list[dict]):
             if item.get("price_num") is not None
             else item.get("price")
         )
+        price = to_int_price(price)
         source = (item.get("store") or item.get("source") or "магазин нужно уточнить").strip()
         raw_url = (item.get("link") or item.get("url") or "").strip()
 
@@ -458,6 +463,28 @@ def replace_alice_results(request_id: int, items: list[dict]):
         if isinstance(risks, str):
             risks = [risks]
         risk_flags = item.get("risk_flags") or risks
+        if not isinstance(risk_flags, list):
+            risk_flags = [str(risk_flags)]
+
+        role = (item.get("role") or "").strip().upper()
+        status = {
+            "BEST": "BEST",
+            "BACKUP": "BACKUP",
+            "BUDGET": "BUDGET",
+            "CAUTION": "DO_NOT_BUY",
+            "REJECTED": "REJECTED",
+        }.get(role, "APPROVED")
+
+        manual_check = item.get("manual_check") or item.get("notes") or []
+        if isinstance(manual_check, str):
+            manual_check = [manual_check] if manual_check.strip() else []
+        confidence = (item.get("confidence") or "").strip()
+        admin_meta = {
+            "role": role,
+            "confidence": confidence,
+            "manual_check": manual_check,
+        }
+        admin_note = item.get("admin_note") or json.dumps(admin_meta, ensure_ascii=False)
 
         # Определяем статус ссылки
         is_empty_link = (
@@ -477,7 +504,7 @@ def replace_alice_results(request_id: int, items: list[dict]):
                (request_id, title, price, source, url, snippet, score, risk_flags,
                 status, admin_note, origin, sort_order, price_verified,
                 link_check_status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'APPROVED', ?, 'alice', ?, 0, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'alice', ?, 0, ?, ?, ?)""",
             (request_id,
              title,
              price,
@@ -486,7 +513,8 @@ def replace_alice_results(request_id: int, items: list[dict]):
              snippet,
              item.get("score", 0.0),
              json.dumps(risk_flags, ensure_ascii=False),
-             item.get("admin_note", ""),
+             status,
+             admin_note,
              idx,
              link_check_status,
              now, now),

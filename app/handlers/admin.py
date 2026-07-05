@@ -33,6 +33,7 @@ from app.db import (
 from app.search_links import generate_search_links, generate_product_search_links
 from app.link_checks import LinkCheckStatus, avito_warnings, store_url_warning
 from app.product_search import run_product_search
+from app.ai_cards_service import generate_ai_cards_from_candidates
 from app.report_builder import (
     build_preview, build_admin_preview, build_full_report, get_alice_report_issues,
 )
@@ -155,6 +156,240 @@ def format_search_result_card(sr: SearchResult, idx: int) -> str:
     return line
 
 
+RESULTS_PAGE_SIZE = 6
+RESULTS_TEXT_LIMIT = 3500
+RESULTS_HARD_LIMIT = 3900
+
+
+def _clip_text(value: str, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _result_status_label(status: str) -> str:
+    return {
+        "CANDIDATE": "на проверке",
+        "WEAK_CANDIDATE": "слабый",
+        "APPROVED": "норм",
+        "BEST": "лучший",
+        "CHEAP": "дешёвый",
+        "RELIABLE": "надёжный",
+        "DO_NOT_BUY": "не брать",
+        "REJECTED": "убран",
+    }.get(status, status or "на проверке")
+
+
+def _result_button_emoji(status: str) -> str:
+    return {
+        "CANDIDATE": "📦",
+        "WEAK_CANDIDATE": "⚠️",
+        "APPROVED": "✅",
+        "BEST": "⭐",
+        "CHEAP": "💸",
+        "RELIABLE": "🛡",
+        "DO_NOT_BUY": "🚫",
+        "REJECTED": "❌",
+    }.get(status, "📦")
+
+
+def _parse_risk_flags(value: str) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return [str(value)]
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed if str(item).strip()]
+    if isinstance(parsed, str) and parsed.strip():
+        return [parsed]
+    return []
+
+
+def _parse_facts(value: str) -> dict:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _budget_status_label(status: str) -> str:
+    return {
+        "IN_BUDGET": "в бюджете",
+        "OVER_BUDGET_SOFT": "чуть выше бюджета",
+        "OVER_BUDGET_HARD": "сильно выше бюджета",
+        "PRICE_MISSING": "цена не подтверждена",
+    }.get(status or "", status or "бюджет не указан")
+
+
+def _availability_label(facts: dict) -> str:
+    available = facts.get("available")
+    if available is True:
+        return "есть"
+    if available is False:
+        return "нет"
+    return "не подтверждено"
+
+
+def _facts_compact_line(facts: dict) -> str:
+    parts = []
+    if facts.get("diagonal"):
+        parts.append(f'{facts["diagonal"]}"')
+    for key in ("resolution", "refresh_rate", "matrix_type"):
+        if facts.get(key):
+            parts.append(str(facts[key]))
+    if facts.get("budget_status"):
+        parts.append(_budget_status_label(str(facts["budget_status"])))
+    return ", ".join(parts)
+
+
+def _facts_ps5_line(facts: dict) -> str:
+    flags = [str(item) for item in facts.get("ps5_flags") or [] if str(item).strip()]
+    warnings = [str(item) for item in facts.get("warnings") or [] if str(item).strip()]
+    items = flags + warnings[:2]
+    return "; ".join(items)
+
+
+def _facts_detail_lines(sr: SearchResult) -> list[str]:
+    facts = _parse_facts(getattr(sr, "facts_json", ""))
+    if not facts:
+        return []
+    model = facts.get("model") or facts.get("model_key") or "не подтверждена"
+    diagonal = f'{facts.get("diagonal")}"' if facts.get("diagonal") else "не подтверждена"
+    lines = [
+        "",
+        "<b>Факты:</b>",
+        f"- Модель: {html.escape(str(model))}",
+        f"- Диагональ: {html.escape(diagonal)}",
+        f"- Разрешение: {html.escape(str(facts.get('resolution') or 'не подтверждено'))}",
+        f"- Частота: {html.escape(str(facts.get('refresh_rate') or 'не подтверждена'))}",
+        f"- Матрица: {html.escape(str(facts.get('matrix_type') or 'не подтверждена'))}",
+        f"- Наличие: {html.escape(_availability_label(facts))}",
+        f"- Бюджет: {html.escape(_budget_status_label(str(facts.get('budget_status') or '')))}",
+    ]
+    ps5_line = _facts_ps5_line(facts)
+    if ps5_line:
+        lines.append(f"- PS5: {html.escape(ps5_line)}")
+    return lines
+
+
+def format_search_result_summary(sr: SearchResult, idx: int) -> str:
+    """Короткая строка результата для общего списка без URL и длинных полей."""
+    title = html.escape(_clip_text(sr.title or "без названия", 95))
+    price = format_price(sr.price) if sr.price else "цена не найдена"
+    source = html.escape(_clip_text(sr.source or "generic_web", 45))
+    status = html.escape(_result_status_label(sr.status))
+    facts = _parse_facts(getattr(sr, "facts_json", ""))
+    facts_line = _facts_compact_line(facts)
+    ps5_line = _facts_ps5_line(facts)
+    risks = _parse_risk_flags(sr.risk_flags)[:3]
+    risk_text = _clip_text("; ".join(risks) if risks else "нет", 180)
+    lines = [
+        f"{idx}. <b>{title}</b>\n"
+        f"   {html.escape(price)} | {source} | {status} | score {int(round(sr.score))}"
+    ]
+    if facts_line:
+        lines.append(f"   {html.escape(facts_line)}")
+    if ps5_line:
+        lines.append(f"   PS5: {html.escape(_clip_text(ps5_line, 120))}")
+    lines.append(f"   Риски: {html.escape(risk_text)}")
+    return "\n".join(lines)
+
+
+def _trim_message_text(text: str, limit: int = RESULTS_HARD_LIMIT) -> str:
+    notice = "\n\nТекст обрезан, открой конкретную карточку для деталей."
+    if len(text) <= limit:
+        return text
+    trimmed = text[: max(0, limit - len(notice))].rsplit("\n", 1)[0].rstrip()
+    return trimmed + notice
+
+
+async def _safe_edit_text(callback: CallbackQuery, text: str, reply_markup: InlineKeyboardMarkup) -> None:
+    safe_text = _trim_message_text(text)
+    try:
+        await callback.message.edit_text(
+            safe_text,
+            reply_markup=reply_markup,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except TelegramBadRequest as exc:
+        message = str(exc).lower()
+        if "message is not modified" in message:
+            return
+        if "message is too long" in message or "message_too_long" in message:
+            await callback.message.edit_text(
+                _trim_message_text(safe_text, 3900),
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return
+        raise
+
+
+def build_results_page(req_id: int, results: list[SearchResult], rejected_auto_count: int, page: int) -> tuple[str, InlineKeyboardMarkup]:
+    total = len(results)
+    page_count = max(1, (total + RESULTS_PAGE_SIZE - 1) // RESULTS_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * RESULTS_PAGE_SIZE
+    page_items = results[start:start + RESULTS_PAGE_SIZE]
+
+    lines = [
+        f"📦 <b>Найденные варианты (заявка #{req_id})</b>",
+        f"Страница {page + 1} из {page_count}. Нормальных: {total}",
+    ]
+    if rejected_auto_count:
+        lines.append(f"Автоматически отклонено: {rejected_auto_count}")
+    lines.append("")
+
+    rendered: list[tuple[int, SearchResult]] = []
+    for offset, sr in enumerate(page_items, 1):
+        idx = start + offset
+        card = format_search_result_summary(sr, idx)
+        candidate_text = "\n".join(lines + [card, ""])
+        if len(candidate_text) > RESULTS_TEXT_LIMIT and rendered:
+            break
+        lines.append(card)
+        lines.append("")
+        rendered.append((idx, sr))
+
+    shown = len(rendered)
+    lines.append(f"Показано {shown} из {total}. Остальные доступны по кнопкам / страницам.")
+    if not rendered and total:
+        lines.append("Текст обрезан, открой конкретную карточку для деталей.")
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    for idx, sr in rendered:
+        title = _clip_text(sr.title or "без названия", 35)
+        buttons.append([InlineKeyboardButton(
+            text=f"{_result_button_emoji(sr.status)} {idx}. {title}",
+            callback_data=f"viewresult_{sr.id}",
+        )])
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"results_{req_id}_{page - 1}"))
+    if page < page_count - 1:
+        nav.append(InlineKeyboardButton(text="➡️ Далее", callback_data=f"results_{req_id}_{page + 1}"))
+    if nav:
+        buttons.append(nav)
+
+    buttons.append([InlineKeyboardButton(text="🔎 Запустить автопоиск", callback_data=f"autosearch_{req_id}")])
+    buttons.append([InlineKeyboardButton(text="🤖 Сделать ИИ-карточки из автопоиска", callback_data=f"aicards_{req_id}")])
+    buttons.append([InlineKeyboardButton(text="🧪 Debug поиска", callback_data=f"debugsearch_{req_id}")])
+    buttons.append([InlineKeyboardButton(text="➕ Добавить вручную", callback_data=f"addprod_{req_id}")])
+    buttons.append([InlineKeyboardButton(text="👁 Полный предпросмотр для админа", callback_data=f"adminpreview_{req_id}")])
+    buttons.append([InlineKeyboardButton(text="👀 Клиентский предпросмотр до оплаты", callback_data=f"preview_{req_id}")])
+    buttons.append([InlineKeyboardButton(text="🔙 К заявке", callback_data=f"view_{req_id}")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def _link_status(url: str) -> str:
     """Статус формы ссылки без попытки открывать внешние сайты."""
     if not url:
@@ -202,12 +437,24 @@ def _card_link_warnings(item: SearchResult) -> list[str]:
     return warnings
 
 
+def _alice_card_meta(item: SearchResult) -> dict:
+    if not item.admin_note:
+        return {}
+    try:
+        data = json.loads(item.admin_note)
+    except json.JSONDecodeError:
+        return {"note": item.admin_note}
+    return data if isinstance(data, dict) else {}
+
+
 def format_alice_card(sr: SearchResult, idx: int) -> str:
     """Карточка одного товара, полученного из ответа Алисы."""
     try:
         risks = json.loads(sr.risk_flags) if sr.risk_flags else []
     except json.JSONDecodeError:
         risks = []
+    req = get_request(sr.request_id)
+    meta = _alice_card_meta(sr)
     state = {
         "BEST": "🏆 ТОП-1",
         "TOP": "🏆 ТОП-1",
@@ -223,6 +470,10 @@ def format_alice_card(sr: SearchResult, idx: int) -> str:
         "REJECTED_AUTO": "❌ авто-отклонён",
     }.get(sr.status, "🟡 на проверке")
     lines = [f"🧩 <b>Карточка {idx}</b> — {state}"]
+    if meta.get("role"):
+        lines.append(f"<b>Роль ИИ:</b> {html.escape(str(meta.get('role')))}")
+    if meta.get("confidence"):
+        lines.append(f"<b>Confidence:</b> {html.escape(str(meta.get('confidence')))}")
     lines.append(f"<b>Название:</b> {html.escape(sr.title or 'не указано')}")
     lines.append(f"<b>Цена:</b> {format_price(sr.price) if sr.price else 'уточнить'}")
     lines.append(f"<b>Магазин:</b> {html.escape(sr.source or 'не указан')}")
@@ -233,9 +484,20 @@ def format_alice_card(sr: SearchResult, idx: int) -> str:
         lines.append("<b>Ссылка:</b> ⚠️ ссылку нужно искать вручную")
     lines.append(f"<b>Почему:</b> {html.escape(sr.snippet or 'не указано')}")
     lines.append(f"<b>Риск:</b> {html.escape('; '.join(risks) if risks else 'не указан')}")
+    manual_check = meta.get("manual_check") or meta.get("notes") or []
+    if isinstance(manual_check, str):
+        manual_check = [manual_check] if manual_check.strip() else []
+    if manual_check:
+        lines.append(f"<b>Проверить вручную:</b> {html.escape('; '.join(str(item) for item in manual_check))}")
+    elif meta.get("note"):
+        lines.append(f"<b>Заметка:</b> {html.escape(str(meta.get('note')))}")
     lines.append(f"<b>Статус ссылки:</b> {_link_status(sr.url)}")
     lines.append(f"<b>Статус проверки:</b> {_link_check_status(sr)}")
     lines.append(f"<b>Статус цены:</b> {_price_check_status(sr)}")
+    if req and req.budget and req.budget.isdigit() and sr.price and sr.price > int(req.budget):
+        lines.append("⚠️ Цена выше бюджета клиента.")
+    if _link_status(sr.url) != "✅ есть":
+        lines.append("⚠️ Ссылка отсутствует или некорректна.")
     lines.extend(_card_link_warnings(sr))
     return "\n".join(lines)
 
@@ -278,9 +540,11 @@ async def send_alice_cards(message: Message, req_id: int, include_header: bool =
         await message.answer("Карточек ИИ пока нет. Нажми «🟡 Проверить через Алису» и вставь ответ Алисы или GigaChat.")
         return
     for index, card in enumerate(cards[:20], 1):
+        link_status = getattr(card, "link_check_status", LinkCheckStatus.NEEDED.value) or LinkCheckStatus.NEEDED.value
+        price_ok = bool(getattr(card, "price_verified", False))
         await message.answer(
             format_alice_card(card, index),
-            reply_markup=kb_alice_product(card.id, card.status),
+            reply_markup=kb_alice_product(card.id, card.status, link_check_status=link_status, price_verified=price_ok),
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
@@ -529,6 +793,54 @@ async def auto_search(callback: CallbackQuery):
         )
 
 
+@router.callback_query(F.data.startswith("aicards_"))
+async def make_ai_cards(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    req_id = int(callback.data.split("_")[1])
+    req = get_request(req_id)
+    if not req:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+
+    candidates = [item for item in get_all_search_results(req_id) if item.status != "REJECTED_AUTO"]
+    if len(candidates) < 3:
+        await callback.answer("Мало результатов. Сначала запустите автопоиск.", show_alert=True)
+        return
+
+    await callback.answer("Делаю ИИ-карточки...")
+    result = await asyncio.to_thread(generate_ai_cards_from_candidates, req, candidates)
+    if not result.get("success"):
+        await callback.message.answer(
+            f"⚠️ {html.escape(result.get('message') or 'Не удалось сделать ИИ-карточки.')}\n\n"
+            "Можно нажать «🟡 Проверить через Алису» и вставить ответ вручную.",
+            parse_mode="HTML",
+            reply_markup=kb_admin_request(req_id, req.status),
+        )
+        return
+
+    cards = result.get("cards") or []
+    replace_alice_results(req_id, cards)
+    update_request(
+        req_id,
+        alice_response=json.dumps({
+            "source": "ai_cards_from_candidates",
+            "raw_response": result.get("raw_response", ""),
+            "parsed_items": cards,
+        }, ensure_ascii=False),
+    )
+    if req.status == "NEW":
+        update_request(req_id, status="SEARCHING")
+
+    await callback.message.answer(
+        f"✅ ИИ-карточки готовы. Найдено: {len(cards)}.\n"
+        "Проверь ТОП-3–5, подтверди цену и ссылку.",
+        parse_mode="HTML",
+    )
+    await send_alice_cards(callback.message, req_id, include_header=False)
+
+
 @router.callback_query(F.data.startswith("debugsearch_"))
 async def debug_search(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -561,6 +873,7 @@ async def cmd_debug_search(message: Message):
 
 # ---------- Показать найденные варианты ----------
 
+@router.callback_query(F.data.startswith("results_"))
 @router.callback_query(F.data.startswith("showresults_"))
 async def show_results(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -568,6 +881,7 @@ async def show_results(callback: CallbackQuery):
         return
 
     data_parts = callback.data.split("_")
+    page = 0
     # Кнопка из карточки товара имеет вид showresults_back_RESULT_ID.
     if len(data_parts) == 3 and data_parts[1] == "back":
         previous = get_search_result(int(data_parts[2]))
@@ -575,8 +889,14 @@ async def show_results(callback: CallbackQuery):
             await callback.answer("Вариант не найден", show_alert=True)
             return
         req_id = previous.request_id
+    elif data_parts[0] == "results":
+        req_id = int(data_parts[1])
+        if len(data_parts) >= 3 and data_parts[2].isdigit():
+            page = int(data_parts[2])
     else:
         req_id = int(data_parts[1])
+        if len(data_parts) >= 3 and data_parts[2].isdigit():
+            page = int(data_parts[2])
 
     req = get_request(req_id)
     if not req:
@@ -601,41 +921,8 @@ async def show_results(callback: CallbackQuery):
         await callback.answer()
         return
 
-    # Строим список вариантов с кнопками
-    lines = [f"📦 <b>Найденные варианты (заявка #{req_id}):</b>\n"]
-    lines.append(f"Нормальных: {len(results)}")
-    if rejected_auto:
-        lines.append(f"Автоматически отклонено: {len(rejected_auto)}")
-    lines.append("")
-
-    buttons = []
-    for i, sr in enumerate(results[:20], 1):
-        card = format_search_result_card(sr, i)
-        lines.append(card)
-        lines.append("")
-        # Кнопка для каждого варианта
-        status_label = {
-            "CANDIDATE": "📦", "APPROVED": "✅", "BEST": "⭐",
-            "CHEAP": "💸", "RELIABLE": "🛡", "DO_NOT_BUY": "🚫", "REJECTED": "❌"
-        }
-        emoji = status_label.get(sr.status, "📦")
-        buttons.append([InlineKeyboardButton(
-            text=f"{emoji} {i}. {sr.title[:35]}",
-            callback_data=f"viewresult_{sr.id}"
-        )])
-
-    buttons.append([InlineKeyboardButton(text="🔎 Запустить автопоиск", callback_data=f"autosearch_{req_id}")])
-    buttons.append([InlineKeyboardButton(text="🧪 Debug поиска", callback_data=f"debugsearch_{req_id}")])
-    buttons.append([InlineKeyboardButton(text="➕ Добавить вручную", callback_data=f"addprod_{req_id}")])
-    buttons.append([InlineKeyboardButton(text="👁 Полный предпросмотр для админа", callback_data=f"adminpreview_{req_id}")])
-    buttons.append([InlineKeyboardButton(text="👀 Клиентский предпросмотр до оплаты", callback_data=f"preview_{req_id}")])
-    buttons.append([InlineKeyboardButton(text="🔙 К заявке", callback_data=f"view_{req_id}")])
-
-    await callback.message.edit_text(
-        "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="HTML"
-    )
+    text, markup = build_results_page(req_id, results, len(rejected_auto), page)
+    await _safe_edit_text(callback, text, markup)
     await callback.answer()
 
 
@@ -667,6 +954,7 @@ async def view_result(callback: CallbackQuery):
         lines.append(f"\n<i>{html.escape(sr.snippet[:200])}</i>")
     lines.append(f"\n📊 Score: {int(round(sr.score))}")
     lines.append(f"📋 Статус: {sr.status}")
+    lines.extend(_facts_detail_lines(sr))
 
     try:
         risk_flags = json.loads(sr.risk_flags) if sr.risk_flags else []
@@ -711,6 +999,7 @@ async def next_result(callback: CallbackQuery):
         lines.append(f"\n<i>{html.escape(next_item.snippet[:200])}</i>")
     lines.append(f"\n📊 Score: {int(round(next_item.score))}")
     lines.append(f"📋 Статус: {next_item.status}")
+    lines.extend(_facts_detail_lines(next_item))
     await callback.message.edit_text(
         "\n".join(lines), reply_markup=kb_admin_product(next_item.id, next_item.status), parse_mode="HTML"
     )
@@ -806,29 +1095,12 @@ async def delete_result(callback: CallbackQuery):
     # Возвращаемся к списку
     req = get_request(req_id)
     if req:
-        results = [item for item in get_all_search_results(req_id) if item.status != "REJECTED_AUTO"]
+        all_results = get_all_search_results(req_id)
+        rejected_auto = [item for item in all_results if item.status == "REJECTED_AUTO"]
+        results = [item for item in all_results if item.status != "REJECTED_AUTO"]
         if results:
-            lines = [f"📦 <b>Найденные варианты (заявка #{req_id}):</b>\n"]
-            lines.append(f"Всего: {len(results)}\n")
-            buttons = []
-            for i, sr in enumerate(results[:20], 1):
-                card = format_search_result_card(sr, i)
-                lines.append(card)
-                lines.append("")
-                buttons.append([InlineKeyboardButton(
-                    text=f"📦 {i}. {sr.title[:35]}",
-                    callback_data=f"viewresult_{sr.id}"
-                )])
-            buttons.append([InlineKeyboardButton(text="🔎 Автопоиск", callback_data=f"autosearch_{req_id}")])
-            buttons.append([InlineKeyboardButton(text="➕ Вручную", callback_data=f"addprod_{req_id}")])
-            buttons.append([InlineKeyboardButton(text="👁 Полный предпросмотр для админа", callback_data=f"adminpreview_{req_id}")])
-            buttons.append([InlineKeyboardButton(text="👀 Клиентский предпросмотр до оплаты", callback_data=f"preview_{req_id}")])
-            buttons.append([InlineKeyboardButton(text="🔙 К заявке", callback_data=f"view_{req_id}")])
-            await callback.message.edit_text(
-                "\n".join(lines),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-                parse_mode="HTML"
-            )
+            text, markup = build_results_page(req_id, results, len(rejected_auto), 0)
+            await _safe_edit_text(callback, text, markup)
         else:
             await callback.message.edit_text(
                 f"📦 Заявка #{req_id}\n\nВариантов больше нет.",
