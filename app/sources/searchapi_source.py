@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import logging
+from queue import Empty, Queue
+from threading import Thread
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,6 +25,98 @@ def _max_results() -> int:
         return max(1, min(int(settings.SEARCHAPI_MAX_RESULTS or 5), 20))
     except (TypeError, ValueError):
         return 5
+
+
+def _timeout_seconds() -> int:
+    try:
+        return max(1, int(settings.SEARCHAPI_TIMEOUT_SECONDS or 15))
+    except (TypeError, ValueError):
+        return 15
+
+
+def _request_params(
+    query: str,
+    *,
+    gl: str | None = None,
+    hl: str | None = None,
+    location: str | None = None,
+    simplified: bool = False,
+) -> dict[str, str]:
+    params = {
+        "engine": "google_shopping",
+        "q": query,
+        "api_key": settings.SEARCHAPI_API_KEY,
+    }
+    optional = {
+        "gl": settings.SEARCHAPI_GL if gl is None else gl,
+        "hl": settings.SEARCHAPI_HL if hl is None else hl,
+        "location": settings.SEARCHAPI_LOCATION if location is None else location,
+    }
+    for key, value in optional.items():
+        text = str(value or "").strip()
+        if text or not simplified:
+            params[key] = text
+    return params
+
+
+def _public_params(params: dict[str, str]) -> dict[str, str]:
+    return {key: value for key, value in params.items() if key != "api_key"}
+
+
+def _request_attempt(params: dict[str, str], attempt_timeout: float) -> requests.Response:
+    result_queue: Queue = Queue(maxsize=1)
+    request_timeout = (
+        max(0.5, min(3.0, attempt_timeout)),
+        max(0.5, attempt_timeout),
+    )
+
+    def run() -> None:
+        try:
+            response = requests.get(SEARCHAPI_ENDPOINT, params=params, timeout=request_timeout)
+        except Exception as exc:
+            result_queue.put(("error", exc))
+            return
+        result_queue.put(("response", response))
+
+    thread = Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(max(0.5, attempt_timeout))
+    if thread.is_alive():
+        raise requests.exceptions.ReadTimeout(
+            f"SearchApi request exceeded {attempt_timeout:.1f}s attempt limit"
+        )
+    try:
+        kind, value = result_queue.get_nowait()
+    except Empty as exc:
+        raise requests.exceptions.RequestException("SearchApi request ended without response") from exc
+    if kind == "error":
+        raise value
+    return value
+
+
+def _request_with_deadline(
+    params: dict[str, str],
+    *,
+    started: float,
+    total_timeout: int,
+) -> tuple[requests.Response, int]:
+    deadline = started + max(0.5, total_timeout - 0.5)
+    retry_count = 0
+    for attempt in range(2):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise requests.exceptions.Timeout(f"SearchApi source timeout after {total_timeout}s")
+        attempts_left = 2 - attempt
+        attempt_timeout = remaining if attempt else max(0.5, remaining / attempts_left)
+        try:
+            return _request_attempt(params, attempt_timeout), retry_count
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as exc:
+            if attempt == 0 and deadline - time.monotonic() > 0.5:
+                retry_count += 1
+                logger.debug("SearchApi Google Shopping retry after connection/read timeout")
+                continue
+            setattr(exc, "searchapi_retry_count", retry_count)
+            raise
 
 
 def _parsed_namespace(parsed: dict | None) -> SimpleNamespace:
@@ -133,28 +228,123 @@ def _iter_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
-def search_searchapi_google_shopping(query: str, parsed: dict | None = None) -> list[dict]:
-    if not settings.SEARCHAPI_ENABLED or not settings.SEARCHAPI_API_KEY:
-        return []
-
-    params = {
-        "engine": "google_shopping",
-        "q": query,
-        "gl": settings.SEARCHAPI_GL,
-        "hl": settings.SEARCHAPI_HL,
-        "location": settings.SEARCHAPI_LOCATION,
-        "api_key": settings.SEARCHAPI_API_KEY,
+def debug_searchapi_google_shopping(
+    query: str,
+    parsed: dict | None = None,
+    *,
+    gl: str | None = None,
+    hl: str | None = None,
+    location: str | None = None,
+    simplified_params: bool = False,
+) -> dict[str, Any]:
+    timeout_seconds = _timeout_seconds()
+    params = _request_params(query, gl=gl, hl=hl, location=location, simplified=simplified_params)
+    info: dict[str, Any] = {
+        "enabled": bool(settings.SEARCHAPI_ENABLED),
+        "api_key_present": bool(settings.SEARCHAPI_API_KEY),
+        "endpoint": SEARCHAPI_ENDPOINT,
+        "status": "disabled",
+        "error_class": "",
+        "error": "",
+        "elapsed": 0.0,
+        "top_level_keys": [],
+        "count": 0,
+        "candidates": [],
+        "params": _public_params(params),
+        "timeout": timeout_seconds,
+        "retry_count": 0,
     }
+    if not settings.SEARCHAPI_ENABLED or not settings.SEARCHAPI_API_KEY:
+        if settings.SEARCHAPI_ENABLED and not settings.SEARCHAPI_API_KEY:
+            info["status"] = "missing_api_key"
+        return info
+
+    started = time.monotonic()
     try:
-        response = requests.get(SEARCHAPI_ENDPOINT, params=params, timeout=20)
+        response, retry_count = _request_with_deadline(params, started=started, total_timeout=timeout_seconds)
+        info["elapsed"] = round(time.monotonic() - started, 3)
+        info["retry_count"] = retry_count
+        info["status_code"] = response.status_code
+        if info["elapsed"] > timeout_seconds:
+            raise requests.exceptions.Timeout(f"SearchApi source timeout after {timeout_seconds}s")
         response.raise_for_status()
         payload = response.json()
-    except Exception as exc:
-        logger.warning("SearchApi Google Shopping failed: %s", exc)
-        return []
+    except requests.exceptions.ReadTimeout as exc:
+        info["elapsed"] = round(time.monotonic() - started, 3)
+        info["retry_count"] = getattr(exc, "searchapi_retry_count", info["retry_count"])
+        info["status"] = "timeout"
+        info["error_class"] = exc.__class__.__name__
+        info["error"] = str(exc)[:180]
+        logger.debug("SearchApi Google Shopping timeout: query=%r elapsed=%.3fs", query, info["elapsed"])
+        return info
+    except requests.exceptions.ConnectionError as exc:
+        info["elapsed"] = round(time.monotonic() - started, 3)
+        info["retry_count"] = getattr(exc, "searchapi_retry_count", info["retry_count"])
+        info["status"] = "connection_error"
+        info["error_class"] = exc.__class__.__name__
+        info["error"] = str(exc)[:180]
+        logger.debug(
+            "SearchApi Google Shopping connection error: query=%r elapsed=%.3fs error=%s",
+            query, info["elapsed"], info["error"],
+        )
+        return info
+    except requests.exceptions.Timeout as exc:
+        info["elapsed"] = round(time.monotonic() - started, 3)
+        info["status"] = "timeout"
+        info["error_class"] = exc.__class__.__name__
+        info["error"] = str(exc)[:180]
+        logger.debug("SearchApi Google Shopping timeout: query=%r elapsed=%.3fs", query, info["elapsed"])
+        return info
+    except requests.exceptions.HTTPError as exc:
+        info["elapsed"] = round(time.monotonic() - started, 3)
+        error_response = getattr(exc, "response", None)
+        status_code = getattr(error_response, "status_code", None)
+        if status_code is not None:
+            info["status_code"] = status_code
+        if error_response is not None:
+            try:
+                error_payload = error_response.json()
+            except ValueError:
+                error_payload = None
+            if isinstance(error_payload, dict):
+                info["top_level_keys"] = sorted(str(key) for key in error_payload.keys())[:30]
+        info["status"] = "auth" if status_code in {401, 403} else "http_error"
+        info["error_class"] = exc.__class__.__name__
+        info["error"] = str(exc)[:180]
+        logger.debug(
+            "SearchApi Google Shopping failed: query=%r status=%s elapsed=%.3fs",
+            query, info["status"], info["elapsed"],
+        )
+        return info
+    except requests.exceptions.RequestException as exc:
+        info["elapsed"] = round(time.monotonic() - started, 3)
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code is not None:
+            info["status_code"] = status_code
+        info["error_class"] = exc.__class__.__name__
+        info["error"] = str(exc)[:180]
+        info["status"] = "error"
+        logger.debug(
+            "SearchApi Google Shopping failed: query=%r status=error elapsed=%.3fs error=%s",
+            query, info["elapsed"], info["error"],
+        )
+        return info
+    except ValueError as exc:
+        info["elapsed"] = round(time.monotonic() - started, 3)
+        info["status"] = "bad_json"
+        info["error_class"] = exc.__class__.__name__
+        info["error"] = str(exc)[:180]
+        logger.debug("SearchApi Google Shopping bad json: query=%r elapsed=%.3fs", query, info["elapsed"])
+        return info
     if not isinstance(payload, dict):
-        return []
+        info["status"] = "bad_json"
+        info["error_class"] = "TypeError"
+        info["error"] = f"unexpected json type: {type(payload).__name__}"
+        logger.debug("SearchApi Google Shopping bad json: query=%r elapsed=%.3fs", query, info["elapsed"])
+        return info
 
+    info["top_level_keys"] = sorted(str(key) for key in payload.keys())[:30]
     rows: list[dict] = []
     for item in _iter_items(payload):
         mapped = _map_item(item, parsed)
@@ -162,4 +352,16 @@ def search_searchapi_google_shopping(query: str, parsed: dict | None = None) -> 
             rows.append(mapped)
         if len(rows) >= _max_results():
             break
-    return rows
+    info["candidates"] = rows
+    info["count"] = len(rows)
+    info["status"] = "ok" if rows else "empty"
+    logger.info(
+        "SearchApi Google Shopping: query=%r status=%s elapsed=%.3fs count=%d keys=%s",
+        query, info["status"], info["elapsed"], info["count"], info["top_level_keys"],
+    )
+    return info
+
+
+def search_searchapi_google_shopping(query: str, parsed: dict | None = None) -> list[dict]:
+    debug = debug_searchapi_google_shopping(query, parsed=parsed)
+    return list(debug.get("candidates") or [])
