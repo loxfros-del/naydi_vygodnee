@@ -47,6 +47,7 @@ from app.price_guard import (
 )
 from app.price_extractor import extract_price
 from app.search_links import build_search_query, generate_search_links
+from app.sources.searchapi_source import SEARCHAPI_SOURCE, search_searchapi_google_shopping
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,8 @@ class ProductCandidate:
     bad_price_context: bool = False
     score_cap_applied: str = ""
     low_price_suspect: bool = False
+    external_source: str = ""
+    raw: dict[str, object] = field(default_factory=dict)
     created_at: str = ""
 
 
@@ -202,6 +205,7 @@ SITE_SOURCES = tuple((source.domains[0], source.source) for source in SEARCH_SOU
 SOURCE_TYPE_BY_SOURCE = {source.source: source.source_type for source in SEARCH_SOURCES}
 SOURCE_PRIORITY = {source.source: source.priority for source in SEARCH_SOURCES}
 TRUSTED_PRODUCT_SOURCES = {source.source for source in SEARCH_SOURCES}
+SOURCE_TYPE_BY_SOURCE[SEARCHAPI_SOURCE] = "shopping_api"
 RANK_TRUSTED_SOURCES = {
     "yandex_market_search",
     "mvideo_search",
@@ -585,6 +589,8 @@ def _is_direct_product_url(source: str, url: str) -> bool:
     if any(key in query for key in ("q=", "text=", "search=", "query=")):
         return False
     source = source or _source_from_url(url)
+    if source == SEARCHAPI_SOURCE:
+        source = _source_from_url(url)
     if source == "wildberries":
         return "wildberries.ru" in domain and "/catalog/" in path and "/detail" in path
     if source == "ozon_search":
@@ -946,7 +952,13 @@ def _candidate_rank_score(req: Request, candidate: ProductCandidate) -> float:
 
 
 def _apply_ranking_sanity(req: Request, candidate: ProductCandidate) -> None:
+    keep_low_searchapi_price = (
+        getattr(candidate, "external_source", "") == "searchapi"
+        and getattr(candidate, "price_reliability", "") == "low"
+    )
     normalize_price_candidate(candidate, req)
+    if keep_low_searchapi_price and candidate.price is not None:
+        candidate.price_reliability = "low"
     if _is_low_price_suspect(req, candidate):
         _add_risk_flag(candidate, LOW_PRICE_RISK)
     if _is_avito_city_mismatch(req, candidate):
@@ -1171,15 +1183,18 @@ def _candidate_from_row(row: dict, req: Request, default_source: str) -> Optiona
     if not _looks_like_real_candidate(title, url):
         return None
     raw_price = row.get("price")
-    source = _source_from_url(url, default_source)
+    source = str(row.get("source") or _source_from_url(url, default_source) or default_source)
     price = raw_price
-    price_source = ""
+    price_source = str(row.get("price_source") or "")
+    explicit_reliability = str(row.get("price_reliability") or "")
     min_price, max_price = (7_000, 300_000) if _is_tv_request(req) else (1_000, 10_000_000)
     if isinstance(price, int) and min_price <= price <= max_price:
-        price_source = "api" if source == "wildberries" else "search_result"
+        if not price_source:
+            price_source = "api" if source == "wildberries" else "search_result"
     else:
         price = extract_price(f"{title} {snippet}", min_price=min_price, max_price=max_price)
-        price_source = "search_snippet" if price is not None else ""
+        if not price_source:
+            price_source = "search_snippet" if price is not None else ""
     rating = row.get("rating")
     try:
         rating_value = float(rating) if rating not in (None, "") else None
@@ -1204,15 +1219,24 @@ def _candidate_from_row(row: dict, req: Request, default_source: str) -> Optiona
         rating=rating_value,
         reviews_count=reviews_count,
         seller=str(row.get("seller") or "").strip()[:200],
+        external_source=str(row.get("external_source") or "").strip()[:80],
+        raw=row.get("raw") if isinstance(row.get("raw"), dict) else {},
         city=city[:120],
         availability=str(row.get("availability") or "").strip()[:120],
         description=str(row.get("description") or snippet or "").strip()[:500],
         price_source=price_source,
+        price_reliability=explicit_reliability or "none",
         created_at=datetime.now().isoformat(),
     )
     normalize_price_candidate(candidate, req, raw_price=raw_price, price_source=price_source, text=f"{title} {snippet}")
+    if explicit_reliability:
+        candidate.price_reliability = explicit_reliability if candidate.price is not None else "none"
+    for attr in ("price_rejected_reason", "price_from_budget_suspect", "bad_price_context"):
+        if row.get(attr) and not getattr(candidate, attr, None):
+            setattr(candidate, attr, row.get(attr))
     price = candidate.price
-    guard_risks = list(candidate.risk_flags or [])
+    row_risks = row.get("risk_flags") if isinstance(row.get("risk_flags"), list) else []
+    guard_risks = list(candidate.risk_flags or []) + [str(item) for item in row_risks if str(item).strip()]
     quality, classification_flags = classify_candidate(candidate, req)
     status = QUALITY_TO_STATUS[quality]
     score, risks = score_result(title, snippet, price, req, source, status, classification_flags)
@@ -1336,6 +1360,102 @@ def _collect_from_adapter(
         (
             f"GOOD={quality_counts[QUALITY_GOOD]}; OK={quality_counts[QUALITY_OK]}; "
             f"WEAK={quality_counts[QUALITY_WEAK]}; TRASH={quality_counts[QUALITY_TRASH]}"
+        ),
+    ))
+
+
+def _normalised_title_key(title: str) -> str:
+    return re.sub(r"[^a-zа-яё0-9]+", " ", (title or "").lower()).strip()
+
+
+def _searchapi_store_key(candidate: ProductCandidate) -> str:
+    store = (candidate.seller or extract_domain(candidate.url) or "").lower().strip()
+    title = _normalised_title_key(candidate.title)
+    return f"{store}|{title}" if store and title else ""
+
+
+def _searchapi_dedupe_keys(candidate: ProductCandidate) -> set[str]:
+    keys: set[str] = set()
+    normalized_url = _normalise_url(candidate.url)
+    title_key = _normalised_title_key(candidate.title)
+    store_key = _searchapi_store_key(candidate)
+    if normalized_url:
+        keys.add(f"url:{normalized_url}")
+    if title_key:
+        keys.add(f"title:{title_key}")
+    if store_key:
+        keys.add(f"store_title:{store_key}")
+    return keys
+
+
+def _existing_searchapi_dedupe_keys(collection: SearchCollection) -> set[str]:
+    keys: set[str] = set()
+    for candidate in collection.raw_candidates:
+        keys.update(_searchapi_dedupe_keys(candidate))
+    return keys
+
+
+def _request_as_searchapi_parsed(req: Request) -> dict[str, object]:
+    return {
+        "original_query": req.original_query,
+        "product_name": req.product_name or req.product,
+        "product": req.product,
+        "budget": req.budget,
+        "city": req.city,
+        "important_criteria": req.important_criteria or req.criteria,
+    }
+
+
+def _collect_from_searchapi(
+    req: Request,
+    query: str,
+    collection: SearchCollection,
+    seen_urls: set[str],
+) -> None:
+    try:
+        rows = search_searchapi_google_shopping(query, parsed=_request_as_searchapi_parsed(req))
+    except Exception as exc:
+        logger.warning("Автопоиск: %s не выполнил %r: %s", SEARCHAPI_SOURCE, query, exc)
+        collection.attempts.append(SearchAttemptData(SEARCHAPI_SOURCE, query, "ERROR", error_text=str(exc)))
+        return
+
+    existing_keys = _existing_searchapi_dedupe_keys(collection)
+    kept = 0
+    duplicates = 0
+    quality_counts = {QUALITY_GOOD: 0, QUALITY_OK: 0, QUALITY_WEAK: 0, QUALITY_TRASH: 0}
+    for row in rows:
+        try:
+            candidate = _candidate_from_row(row, req, SEARCHAPI_SOURCE)
+        except Exception as exc:
+            logger.warning("Автопоиск: не удалось разобрать карточку %s: %s", SEARCHAPI_SOURCE, exc)
+            continue
+        if not candidate:
+            continue
+        normalized_url = _normalise_url(candidate.url)
+        dedupe_keys = _searchapi_dedupe_keys(candidate)
+        if normalized_url in seen_urls or existing_keys.intersection(dedupe_keys):
+            duplicates += 1
+            continue
+        if normalized_url:
+            seen_urls.add(normalized_url)
+        existing_keys.update(dedupe_keys)
+        collection.raw_candidates.append(candidate)
+        _bump_quality_stats(collection, candidate)
+        quality_counts[candidate.quality] += 1
+        if candidate.quality != QUALITY_TRASH:
+            collection.candidates.append(candidate)
+            kept += 1
+    status = "OK" if rows else "EMPTY"
+    collection.attempts.append(SearchAttemptData(
+        SEARCHAPI_SOURCE,
+        query,
+        status,
+        len(rows),
+        kept,
+        (
+            f"GOOD={quality_counts[QUALITY_GOOD]}; OK={quality_counts[QUALITY_OK]}; "
+            f"WEAK={quality_counts[QUALITY_WEAK]}; TRASH={quality_counts[QUALITY_TRASH]}; "
+            f"duplicates={duplicates}"
         ),
     ))
 
@@ -1518,6 +1638,10 @@ def collect_product_candidates(req: Request, max_results: int = 15) -> SearchCol
         domain_match = re.match(r"site:([^\s]+)", query)
         source = MARKETPLACE_SOURCES.get(domain_match.group(1), "generic_web") if domain_match else "generic_web"
         _collect_from_adapter(site_adapter, req, source, query, 6, collection, seen_urls)
+
+    if settings.SEARCHAPI_ENABLED:
+        searchapi_query = (req.clean_search_query or "").strip() or wb_query
+        _collect_from_searchapi(req, searchapi_query, collection, seen_urls)
 
     _apply_verification(collection, req)
     collection.candidates = collection.candidates[:min(max_results, 10)]

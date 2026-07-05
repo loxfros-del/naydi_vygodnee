@@ -122,6 +122,8 @@ def detect_price_reliability(
     if price is None:
         return PRICE_RELIABILITY_NONE
     source_text = f"{price_source} {source} {verify_status}".lower()
+    if "structured_api" in source_text or "searchapi" in source_text:
+        return PRICE_RELIABILITY_MEDIUM
     if any(marker in source_text for marker in ("requests", "playwright", "api", "verified_good", "verified_ok")):
         return PRICE_RELIABILITY_HIGH
     if isinstance(raw_price, int) and raw_price == price:

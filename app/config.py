@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     ENABLE_SEARCH_CITILINK: bool = True
     ENABLE_SEARCH_MEGAMARKET: bool = True
     ENABLE_SEARCH_GENERIC: bool = True
+    SEARCHAPI_ENABLED: bool = False
+    SEARCHAPI_API_KEY: str = ""
+    SEARCHAPI_GL: str = "ru"
+    SEARCHAPI_HL: str = "ru"
+    SEARCHAPI_LOCATION: str = "Russia"
+    SEARCHAPI_MAX_RESULTS: int = 5
     ENABLE_PLAYWRIGHT_VERIFIER: bool = False
     PLAYWRIGHT_HEADLESS: bool = True
     PLAYWRIGHT_TIMEOUT_MS: int = 8000
@@ -102,6 +108,12 @@ class Settings(BaseSettings):
             ENABLE_SEARCH_CITILINK=_env_bool("ENABLE_SEARCH_CITILINK", True),
             ENABLE_SEARCH_MEGAMARKET=_env_bool("ENABLE_SEARCH_MEGAMARKET", True),
             ENABLE_SEARCH_GENERIC=_env_bool("ENABLE_SEARCH_GENERIC", True),
+            SEARCHAPI_ENABLED=_env_bool("SEARCHAPI_ENABLED", False),
+            SEARCHAPI_API_KEY=os.getenv("SEARCHAPI_API_KEY", "").strip(),
+            SEARCHAPI_GL=os.getenv("SEARCHAPI_GL", "ru").strip(),
+            SEARCHAPI_HL=os.getenv("SEARCHAPI_HL", "ru").strip(),
+            SEARCHAPI_LOCATION=os.getenv("SEARCHAPI_LOCATION", "Russia").strip(),
+            SEARCHAPI_MAX_RESULTS=_env_int("SEARCHAPI_MAX_RESULTS", 5),
             ENABLE_PLAYWRIGHT_VERIFIER=_env_bool("ENABLE_PLAYWRIGHT_VERIFIER", False),
             PLAYWRIGHT_HEADLESS=_env_bool("PLAYWRIGHT_HEADLESS", True),
             PLAYWRIGHT_TIMEOUT_MS=_env_int("PLAYWRIGHT_TIMEOUT_MS", 8000),
