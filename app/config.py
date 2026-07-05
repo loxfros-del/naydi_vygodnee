@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     ENABLE_SEARCH_CITILINK: bool = True
     ENABLE_SEARCH_MEGAMARKET: bool = True
     ENABLE_SEARCH_GENERIC: bool = True
+    ENABLE_PLAYWRIGHT_VERIFIER: bool = False
+    PLAYWRIGHT_HEADLESS: bool = True
+    PLAYWRIGHT_TIMEOUT_MS: int = 8000
+    PLAYWRIGHT_MAX_CANDIDATES: int = 5
     AI_CARDS_ENABLED: bool = False
     AI_API_KEY: str = ""
     AI_BASE_URL: str = ""
@@ -74,6 +78,10 @@ class Settings(BaseSettings):
             ENABLE_SEARCH_CITILINK=_env_bool("ENABLE_SEARCH_CITILINK", True),
             ENABLE_SEARCH_MEGAMARKET=_env_bool("ENABLE_SEARCH_MEGAMARKET", True),
             ENABLE_SEARCH_GENERIC=_env_bool("ENABLE_SEARCH_GENERIC", True),
+            ENABLE_PLAYWRIGHT_VERIFIER=_env_bool("ENABLE_PLAYWRIGHT_VERIFIER", False),
+            PLAYWRIGHT_HEADLESS=_env_bool("PLAYWRIGHT_HEADLESS", True),
+            PLAYWRIGHT_TIMEOUT_MS=_env_int("PLAYWRIGHT_TIMEOUT_MS", 8000),
+            PLAYWRIGHT_MAX_CANDIDATES=_env_int("PLAYWRIGHT_MAX_CANDIDATES", 5),
             AI_CARDS_ENABLED=_env_bool("AI_CARDS_ENABLED", False),
             AI_API_KEY=os.getenv("AI_API_KEY", "").strip(),
             AI_BASE_URL=os.getenv("AI_BASE_URL", "").strip(),

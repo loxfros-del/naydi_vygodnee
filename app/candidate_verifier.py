@@ -27,6 +27,7 @@ BAD_ENCODING = "BAD_ENCODING"
 REJECTED = "REJECTED"
 VERIFY_ERROR = "VERIFY_ERROR"
 VERIFY_BLOCKED = "VERIFY_BLOCKED"
+NEED_MANUAL_CHECK = VERIFY_BLOCKED
 OVER_BUDGET_SOFT = "OVER_BUDGET_SOFT"
 OVER_BUDGET_HARD = "OVER_BUDGET_HARD"
 
@@ -784,6 +785,8 @@ def _apply_verified(candidate: Any, verified: VerifiedCandidate) -> VerifiedCand
         candidate.title = verified.title[:300]
     if verified.price is not None:
         candidate.price = verified.price
+        if not getattr(candidate, "price_source", ""):
+            candidate.price_source = "requests" if verified.html_loaded else "search"
     candidate.availability = verified.availability
     if verified.facts:
         candidate.product_facts = verified.facts
@@ -804,6 +807,10 @@ def _apply_verified(candidate: Any, verified: VerifiedCandidate) -> VerifiedCand
         candidate.quality = "TRASH"
         candidate.status = "REJECTED_AUTO"
     return verified
+
+
+def apply_verified_candidate(candidate: Any, verified: VerifiedCandidate) -> VerifiedCandidate:
+    return _apply_verified(candidate, verified)
 
 
 def _is_blocked_error(exc: Exception) -> bool:

@@ -137,10 +137,16 @@ def _print_top_candidates(candidates: list[Any]) -> None:
         title = facts.get("model") or facts.get("model_key") or getattr(item, "title", "")
         price = getattr(item, "price", None)
         price_text = f"{price} ₽" if price else "цена не найдена"
+        verify_status = getattr(item, "verify_status", getattr(item, "quality", "-"))
+        playwright_used = bool(getattr(item, "playwright_used", False))
+        playwright_verified = bool(getattr(item, "playwright_verified", False))
+        price_source = getattr(item, "price_source", "") or facts.get("price_source") or "-"
         print(f"    {index}. {title}")
         print(f"       price: {price_text}")
         print(f"       source: {getattr(item, 'source', '')}")
-        print(f"       saved_as: {getattr(item, 'verify_status', getattr(item, 'quality', '-'))}")
+        print(f"       verify_status: {verify_status}")
+        print(f"       playwright: used={playwright_used}; verified={playwright_verified}")
+        print(f"       price_source: {price_source}")
         print(f"       url: {getattr(item, 'url', '')}")
         print(f"       budget_status: {facts.get('budget_status') or '-'}")
         print(f"       availability: {facts.get('availability_text') or getattr(item, 'availability', '') or '-'}")
@@ -205,6 +211,11 @@ def run_one(raw_query: str, index: int) -> dict[str, Any]:
         "removed_listing_hidden": verify_stats.get(REMOVED_LISTING, 0),
         "duplicates_hidden": hidden_duplicates,
         "verify_error": verify_stats.get("VERIFY_ERROR", 0),
+        "playwright_used": verify_stats.get("playwright_used", 0),
+        "playwright_verified": verify_stats.get("playwright_verified", 0),
+        "playwright_failed": verify_stats.get("playwright_failed", 0),
+        "manual_check_after_playwright": verify_stats.get("manual_check_after_playwright", 0),
+        "manual_check_saved_without_price": verify_stats.get("manual_check_saved_without_price", 0),
         "bad_facts_count": _bad_facts_count(saved, category),
     }
     print(f"  QUALITY: {quality}")

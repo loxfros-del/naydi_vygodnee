@@ -35,6 +35,7 @@ from app.db import (
     get_search_results,
     replace_manual_search_links,
 )
+from app.playwright_verifier import verify_with_playwright_fallback
 from app.price_extractor import extract_price
 from app.search_links import build_search_query, generate_search_links
 
@@ -125,6 +126,11 @@ class SearchCollection:
         "VERIFIED_OK": 0,
         "OVER_BUDGET_SOFT": 0,
         "OVER_BUDGET_HARD": 0,
+        "playwright_used": 0,
+        "playwright_verified": 0,
+        "playwright_failed": 0,
+        "manual_check_after_playwright": 0,
+        "manual_check_saved_without_price": 0,
         "saved": 0,
     })
 
@@ -1196,17 +1202,30 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
         if item.status != "REJECTED_AUTO" and item.quality != QUALITY_TRASH
     ]
     verified = verify_candidates(candidates_to_verify, req, limit=30)
+    verified, playwright_summary = verify_with_playwright_fallback(verified, req)
     stats = collection.verify_stats
     stats["checked"] = len(verified)
+    stats["playwright_used"] = playwright_summary.used
+    stats["playwright_verified"] = playwright_summary.verified
+    stats["playwright_failed"] = playwright_summary.failed
+    stats["manual_check_after_playwright"] = playwright_summary.manual_check
 
     kept: list[ProductCandidate] = []
+    manual_without_price: list[ProductCandidate] = []
     for item in verified:
         status = item.verify_status
         stats[status] = stats.get(status, 0) + 1
         if item.keep_for_admin and item.candidate.price:
             kept.append(item.candidate)
+        elif item.keep_for_admin and status == VERIFY_BLOCKED and getattr(item.candidate, "playwright_used", False):
+            manual_without_price.append(item.candidate)
         else:
             collection.verified_rejections.append(item)
+
+    if len(kept) < 3 and manual_without_price:
+        extra = manual_without_price[:3 - len(kept)]
+        kept.extend(extra)
+        stats["manual_check_saved_without_price"] = len(extra)
 
     kept = _dedupe_verified_candidates(req, kept)
     # В админку отправляем не весь хвост поисковой выдачи, а только лучшие.
@@ -1233,6 +1252,11 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
             f"VERIFIED_OK={stats.get('VERIFIED_OK', 0)}; "
             f"OVER_BUDGET_SOFT={stats.get('OVER_BUDGET_SOFT', 0)}; "
             f"OVER_BUDGET_HARD={stats.get('OVER_BUDGET_HARD', 0)}; "
+            f"playwright_used={stats.get('playwright_used', 0)}; "
+            f"playwright_verified={stats.get('playwright_verified', 0)}; "
+            f"playwright_failed={stats.get('playwright_failed', 0)}; "
+            f"manual_check_after_playwright={stats.get('manual_check_after_playwright', 0)}; "
+            f"manual_check_saved_without_price={stats.get('manual_check_saved_without_price', 0)}; "
             f"saved={stats['saved']}"
         ),
     ))
