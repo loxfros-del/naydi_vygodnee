@@ -1,0 +1,405 @@
+{
+  "schema_version": 1,
+  "goal": "Golden dataset для проверки качества выдачи. Проверяем не абстрактный GOOD/OK, а что бот не врёт цену, не тащит мусор в топ и не даёт manual/blocked score 100+.",
+  "global_assertions": {
+    "price_must_not_be_budget_without_currency": true,
+    "manual_without_verified_price_score_max": 60,
+    "price_missing_score_max": 45,
+    "blocked_manual_score_max": 60,
+    "low_price_suspect_cannot_be_top1": true,
+    "candidate_without_price_must_not_claim_exact_price": true,
+    "blocked_or_manual_must_not_be_verified_good": true
+  },
+  "queries": [
+    {
+      "id": "headphones_10k",
+      "query": "Нужны наушники до 10к",
+      "category": "headphones",
+      "budget": 10000,
+      "intent": "нужны нормальные наушники, не самый дешёвый мусор",
+      "expected": {
+        "min_saved_for_admin": 1,
+        "preferred_price_min": 1000,
+        "preferred_price_max": 10000,
+        "bad_if_top_price_below": 800,
+        "bad_if_price_equals_budget": true,
+        "bad_markers_as_price": [
+          "до 10к",
+          "до 10000",
+          "10000 mAh",
+          "10000 Гц",
+          "10000 Hz",
+          "10000 отзывов"
+        ],
+        "manual_without_verified_price_score_max": 60
+      },
+      "known_bad_examples": [
+        {
+          "title_contains": [
+            "AIR39",
+            "беспроводные",
+            "USB Type-C"
+          ],
+          "real_price_range": [
+            200,
+            800
+          ],
+          "bad_if_bot_price": 10000,
+          "why": "бот взял бюджет/характеристику как цену"
+        },
+        {
+          "title_contains": [
+            "Sogood B39"
+          ],
+          "real_price_range": [
+            300,
+            800
+          ],
+          "bad_if_top1": true,
+          "why": "дешёвый ноунейм не должен быть топом при бюджете 10к"
+        },
+        {
+          "title_contains": [
+            "YINDIAO",
+            "3.5 мм"
+          ],
+          "real_price_range": [
+            200,
+            900
+          ],
+          "bad_if_top1": true,
+          "why": "проводной дешёвый ноунейм не должен обгонять нормальные варианты"
+        }
+      ],
+      "manual_good_items_to_fill": [
+        {
+          "url": "https://www.ozon.ru/product/naushniki-besprovodnye-s-mikrofonom-anker-soundcore-space-one-bezhevyy-3548206984/?utm_medium=organic&utm_source=yandex_serp_products",
+          "expected_title_contains_any": [
+            "JBL",
+            "Soundcore",
+            "Xiaomi",
+            "QCY",
+            "Sony",
+            "Anker"
+          ],
+          "expected_available": true,
+          "expected_price_min": 1000,
+          "expected_price_max": 10000,
+          "note": "вставь вручную нормальный товар из Ozon/Market/DNS/MVideo/Citilink"
+        },
+        {
+          "url": "https://www.wildberries.ru/catalog/436506376/detail.aspx?utm_source=yandex&utm_medium=feed&utm_campaign=feed",
+          "expected_title_contains_any": [
+            "JBL",
+            "Soundcore",
+            "Xiaomi",
+            "QCY",
+            "Sony",
+            "Anker"
+          ],
+          "expected_available": true,
+          "expected_price_min": 1000,
+          "expected_price_max": 10000,
+          "note": "второй нормальный товар для сравнения"
+        },
+        {
+          "url": " https://www.dns-shop.ru/product/b73d8cc83fdf7d9d/besprovodnye-nausniki-baseus-bowie-h1-pro-belyj-2024/?utm_source=webmaster_msk&utm_medium=cpc&utm_campaign=webmaster_msk",
+          "expected_title_contains_any": [
+            "JBL",
+            "Soundcore",
+            "Xiaomi",
+            "QCY",
+            "Sony",
+            "Anker"
+          ],
+          "expected_available": true,
+          "expected_price_min": 1000,
+          "expected_price_max": 10000,
+          "note": "третий нормальный товар для сравнения"
+        },
+        {
+          "url": " https://www.dns-shop.ru/product/33ce9e6f65dbd0a4/nausniki-tws-technics-eah-az40m2-koricnevyj-2023/ ",
+          "expected_title_contains_any": [
+            "JBL",
+            "Soundcore",
+            "Xiaomi",
+            "QCY",
+            "Sony",
+            "Anker"
+          ],
+          "expected_available": true,
+          "expected_price_min": 1000,
+          "expected_price_max": 10000,
+          "note": "четвертый нормальный товар для сравнения"
+        }
+      ]
+    },
+    {
+      "id": "iphone_16_pro_256",
+      "query": "iPhone 16 Pro 256 ГБ",
+      "category": "phone",
+      "budget": null,
+      "intent": "найти именно iPhone 16 Pro 256GB, не Pro Max, не 512GB, не аксессуар",
+      "expected": {
+        "min_saved_for_admin": 1,
+        "must_contain_all": [
+          "iPhone",
+          "16",
+          "Pro"
+        ],
+        "preferred_storage_gb": 256,
+        "bad_if_contains_any": [
+          "Pro Max",
+          "чехол",
+          "стекло",
+          "подарок",
+          "муляж",
+          "копия",
+          "реплика"
+        ],
+        "bad_if_price_below": 40000,
+        "manual_without_verified_price_score_max": 60
+      },
+      "known_bad_examples": [
+        {
+          "title_contains": [
+            "iPhone 16 Pro Max"
+          ],
+          "bad_if_saved_as_match": true,
+          "why": "Pro Max это другая модель"
+        },
+        {
+          "title_contains": [
+            "чехол",
+            "стекло",
+            "в подарок"
+          ],
+          "bad_if_saved_as_match": true,
+          "why": "аксессуар/комплектный мусор не должен быть кандидатом телефона"
+        },
+        {
+          "title_contains": [
+            "iPhone 16 Pro",
+            "256"
+          ],
+          "source": "avito_search",
+          "expected_manual_risks": [
+            "проверить продавца",
+            "проверить город",
+            "проверить состояние",
+            "проверить отзывы"
+          ],
+          "why": "Avito можно сохранять только как manual/OK, не как полностью проверенный GOOD"
+        }
+      ],
+      "manual_good_items_to_fill": [
+        {
+          "url": "https://apple-market.ru/smartfon-apple-iphone-16-pro-256-gb-dual-sim-esim-desert-titanium/",
+          "expected_title_contains_all": [
+            "iPhone",
+            "16",
+            "Pro",
+            "256"
+          ],
+          "expected_title_not_contains": [
+            "Max",
+            "чехол",
+            "стекло"
+          ],
+          "expected_price_min": 40000,
+          "expected_price_max": 200000,
+          "note": "вставь вручную нормальную карточку iPhone 16 Pro 256"
+        }
+      ]
+    },
+    {
+      "id": "iphone_13_used_40k_yaroslavl",
+      "query": "Нужен iPhone 13 б/у до 40к в Ярославле",
+      "category": "phone",
+      "budget": 40000,
+      "intent": "б/у iPhone 13 в Ярославле, не 12/14/15/16",
+      "expected": {
+        "min_saved_for_admin": 1,
+        "must_contain_all": [
+          "iPhone",
+          "13"
+        ],
+        "bad_if_contains_any": [
+          "iPhone 12",
+          "iPhone 14",
+          "iPhone 15",
+          "iPhone 16",
+          "чехол",
+          "стекло"
+        ],
+        "preferred_city": "Ярославль",
+        "bad_if_city_mismatch_without_risk": true,
+        "expected_price_min": 10000,
+        "expected_price_max": 40000,
+        "manual_without_verified_price_score_max": 60
+      },
+      "known_bad_examples": [],
+      "manual_good_items_to_fill": [
+        {
+          "url": "https://www.avito.ru/yaroslavl/telefony/iphone_13_256_gb_1_sim_8045186823?context=H4sIAAAAAAAA_wE_AMD_YToyOntzOjEzOiJsb2NhbFByaW9yaXR5IjtiOjE7czoxOiJ4IjtzOjE2OiJMY0doUnl1SGVIWkVWdm5jIjt9D-PpRj8AAAA",
+          "expected_title_contains_all": [
+            "iPhone",
+            "13"
+          ],
+          "expected_price_min": 10000,
+          "expected_price_max": 40000,
+          "expected_city": "Ярославль",
+          "note": "вставь вручную нормальное объявление"
+        }
+      ]
+    },
+    {
+      "id": "laptop_study_50k_moscow",
+      "query": "Нужен ноутбук для учёбы до 50к в Москве",
+      "category": "laptop",
+      "budget": 50000,
+      "intent": "обычный ноутбук для учёбы, не игровой хлам, не аксессуар",
+      "expected": {
+        "min_saved_for_admin": 1,
+        "expected_price_min": 15000,
+        "expected_price_max": 50000,
+        "bad_if_contains_any": [
+          "сумка",
+          "зарядка",
+          "клавиатура",
+          "подставка",
+          "аккумулятор",
+          "игровой RTX 4090"
+        ],
+        "bad_if_price_equals_budget": true,
+        "manual_without_verified_price_score_max": 60
+      },
+      "known_bad_examples": [
+        {
+          "title_contains": [
+            "Ozon",
+            "ноутбук"
+          ],
+          "bad_if_price": 50000,
+          "why": "если 50000 взято из бюджета, а не со страницы — это ошибка"
+        }
+      ],
+      "manual_good_items_to_fill": [
+        {
+          "url": "https://www.ozon.ru/product/lunnen-ground-15-yandeks-fabrika-noutbuk-15-6-amd-ryzen-5-7430u-ram-16-gb-ssd-512-gb-amd-radeon-2134285550/?utm_medium=organic&utm_source=yandex_serp_products",
+          "expected_title_contains_any": [
+            "Lenovo",
+            "HP",
+            "ASUS",
+            "Acer",
+            "Honor",
+            "Huawei"
+          ],
+          "expected_price_min": 15000,
+          "expected_price_max": 50000,
+          "note": "вставь вручную нормальный ноутбук"
+        }
+      ]
+    },
+    {
+      "id": "tv_ps5_45k_yaroslavl",
+      "query": "Нужен телевизор для PS5 до 45к в Ярославле",
+      "category": "tv",
+      "budget": 45000,
+      "intent": "телевизор 4K для PS5, лучше 43-55, не монитор/проектор/кронштейн",
+      "expected": {
+        "min_saved_for_admin": 1,
+        "expected_price_min": 15000,
+        "expected_price_max": 45000,
+        "must_have_any": [
+          "4K",
+          "UHD",
+          "Ultra HD"
+        ],
+        "bad_if_contains_any": [
+          "монитор",
+          "проектор",
+          "кронштейн",
+          "пульт",
+          "кабель",
+          "подставка"
+        ],
+        "bad_if_full_hd_top": true,
+        "manual_without_verified_price_score_max": 60
+      },
+      "known_bad_examples": [
+        {
+          "title_contains": [
+            "Full HD"
+          ],
+          "bad_if_top1": true,
+          "why": "для PS5 при бюджете 45к Full HD не должен быть топом"
+        }
+      ],
+      "manual_good_items_to_fill": [
+        {
+          "url": "https://www.dns-shop.ru/product/0108e2e91f4fd9cb/55-139-sm-televizor-hisense-55e7q-pro-cernyj/",
+          "expected_title_contains_any": [
+            "4K",
+            "UHD",
+            "Ultra HD"
+          ],
+          "expected_price_min": 15000,
+          "expected_price_max": 45000,
+          "note": "вставь вручную нормальный 4K TV"
+        }
+      ]
+    },
+    {
+      "id": "office_chair_15k",
+      "query": "Нужно офисное кресло для учёбы до 15к",
+      "category": "chair",
+      "budget": 15000,
+      "intent": "удобное офисное кресло для долгой учёбы, не игровое кресло-мусор и не чехол",
+      "expected": {
+        "min_saved_for_admin": 1,
+        "expected_price_min": 3000,
+        "expected_price_max": 15000,
+        "bad_if_contains_any": [
+          "чехол",
+          "колёса",
+          "газлифт",
+          "подлокотник отдельно",
+          "запчасть"
+        ],
+        "good_if_contains_any": [
+          "эргономичное",
+          "поясничная",
+          "регулировка",
+          "офисное"
+        ],
+        "manual_without_verified_price_score_max": 60
+      },
+      "known_bad_examples": [],
+      "manual_good_items_to_fill": [
+        {
+          "url": "https://www.onlinetrade.ru/catalogue/kompyuternye_kresla-c133/norden/kreslo_ofisnoe_norden_tema_2d_tema_chrome_2d_chernaya_tkan_216a_chrome_2d_b_bb-5276444.html?city=1&yadiscount=eyJhIjozMDAsImRwIjoxLCJsdCI6MTIwLCJwIjo1LCJ0IjoyLCJ0cyI6MTc4MzI3NjY1OX0,",
+          "expected_title_contains_any": [
+            "кресло",
+            "офисное",
+            "компьютерное"
+          ],
+          "expected_price_min": 3000,
+          "expected_price_max": 15000,
+          "note": "вставь вручную нормальное кресло"
+        },
+        {
+          "url": "https://www.mvideo.ru/products/stul-kreslo-ofisnyi-topchairs-simple-sn-400505351?cityId=CityCZ_975&reff=yan_tov_dD58_c59801_g598091801_m27531",
+          "expected_title_contains_any": [
+            "кресло",
+            "офисное",
+            "компьютерное"
+          ],
+          "expected_price_min": 3000,
+          "expected_price_max": 15000,
+          "note": "вставь вручную нормальное кресло"
+        }
+      ]
+    }
+  ]
+}

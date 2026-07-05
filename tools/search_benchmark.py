@@ -143,6 +143,24 @@ def _fetch_stats(candidates: list[Any]) -> dict[str, Any]:
     }
 
 
+def _counter_attr(candidates: list[Any], attr: str) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for item in candidates:
+        value = getattr(item, attr, "")
+        if isinstance(value, bool):
+            if value:
+                counter[attr] += 1
+            continue
+        text = str(value or "").strip()
+        if text:
+            counter[text] += 1
+    return dict(counter) if counter else {}
+
+
+def _bool_attr_count(candidates: list[Any], attr: str) -> int:
+    return sum(1 for item in candidates if bool(getattr(item, attr, False)))
+
+
 def _hidden_count_from_risks(candidates: list[Any]) -> int:
     total = 0
     for item in candidates:
@@ -219,6 +237,11 @@ def _print_top_candidates(candidates: list[Any]) -> None:
         playwright_used = bool(getattr(item, "playwright_used", False))
         playwright_verified = bool(getattr(item, "playwright_verified", False))
         price_source = getattr(item, "price_source", "") or facts.get("price_source") or "-"
+        price_reliability = getattr(item, "price_reliability", "") or "-"
+        price_rejected_reason = getattr(item, "price_rejected_reason", "") or "-"
+        price_from_budget_suspect = bool(getattr(item, "price_from_budget_suspect", False))
+        bad_price_context = bool(getattr(item, "bad_price_context", False))
+        score_cap_applied = getattr(item, "score_cap_applied", "") or "-"
         score = float(getattr(item, "score", 0) or 0)
         risks = _risk_flags(item)
         print(f"    {index}. {title}")
@@ -232,6 +255,11 @@ def _print_top_candidates(candidates: list[Any]) -> None:
         print(f"       playwright: used={playwright_used}; verified={playwright_verified}")
         _print_fetch_diagnostics(item)
         print(f"       price_source: {price_source}")
+        print(f"       price_reliability: {price_reliability}")
+        print(f"       price_rejected_reason: {price_rejected_reason}")
+        print(f"       price_from_budget_suspect: {price_from_budget_suspect}")
+        print(f"       bad_price_context: {bad_price_context}")
+        print(f"       score_cap_applied: {score_cap_applied}")
         print(f"       url: {getattr(item, 'url', '')}")
         print(f"       budget_status: {facts.get('budget_status') or '-'}")
         print(f"       availability: {facts.get('availability_text') or getattr(item, 'availability', '') or '-'}")
@@ -249,6 +277,11 @@ def _print_debug_reasons(collection: Any) -> None:
         reason = item.reason or ", ".join(getattr(candidate, "risk_flags", []) or []) or item.verify_status
         print(f"    - [{item.verify_status}] {getattr(candidate, 'source', '')}: {reason}")
         _print_fetch_diagnostics(candidate, prefix="      ")
+        print(f"      price_reliability: {getattr(candidate, 'price_reliability', '') or '-'}")
+        print(f"      price_rejected_reason: {getattr(candidate, 'price_rejected_reason', '') or '-'}")
+        print(f"      price_from_budget_suspect: {bool(getattr(candidate, 'price_from_budget_suspect', False))}")
+        print(f"      bad_price_context: {bool(getattr(candidate, 'bad_price_context', False))}")
+        print(f"      score_cap_applied: {getattr(candidate, 'score_cap_applied', '') or '-'}")
 
 
 def run_one(raw_query: str, index: int) -> dict[str, Any]:
@@ -277,7 +310,8 @@ def run_one(raw_query: str, index: int) -> dict[str, Any]:
     hidden_duplicates = _hidden_count_from_risks(saved)
     has_missing_price = _has_missing_price(saved)
     ranked_top = saved[:3]
-    fetch_stats = _fetch_stats(_verified_candidates(collection))
+    checked_candidates = _verified_candidates(collection)
+    fetch_stats = _fetch_stats(checked_candidates)
     quality = _quality_label(len(saved), has_missing_price)
     stats = {
         "parsed_product_name": parsed.get("product_name") or "",
@@ -312,6 +346,11 @@ def run_one(raw_query: str, index: int) -> dict[str, Any]:
         "browser_provider_fallback_reason": verify_stats.get("browser_provider_fallback_reason", "-") or "-",
         "manual_check_after_playwright": verify_stats.get("manual_check_after_playwright", 0),
         "manual_check_saved_without_price": verify_stats.get("manual_check_saved_without_price", 0),
+        "price_reliability": _counter_attr(checked_candidates, "price_reliability"),
+        "price_rejected_reason": _counter_attr(checked_candidates, "price_rejected_reason"),
+        "price_from_budget_suspect": _bool_attr_count(checked_candidates, "price_from_budget_suspect"),
+        "bad_price_context": _bool_attr_count(checked_candidates, "bad_price_context"),
+        "score_cap_applied": _counter_attr(checked_candidates, "score_cap_applied"),
         "used_proxy": fetch_stats["used_proxy"],
         "http_fetch": fetch_stats["http_fetch"],
         "http_cache": fetch_stats["http_cache"],

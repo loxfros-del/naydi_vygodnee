@@ -40,6 +40,11 @@ from app.db import (
 )
 from app.net_client import FetchResult, fetch_http
 from app.playwright_verifier import verify_with_playwright_fallback
+from app.price_guard import (
+    TOO_CHEAP_FOR_BUDGET_RISK,
+    apply_price_rank_penalties,
+    normalize_price_candidate,
+)
 from app.price_extractor import extract_price
 from app.search_links import build_search_query, generate_search_links
 
@@ -79,6 +84,13 @@ class ProductCandidate:
     description: str = ""
     product_facts: dict[str, object] = field(default_factory=dict)
     facts_json: str = ""
+    price_source: str = ""
+    price_reliability: str = "none"
+    price_rejected_reason: str = ""
+    price_from_budget_suspect: bool = False
+    bad_price_context: bool = False
+    score_cap_applied: str = ""
+    low_price_suspect: bool = False
     created_at: str = ""
 
 
@@ -140,6 +152,9 @@ class SearchCollection:
         "manual_check_saved_without_price": 0,
         "low_price_suspect": 0,
         "city_mismatch": 0,
+        "price_from_budget_suspect": 0,
+        "bad_price_context": 0,
+        "score_cap_applied": 0,
         "saved": 0,
     })
 
@@ -931,16 +946,20 @@ def _candidate_rank_score(req: Request, candidate: ProductCandidate) -> float:
 
 
 def _apply_ranking_sanity(req: Request, candidate: ProductCandidate) -> None:
+    normalize_price_candidate(candidate, req)
     if _is_low_price_suspect(req, candidate):
         _add_risk_flag(candidate, LOW_PRICE_RISK)
     if _is_avito_city_mismatch(req, candidate):
         _add_risk_flag(candidate, CITY_MISMATCH_RISK)
     if _has_generic_title(candidate):
         _add_risk_flag(candidate, GENERIC_TITLE_RISK)
+    if getattr(candidate, "low_price_suspect", False):
+        _add_risk_flag(candidate, LOW_PRICE_RISK)
+        _add_risk_flag(candidate, TOO_CHEAP_FOR_BUDGET_RISK)
 
     if _has_risk_flag(candidate, LOW_PRICE_RISK) or _has_risk_flag(candidate, CITY_MISMATCH_RISK):
         candidate.quality = QUALITY_WEAK if candidate.quality != QUALITY_TRASH else candidate.quality
-    candidate.score = _candidate_rank_score(req, candidate)
+    candidate.score = apply_price_rank_penalties(candidate, _candidate_rank_score(req, candidate), verify_status=_verified_status(candidate))
 
 
 def score_result(
@@ -1152,11 +1171,15 @@ def _candidate_from_row(row: dict, req: Request, default_source: str) -> Optiona
     if not _looks_like_real_candidate(title, url):
         return None
     raw_price = row.get("price")
-    price = raw_price
-    min_price, max_price = (7_000, 300_000) if _is_tv_request(req) else (1_000, 10_000_000)
-    if not isinstance(price, int) or not min_price <= price <= max_price:
-        price = extract_price(f"{title} {snippet}", min_price=min_price, max_price=max_price)
     source = _source_from_url(url, default_source)
+    price = raw_price
+    price_source = ""
+    min_price, max_price = (7_000, 300_000) if _is_tv_request(req) else (1_000, 10_000_000)
+    if isinstance(price, int) and min_price <= price <= max_price:
+        price_source = "api" if source == "wildberries" else "search_result"
+    else:
+        price = extract_price(f"{title} {snippet}", min_price=min_price, max_price=max_price)
+        price_source = "search_snippet" if price is not None else ""
     rating = row.get("rating")
     try:
         rating_value = float(rating) if rating not in (None, "") else None
@@ -1184,8 +1207,12 @@ def _candidate_from_row(row: dict, req: Request, default_source: str) -> Optiona
         city=city[:120],
         availability=str(row.get("availability") or "").strip()[:120],
         description=str(row.get("description") or snippet or "").strip()[:500],
+        price_source=price_source,
         created_at=datetime.now().isoformat(),
     )
+    normalize_price_candidate(candidate, req, raw_price=raw_price, price_source=price_source, text=f"{title} {snippet}")
+    price = candidate.price
+    guard_risks = list(candidate.risk_flags or [])
     quality, classification_flags = classify_candidate(candidate, req)
     status = QUALITY_TO_STATUS[quality]
     score, risks = score_result(title, snippet, price, req, source, status, classification_flags)
@@ -1202,7 +1229,7 @@ def _candidate_from_row(row: dict, req: Request, default_source: str) -> Optiona
     candidate.quality = quality
     candidate.status = status
     candidate.score = score
-    candidate.risk_flags = list(dict.fromkeys(risks))
+    candidate.risk_flags = list(dict.fromkeys(guard_risks + risks))
     return candidate
 
 
@@ -1330,7 +1357,7 @@ def _model_dedupe_key(candidate: ProductCandidate) -> str:
     return " ".join(words[:6]) or candidate.url.lower()
 
 
-def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[float, int, int, int, int, int, str]:
+def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, float, int, int, int, int, int, str]:
     order = {
         VERIFIED_GOOD: 0,
         VERIFIED_OK: 1,
@@ -1348,7 +1375,9 @@ def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[float
         or _has_risk_flag(candidate, CITY_MISMATCH_RISK)
         or _has_risk_flag(candidate, GENERIC_TITLE_RISK)
     )
+    low_price_order = int(_has_risk_flag(candidate, LOW_PRICE_RISK) or getattr(candidate, "low_price_suspect", False))
     return (
+        low_price_order,
         -float(candidate.score or 0),
         risk_order,
         order.get(_verified_status(candidate), 9),
@@ -1420,6 +1449,9 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
     collection.candidates = kept[:10]
     stats["low_price_suspect"] = sum(1 for item in collection.candidates if _has_risk_flag(item, LOW_PRICE_RISK))
     stats["city_mismatch"] = sum(1 for item in collection.candidates if _has_risk_flag(item, CITY_MISMATCH_RISK))
+    stats["price_from_budget_suspect"] = sum(1 for item in collection.candidates if getattr(item, "price_from_budget_suspect", False))
+    stats["bad_price_context"] = sum(1 for item in collection.candidates if getattr(item, "bad_price_context", False))
+    stats["score_cap_applied"] = sum(1 for item in collection.candidates if getattr(item, "score_cap_applied", ""))
     stats["saved"] = len(collection.candidates)
     collection.quality_stats["saved"] = len(collection.candidates)
     collection.attempts.append(SearchAttemptData(
@@ -1453,6 +1485,9 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
             f"manual_check_saved_without_price={stats.get('manual_check_saved_without_price', 0)}; "
             f"low_price_suspect={stats.get('low_price_suspect', 0)}; "
             f"city_mismatch={stats.get('city_mismatch', 0)}; "
+            f"price_from_budget_suspect={stats.get('price_from_budget_suspect', 0)}; "
+            f"bad_price_context={stats.get('bad_price_context', 0)}; "
+            f"score_cap_applied={stats.get('score_cap_applied', 0)}; "
             f"saved={stats['saved']}"
         ),
     ))
