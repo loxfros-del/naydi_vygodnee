@@ -121,6 +121,16 @@ def main() -> int:
             f"   {item.url}\n"
             f"   причины: {risks}"
         )
+        classification = next((flag for flag in item.risk_flags if "классификация:" in str(flag)), "-")
+        print(
+            "   diagnostics: "
+            f"classification={classification}; "
+            f"brand_quality={getattr(item, 'brand_quality', '-') or '-'}; "
+            f"price_source={item.price_source or '-'}; "
+            f"price_reliability={item.price_reliability or '-'}; "
+            f"score_cap_applied={item.score_cap_applied or '-'}; "
+            f"why_not_verified_good={getattr(item, 'why_not_verified_good', '-') or '-'}"
+        )
         if facts:
             print(
                 "   facts: "

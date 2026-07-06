@@ -242,8 +242,11 @@ def _print_top_candidates(candidates: list[Any]) -> None:
         price_from_budget_suspect = bool(getattr(item, "price_from_budget_suspect", False))
         bad_price_context = bool(getattr(item, "bad_price_context", False))
         score_cap_applied = getattr(item, "score_cap_applied", "") or "-"
+        brand_quality = getattr(item, "brand_quality", "") or "-"
+        why_not_verified_good = getattr(item, "why_not_verified_good", "") or "-"
         score = float(getattr(item, "score", 0) or 0)
         risks = _risk_flags(item)
+        classification = next((flag for flag in risks if "классификация:" in str(flag)), "-")
         print(f"    {index}. {title}")
         print(f"       score/rank: {score:.0f} / #{index}")
         print(f"       price: {price_text}")
@@ -259,6 +262,9 @@ def _print_top_candidates(candidates: list[Any]) -> None:
         print(f"       price_rejected_reason: {price_rejected_reason}")
         print(f"       price_from_budget_suspect: {price_from_budget_suspect}")
         print(f"       bad_price_context: {bad_price_context}")
+        print(f"       classification: {classification}")
+        print(f"       brand_quality: {brand_quality}")
+        print(f"       why_not_verified_good: {why_not_verified_good}")
         print(f"       score_cap_applied: {score_cap_applied}")
         print(f"       url: {getattr(item, 'url', '')}")
         print(f"       budget_status: {facts.get('budget_status') or '-'}")

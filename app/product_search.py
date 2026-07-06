@@ -47,7 +47,14 @@ from app.price_guard import (
 )
 from app.price_extractor import extract_price
 from app.search_links import build_search_query, generate_search_links
-from app.sources.searchapi_source import SEARCHAPI_SOURCE, search_searchapi_google_shopping
+from app.sources.direct_retail_source import (
+    CITILINK_DIRECT_SOURCE,
+    MVIDEO_DIRECT_SOURCE,
+    YANDEX_MARKET_DIRECT_SOURCE,
+    debug_search_direct_retail_sources,
+)
+from app.sources.searchapi_source import SEARCHAPI_SOURCE, debug_searchapi_google_shopping
+from app.sources.serpapi_source import SERPAPI_SOURCE, debug_serpapi_google_shopping
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +213,15 @@ SOURCE_TYPE_BY_SOURCE = {source.source: source.source_type for source in SEARCH_
 SOURCE_PRIORITY = {source.source: source.priority for source in SEARCH_SOURCES}
 TRUSTED_PRODUCT_SOURCES = {source.source for source in SEARCH_SOURCES}
 SOURCE_TYPE_BY_SOURCE[SEARCHAPI_SOURCE] = "shopping_api"
+SOURCE_TYPE_BY_SOURCE[SERPAPI_SOURCE] = "shopping_api"
+DIRECT_RETAIL_SOURCES = {
+    CITILINK_DIRECT_SOURCE,
+    MVIDEO_DIRECT_SOURCE,
+    YANDEX_MARKET_DIRECT_SOURCE,
+}
+TRUSTED_PRODUCT_SOURCES.update(DIRECT_RETAIL_SOURCES)
+for direct_source in DIRECT_RETAIL_SOURCES:
+    SOURCE_TYPE_BY_SOURCE[direct_source] = "retail"
 RANK_TRUSTED_SOURCES = {
     "yandex_market_search",
     "mvideo_search",
@@ -214,6 +230,8 @@ RANK_TRUSTED_SOURCES = {
     "ozon_search",
     "wildberries",
     "megamarket_search",
+    SERPAPI_SOURCE,
+    *DIRECT_RETAIL_SOURCES,
 }
 LOW_PRICE_LIMITS = {
     "laptop": 10_000,
@@ -225,6 +243,13 @@ LOW_PRICE_LIMITS = {
 LOW_PRICE_RISK = "подозрительно низкая цена"
 CITY_MISMATCH_RISK = "город объявления не совпадает с запросом"
 GENERIC_TITLE_RISK = "слишком общий title"
+DIRECT_QUALITY_MANUAL_RISK = "нужна ручная проверка качества товара"
+KNOWN_GOOD_HEADPHONE_BRANDS = (
+    "sony", "jbl", "anker", "soundcore", "xiaomi", "qcy", "baseus",
+    "samsung", "huawei", "honor", "marshall", "sennheiser",
+    "audio-technica", "audio technica", "edifier", "oneplus",
+    "nothing", "realme",
+)
 AVITO_CITY_SLUGS = {
     "москва": {"moskva", "moscow"},
     "ярославль": {"yaroslavl"},
@@ -589,7 +614,7 @@ def _is_direct_product_url(source: str, url: str) -> bool:
     if any(key in query for key in ("q=", "text=", "search=", "query=")):
         return False
     source = source or _source_from_url(url)
-    if source == SEARCHAPI_SOURCE:
+    if source in {SEARCHAPI_SOURCE, SERPAPI_SOURCE}:
         source = _source_from_url(url)
     if source == "wildberries":
         return "wildberries.ru" in domain and "/catalog/" in path and "/detail" in path
@@ -607,6 +632,12 @@ def _is_direct_product_url(source: str, url: str) -> bool:
         return "citilink.ru" in domain and ("/product/" in path or bool(re.search(r"-\d{5,}$", path)))
     if source == "megamarket_search":
         return "megamarket.ru" in domain and ("/catalog/details/" in path or "/product/" in path)
+    if source == CITILINK_DIRECT_SOURCE:
+        return "citilink.ru" in domain and "/product/" in path
+    if source == MVIDEO_DIRECT_SOURCE:
+        return "mvideo.ru" in domain and ("/products/" in path or "/product/" in path)
+    if source == YANDEX_MARKET_DIRECT_SOURCE:
+        return "market.yandex.ru" in domain and ("/card/" in path or "/product--" in path or "/product/" in path)
     return False
 
 
@@ -896,6 +927,44 @@ def _has_generic_title(candidate: ProductCandidate) -> bool:
     return False
 
 
+def _is_direct_retail_candidate(candidate: ProductCandidate) -> bool:
+    return (
+        candidate.source in DIRECT_RETAIL_SOURCES
+        or getattr(candidate, "external_source", "") == "direct_retail"
+        or getattr(candidate, "price_source", "") == "direct_store"
+    )
+
+
+def _risk_text(candidate: ProductCandidate) -> str:
+    return " | ".join(str(item).strip().lower() for item in (candidate.risk_flags or []) if str(item).strip())
+
+
+def _has_weak_classification_risk(candidate: ProductCandidate) -> bool:
+    text = _risk_text(candidate)
+    return (
+        "классификация: weak" in text
+        or "нет признаков конкретной модели" in text
+        or "низкий score, нужна ручная проверка" in text
+    )
+
+
+def _is_headphones_request(req: Request) -> bool:
+    return detect_product_category(req) == "headphones"
+
+
+def _headphone_brand_quality(req: Request, candidate: ProductCandidate) -> str:
+    if not _is_headphones_request(req):
+        return ""
+    if not ((_budget_value(req) or 0) >= 5_000):
+        return ""
+    text = f"{candidate.title} {candidate.snippet}".lower().replace("ё", "е")
+    for brand in KNOWN_GOOD_HEADPHONE_BRANDS:
+        pattern = rf"(?<![a-zа-яе0-9]){re.escape(brand)}(?![a-zа-яе0-9])"
+        if re.search(pattern, text):
+            return "known_headphone_brand"
+    return "unknown_headphone_brand"
+
+
 def _candidate_budget_status(req: Request, candidate: ProductCandidate) -> str:
     price = getattr(candidate, "price", None)
     if price is None:
@@ -937,6 +1006,12 @@ def _candidate_rank_score(req: Request, candidate: ProductCandidate) -> float:
     elif candidate.source == "avito_search":
         score += 5
 
+    brand_quality = getattr(candidate, "brand_quality", "") or _headphone_brand_quality(req, candidate)
+    if brand_quality == "known_headphone_brand":
+        score += 8
+    elif brand_quality == "unknown_headphone_brand" and _is_direct_retail_candidate(candidate):
+        score -= 15
+
     if _has_risk_flag(candidate, LOW_PRICE_RISK):
         score = min(score - 50, 80)
     if _has_risk_flag(candidate, CITY_MISMATCH_RISK):
@@ -956,9 +1031,15 @@ def _apply_ranking_sanity(req: Request, candidate: ProductCandidate) -> None:
         getattr(candidate, "external_source", "") == "searchapi"
         and getattr(candidate, "price_reliability", "") == "low"
     )
+    keep_direct_store_price = (
+        getattr(candidate, "price_source", "") == "direct_store"
+        and getattr(candidate, "price_reliability", "") == "medium"
+    )
     normalize_price_candidate(candidate, req)
     if keep_low_searchapi_price and candidate.price is not None:
         candidate.price_reliability = "low"
+    if keep_direct_store_price and candidate.price is not None:
+        candidate.price_reliability = "medium"
     if _is_low_price_suspect(req, candidate):
         _add_risk_flag(candidate, LOW_PRICE_RISK)
     if _is_avito_city_mismatch(req, candidate):
@@ -972,6 +1053,9 @@ def _apply_ranking_sanity(req: Request, candidate: ProductCandidate) -> None:
     if _has_risk_flag(candidate, LOW_PRICE_RISK) or _has_risk_flag(candidate, CITY_MISMATCH_RISK):
         candidate.quality = QUALITY_WEAK if candidate.quality != QUALITY_TRASH else candidate.quality
     candidate.score = apply_price_rank_penalties(candidate, _candidate_rank_score(req, candidate), verify_status=_verified_status(candidate))
+    if _has_risk_flag(candidate, DIRECT_QUALITY_MANUAL_RISK) and candidate.score > 80:
+        candidate.score = 80
+        candidate.score_cap_applied = "manual_quality:80"
 
 
 def score_result(
@@ -1413,10 +1497,31 @@ def _collect_from_searchapi(
     seen_urls: set[str],
 ) -> None:
     try:
-        rows = search_searchapi_google_shopping(query, parsed=_request_as_searchapi_parsed(req))
+        debug = debug_searchapi_google_shopping(query, parsed=_request_as_searchapi_parsed(req))
     except Exception as exc:
-        logger.warning("Автопоиск: %s не выполнил %r: %s", SEARCHAPI_SOURCE, query, exc)
+        logger.debug("Автопоиск: %s не выполнил %r: %s", SEARCHAPI_SOURCE, query, exc)
         collection.attempts.append(SearchAttemptData(SEARCHAPI_SOURCE, query, "ERROR", error_text=str(exc)))
+        return
+
+    rows = list(debug.get("candidates") or [])
+    debug_status = str(debug.get("status") or "error")
+    if debug_status not in {"ok", "empty"}:
+        logger.debug(
+            "Автопоиск: %s status=%s query=%r elapsed=%ss error=%s",
+            SEARCHAPI_SOURCE,
+            debug_status,
+            query,
+            debug.get("elapsed", 0),
+            debug.get("error") or "",
+        )
+        collection.attempts.append(SearchAttemptData(
+            SEARCHAPI_SOURCE,
+            query,
+            debug_status.upper(),
+            0,
+            0,
+            str(debug.get("error") or debug.get("error_class") or ""),
+        ))
         return
 
     existing_keys = _existing_searchapi_dedupe_keys(collection)
@@ -1458,6 +1563,150 @@ def _collect_from_searchapi(
             f"duplicates={duplicates}"
         ),
     ))
+
+
+def _collect_from_serpapi(
+    req: Request,
+    query: str,
+    collection: SearchCollection,
+    seen_urls: set[str],
+) -> None:
+    try:
+        debug = debug_serpapi_google_shopping(query, parsed=_request_as_searchapi_parsed(req))
+    except Exception as exc:
+        logger.debug("Автопоиск: %s не выполнил %r: %s", SERPAPI_SOURCE, query, exc)
+        collection.attempts.append(SearchAttemptData(SERPAPI_SOURCE, query, "ERROR", error_text=str(exc)))
+        return
+
+    rows = list(debug.get("candidates") or [])
+    debug_status = str(debug.get("status") or "error")
+    if debug_status not in {"ok", "empty"}:
+        logger.debug(
+            "Автопоиск: %s status=%s query=%r elapsed=%ss error=%s",
+            SERPAPI_SOURCE,
+            debug_status,
+            query,
+            debug.get("elapsed", 0),
+            debug.get("error") or "",
+        )
+        collection.attempts.append(SearchAttemptData(
+            SERPAPI_SOURCE,
+            query,
+            debug_status.upper(),
+            0,
+            0,
+            str(debug.get("error") or debug.get("error_class") or ""),
+        ))
+        return
+
+    existing_keys = _existing_searchapi_dedupe_keys(collection)
+    kept = 0
+    duplicates = 0
+    quality_counts = {QUALITY_GOOD: 0, QUALITY_OK: 0, QUALITY_WEAK: 0, QUALITY_TRASH: 0}
+    for row in rows:
+        try:
+            candidate = _candidate_from_row(row, req, SERPAPI_SOURCE)
+        except Exception as exc:
+            logger.warning("Автопоиск: не удалось разобрать карточку %s: %s", SERPAPI_SOURCE, exc)
+            continue
+        if not candidate:
+            continue
+        normalized_url = _normalise_url(candidate.url)
+        dedupe_keys = _searchapi_dedupe_keys(candidate)
+        if normalized_url in seen_urls or existing_keys.intersection(dedupe_keys):
+            duplicates += 1
+            continue
+        if normalized_url:
+            seen_urls.add(normalized_url)
+        existing_keys.update(dedupe_keys)
+        collection.raw_candidates.append(candidate)
+        _bump_quality_stats(collection, candidate)
+        quality_counts[candidate.quality] += 1
+        if candidate.quality != QUALITY_TRASH:
+            collection.candidates.append(candidate)
+            kept += 1
+    status = "OK" if rows else "EMPTY"
+    collection.attempts.append(SearchAttemptData(
+        SERPAPI_SOURCE,
+        query,
+        status,
+        len(rows),
+        kept,
+        (
+            f"GOOD={quality_counts[QUALITY_GOOD]}; OK={quality_counts[QUALITY_OK]}; "
+            f"WEAK={quality_counts[QUALITY_WEAK]}; TRASH={quality_counts[QUALITY_TRASH]}; "
+            f"duplicates={duplicates}"
+        ),
+    ))
+
+
+def _collect_from_direct_retail(
+    req: Request,
+    query: str,
+    collection: SearchCollection,
+    seen_urls: set[str],
+) -> None:
+    try:
+        debug_rows = debug_search_direct_retail_sources(query, parsed=_request_as_searchapi_parsed(req))
+    except Exception as exc:
+        logger.debug("Автопоиск: direct retail не выполнил %r: %s", query, exc)
+        collection.attempts.append(SearchAttemptData("direct_retail", query, "ERROR", error_text=str(exc)))
+        return
+
+    existing_keys = _existing_searchapi_dedupe_keys(collection)
+    for debug in debug_rows:
+        source = str(debug.get("source") or "direct_retail")
+        status_text = str(debug.get("status") or "error")
+        rows = list(debug.get("candidates") or [])
+        if status_text not in {"ok", "empty"} and not rows:
+            collection.attempts.append(SearchAttemptData(
+                source,
+                query,
+                status_text.upper(),
+                int(debug.get("raw_count") or 0),
+                0,
+                str(debug.get("error") or "")[:250],
+            ))
+            continue
+
+        kept = 0
+        duplicates = 0
+        quality_counts = {QUALITY_GOOD: 0, QUALITY_OK: 0, QUALITY_WEAK: 0, QUALITY_TRASH: 0}
+        for row in rows:
+            try:
+                candidate = _candidate_from_row(row, req, source)
+            except Exception as exc:
+                logger.warning("Автопоиск: не удалось разобрать карточку %s: %s", source, exc)
+                continue
+            if not candidate:
+                continue
+            normalized_url = _normalise_url(candidate.url)
+            dedupe_keys = _searchapi_dedupe_keys(candidate)
+            if normalized_url in seen_urls or existing_keys.intersection(dedupe_keys):
+                duplicates += 1
+                continue
+            if normalized_url:
+                seen_urls.add(normalized_url)
+            existing_keys.update(dedupe_keys)
+            collection.raw_candidates.append(candidate)
+            _bump_quality_stats(collection, candidate)
+            quality_counts[candidate.quality] += 1
+            if candidate.quality != QUALITY_TRASH:
+                collection.candidates.append(candidate)
+                kept += 1
+        status = "OK" if rows else "EMPTY"
+        collection.attempts.append(SearchAttemptData(
+            source,
+            query,
+            status,
+            int(debug.get("raw_count") or len(rows)),
+            kept,
+            (
+                f"GOOD={quality_counts[QUALITY_GOOD]}; OK={quality_counts[QUALITY_OK]}; "
+                f"WEAK={quality_counts[QUALITY_WEAK]}; TRASH={quality_counts[QUALITY_TRASH]}; "
+                f"duplicates={duplicates}; elapsed={debug.get('elapsed', 0)}s"
+            ),
+        ))
 
 
 def _verified_status(candidate: ProductCandidate) -> str:
@@ -1527,6 +1776,47 @@ def _dedupe_verified_candidates(req: Request, candidates: list[ProductCandidate]
     return result
 
 
+def _demote_verified_item(item: object, status: str, reason: str) -> None:
+    candidate = item.candidate
+    item.verify_status = status
+    item.keep_for_admin = True
+    if not getattr(item, "reason", ""):
+        item.reason = reason
+    risks = list(getattr(item, "risk_flags", []) or [])
+    risks.extend([reason, DIRECT_QUALITY_MANUAL_RISK])
+    item.risk_flags = list(dict.fromkeys(str(risk) for risk in risks if str(risk).strip()))
+    candidate.verify_status = status
+    candidate.why_not_verified_good = reason
+    _add_risk_flag(candidate, reason)
+    _add_risk_flag(candidate, DIRECT_QUALITY_MANUAL_RISK)
+    if status == VERIFY_BLOCKED:
+        candidate.quality = QUALITY_WEAK
+        candidate.status = "WEAK_CANDIDATE"
+    elif status == VERIFIED_OK:
+        candidate.quality = QUALITY_OK
+        candidate.status = "CANDIDATE"
+
+
+def _apply_direct_retail_verified_sanity(req: Request, verified_items: list[object]) -> None:
+    for item in verified_items:
+        candidate = item.candidate
+        if not _is_direct_retail_candidate(candidate):
+            continue
+        brand_quality = _headphone_brand_quality(req, candidate)
+        if brand_quality:
+            candidate.brand_quality = brand_quality
+        weak_quality = _has_weak_classification_risk(candidate)
+        if weak_quality:
+            _add_risk_flag(candidate, DIRECT_QUALITY_MANUAL_RISK)
+            candidate.why_not_verified_good = "weak classification не подтверждает качество товара"
+        if item.verify_status != VERIFIED_GOOD:
+            continue
+        if weak_quality:
+            _demote_verified_item(item, VERIFY_BLOCKED, "weak classification не может быть VERIFIED_GOOD")
+        elif brand_quality == "unknown_headphone_brand":
+            _demote_verified_item(item, VERIFIED_OK, "бренд наушников не распознан")
+
+
 def _apply_verification(collection: SearchCollection, req: Request) -> None:
     candidates_to_verify = [
         item for item in collection.candidates
@@ -1534,6 +1824,7 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
     ]
     verified = verify_candidates(candidates_to_verify, req, limit=30)
     verified, playwright_summary = verify_with_playwright_fallback(verified, req)
+    _apply_direct_retail_verified_sanity(req, verified)
     stats = collection.verify_stats
     stats["checked"] = len(verified)
     stats["playwright_used"] = playwright_summary.used
@@ -1639,9 +1930,17 @@ def collect_product_candidates(req: Request, max_results: int = 15) -> SearchCol
         source = MARKETPLACE_SOURCES.get(domain_match.group(1), "generic_web") if domain_match else "generic_web"
         _collect_from_adapter(site_adapter, req, source, query, 6, collection, seen_urls)
 
+    if settings.DIRECT_RETAIL_ENABLED:
+        direct_query = (req.clean_search_query or "").strip() or wb_query
+        _collect_from_direct_retail(req, direct_query, collection, seen_urls)
+
     if settings.SEARCHAPI_ENABLED:
         searchapi_query = (req.clean_search_query or "").strip() or wb_query
         _collect_from_searchapi(req, searchapi_query, collection, seen_urls)
+
+    if settings.SERPAPI_ENABLED:
+        serpapi_query = (req.clean_search_query or "").strip() or wb_query
+        _collect_from_serpapi(req, serpapi_query, collection, seen_urls)
 
     _apply_verification(collection, req)
     collection.candidates = collection.candidates[:min(max_results, 10)]
