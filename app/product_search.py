@@ -51,6 +51,7 @@ from app.product_quality import (
     DIRECT_QUALITY_MANUAL_RISK,
     DIRECT_RETAIL_USED_RISK,
     headphone_brand_quality as quality_headphone_brand_quality,
+    headphone_feature_profile as quality_headphone_feature_profile,
     direct_product_quality_level as quality_direct_product_quality_level,
     final_product_quality_level as quality_final_product_quality_level,
 )
@@ -386,6 +387,19 @@ def _is_ps5_tv(req: Request) -> bool:
     return is_tv and is_ps5
 
 
+def _headphone_brand_queries(budget: str = "") -> list[str]:
+    suffix = f" до {budget}" if budget else ""
+    return [
+        f"Soundcore беспроводные наушники{suffix}",
+        f"QCY беспроводные наушники{suffix}",
+        f"JBL беспроводные наушники{suffix}",
+        f"Sony беспроводные наушники{suffix}",
+        f"Xiaomi Buds наушники{suffix}",
+        f"Baseus Bowie наушники{suffix}",
+        f"Anker Soundcore наушники{suffix}",
+    ]
+
+
 def generate_search_queries(req: Request) -> list[str]:
     """Создаёт пачку запросов, включая целевые site:-запросы.
 
@@ -426,19 +440,9 @@ def generate_search_queries(req: Request) -> list[str]:
         if budget:
             queries.extend([f"{product} до {budget}", f"{product} купить до {budget}"])
         if _is_headphones_request(req) and (_budget_value(req) or 0) >= 3_000:
-            limit = budget or ""
-            suffix = f" до {limit}" if limit else ""
-            queries[1:1] = [
-                f"Soundcore наушники{suffix}",
-                f"JBL наушники{suffix}",
-            ]
-            queries.extend([
-                f"QCY наушники{suffix}",
-                f"Sony наушники{suffix}",
-                f"Xiaomi наушники{suffix}",
-                f"Baseus наушники{suffix}",
-                f"Anker Soundcore наушники{suffix}",
-            ])
+            brand_queries = _headphone_brand_queries(budget)
+            queries[1:1] = brand_queries[:2]
+            queries.extend(brand_queries[2:])
         if req.important_criteria or req.criteria:
             queries.append(f"{product} {req.important_criteria or req.criteria}")
         if city:
@@ -982,6 +986,10 @@ def _headphone_brand_quality(req: Request, candidate: ProductCandidate) -> str:
     return quality_headphone_brand_quality(candidate, enabled=_is_headphones_request(req), budget=_budget_value(req))
 
 
+def _headphone_feature_profile(req: Request, candidate: ProductCandidate) -> str:
+    return quality_headphone_feature_profile(candidate, enabled=_is_headphones_request(req), budget=_budget_value(req))
+
+
 def _direct_product_quality_level(req: Request, candidate: ProductCandidate) -> str:
     return quality_direct_product_quality_level(
         candidate,
@@ -1050,6 +1058,11 @@ def _candidate_rank_score(req: Request, candidate: ProductCandidate) -> float:
         score += 8
     elif brand_quality == "unknown_headphone_brand" and _is_direct_retail_candidate(candidate):
         score -= 15
+    headphone_profile = _headphone_feature_profile(req, candidate)
+    if headphone_profile == "wireless_good":
+        score += 12
+    elif headphone_profile == "wired_basic":
+        score -= 35
 
     if _has_risk_flag(candidate, LOW_PRICE_RISK):
         score = min(score - 50, 80)
@@ -1771,7 +1784,7 @@ def _model_dedupe_key(candidate: ProductCandidate) -> str:
     return " ".join(words[:6]) or candidate.url.lower()
 
 
-def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, int, float, int, int, int, int, int, str]:
+def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, int, int, float, int, int, int, int, int, str]:
     order = {
         VERIFIED_GOOD: 0,
         VERIFIED_OK: 1,
@@ -1798,9 +1811,16 @@ def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, 
             brand_order = -1
         elif brand_quality == "unknown_headphone_brand":
             brand_order = 1
+    feature_order = 0
+    headphone_profile = _headphone_feature_profile(req, candidate)
+    if headphone_profile == "wireless_good":
+        feature_order = -1
+    elif headphone_profile == "wired_basic":
+        feature_order = 2
     return (
         low_price_order,
         brand_order,
+        feature_order,
         -float(candidate.score or 0),
         risk_order,
         order.get(_verified_status(candidate), 9),
@@ -2036,6 +2056,9 @@ def collect_product_candidates(req: Request, max_results: int = 15) -> SearchCol
     if settings.DIRECT_RETAIL_ENABLED:
         direct_query = (req.clean_search_query or "").strip() or wb_query
         _collect_from_direct_retail(req, direct_query, collection, seen_urls)
+        if _is_headphones_request(req) and (_budget_value(req) or 0) >= 3_000:
+            for brand_query in _headphone_brand_queries(str(req.budget or "").strip())[:2]:
+                _collect_from_direct_retail(req, brand_query, collection, seen_urls)
 
     if settings.SEARCHAPI_ENABLED:
         searchapi_query = (req.clean_search_query or "").strip() or wb_query

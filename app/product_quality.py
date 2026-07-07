@@ -22,6 +22,15 @@ KNOWN_GOOD_HEADPHONE_BRANDS = (
     "audio-technica", "audio technica", "edifier", "oneplus",
     "nothing", "realme",
 )
+HEADPHONE_WIRELESS_MARKERS = (
+    "tws", "bluetooth", "беспровод", "anc", "шумоподав", "noise cancelling",
+    "soundcore", "qcy", "xiaomi buds", "redmi buds", "baseus bowie",
+    "jbl tune beam", "jbl tune wave", "jbl wave", "jbl tune flex",
+)
+HEADPHONE_WIRED_BASIC_MARKERS = (
+    "проводн", "wired", "jack", "3.5", "3,5", "aux", "tune 110",
+    "jblt110", "простые вкладыши", "вкладыши",
+)
 KNOWN_LAPTOP_BRANDS = (
     "acer", "asus", "apple", "dell", "hp", "huawei", "honor", "lenovo",
     "msi", "samsung", "xiaomi", "thunderobot", "gigabyte", "microsoft",
@@ -58,6 +67,17 @@ def headphone_brand_quality(candidate: Any, *, enabled: bool, budget: int | None
     if any(_has_word(text, brand) for brand in KNOWN_GOOD_HEADPHONE_BRANDS):
         return "known_headphone_brand"
     return "unknown_headphone_brand"
+
+
+def headphone_feature_profile(candidate: Any, *, enabled: bool, budget: int | None = None) -> str:
+    if not enabled or not ((budget or 0) >= 5_000):
+        return ""
+    text = normalized_text(candidate)
+    if any(marker in text for marker in HEADPHONE_WIRELESS_MARKERS):
+        return "wireless_good"
+    if any(marker in text for marker in HEADPHONE_WIRED_BASIC_MARKERS):
+        return "wired_basic"
+    return ""
 
 
 def direct_product_quality_level(
