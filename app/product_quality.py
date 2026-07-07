@@ -14,6 +14,7 @@ DIRECT_RETAIL_USED_RISK = "новый retail-вариант, не б/у пред
 WEAK_CPU_MANUAL_RISK = "слабый процессор / нужна ручная проверка"
 PS5_4K_UNCONFIRMED_RISK = "4K/UHD не подтверждено для PS5"
 CHAIR_WEAK_MANUAL_RISK = "кресло требует ручной проверки эргономики"
+CHAIR_CHEAP_MANUAL_RISK = "дешёвое кресло, нужна ручная проверка эргономики"
 BAD_PRODUCT_RISK = "мусор/аксессуар, не товар"
 
 KNOWN_GOOD_HEADPHONE_BRANDS = (
@@ -44,12 +45,16 @@ CHAIR_BAD_MARKERS = (
     "комплектующие",
 )
 CHAIR_PRODUCT_MARKERS = ("кресло", "стул")
-CHAIR_ERGONOMIC_MARKERS = (
-    "пояснич", "эргоном", "ортопед", "регулиров", "подголовник",
-    "сетка", "сетчат", "механизм качания", "поддержк", "спинк",
-    "120 кг", "120кг", "150 кг", "150кг", "компьютерное кресло",
-    "офисное кресло",
+CHAIR_ACCESSORY_CONTEXT_MARKERS = (
+    "для кресл", "для стул", "к кресл", "к стул", "на кресл", "на стул",
+    "от кресл", "от стул", "запчаст", "замена", "ремонт",
 )
+CHAIR_PART_START_MARKERS = (
+    "чехол", "накидка", "колесо", "колеса", "колесики", "ролик",
+    "ролики", "газлифт", "подлокотник", "подлокотники", "крестовина",
+    "комплект колес", "комплект колёс",
+)
+CHAIR_WEAK_QUALITY_FEATURES = {"office_or_computer"}
 
 
 def normalized_text(candidate: Any) -> str:
@@ -58,6 +63,17 @@ def normalized_text(candidate: Any) -> str:
 
 def _has_word(text: str, value: str) -> bool:
     return re.search(rf"(?<![a-zа-я0-9]){re.escape(value)}(?![a-zа-я0-9])", text) is not None
+
+
+def _candidate_price(candidate: Any) -> int | None:
+    price = getattr(candidate, "price", None)
+    if price is None:
+        return None
+    try:
+        return int(price)
+    except (TypeError, ValueError):
+        digits = re.sub(r"\D+", "", str(price))
+        return int(digits) if digits else None
 
 
 def headphone_brand_quality(candidate: Any, *, enabled: bool, budget: int | None = None) -> str:
@@ -113,24 +129,61 @@ def has_weak_laptop_cpu(candidate: Any) -> bool:
 
 def chair_bad_reason(candidate: Any) -> str:
     text = normalized_text(candidate)
-    if "газлифт" in text or "крестовина" in text:
+    stripped = text.strip()
+    if any(stripped.startswith(marker) for marker in CHAIR_PART_START_MARKERS):
         return BAD_PRODUCT_RISK
-    if any(marker in text for marker in CHAIR_BAD_MARKERS) and not any(marker in text for marker in CHAIR_PRODUCT_MARKERS):
+    has_bad_marker = any(marker in text for marker in CHAIR_BAD_MARKERS)
+    has_product_marker = any(marker in text for marker in CHAIR_PRODUCT_MARKERS)
+    has_accessory_context = any(marker in text for marker in CHAIR_ACCESSORY_CONTEXT_MARKERS)
+    if has_bad_marker and (not has_product_marker or has_accessory_context):
         return BAD_PRODUCT_RISK
-    if any(marker in text for marker in ("чехол", "накидка", "колеса", "колесики", "подлокотники отдельно")):
+    if any(marker in text for marker in ("чехол", "накидка", "подлокотник отдельно", "подлокотники отдельно")):
         return BAD_PRODUCT_RISK
     return ""
 
 
+def chair_quality_features(candidate: Any) -> set[str]:
+    text = normalized_text(candidate)
+    features: set[str] = set()
+    if "эргоном" in text:
+        features.add("ergonomic")
+    if "ортопед" in text:
+        features.add("orthopedic_back")
+    if "пояснич" in text or ("поддержк" in text and "поясниц" in text):
+        features.add("lumbar_support")
+    if "регулиров" in text and ("высот" in text or "сиден" in text):
+        features.add("height_adjustment")
+    if "регулиров" in text and "подлокот" in text:
+        features.add("armrest_adjustment")
+    if "подголовник" in text or "подголовн" in text:
+        features.add("headrest")
+    if "сетк" in text or "сетчат" in text:
+        features.add("mesh")
+    if "механизм качания" in text or ("механизм" in text and "качан" in text):
+        features.add("rocking_mechanism")
+    if re.search(r"(?<!\d)(120|150)\s*кг(?![a-zа-я0-9])", text):
+        features.add("load_capacity")
+    if (
+        "компьютерное кресло" in text
+        or "компьютерный стул" in text
+        or "офисное кресло" in text
+        or "офисный стул" in text
+        or ("офисн" in text and any(marker in text for marker in CHAIR_PRODUCT_MARKERS))
+    ):
+        features.add("office_or_computer")
+    return features
+
+
 def chair_weak_reason(candidate: Any) -> str:
     text = normalized_text(candidate)
-    if "ротанг" in text and not any(marker in text for marker in CHAIR_ERGONOMIC_MARKERS):
+    features = chair_quality_features(candidate)
+    if "ротанг" in text and not features:
         return CHAIR_WEAK_MANUAL_RISK
-    has_quality_marker = any(marker in text for marker in CHAIR_ERGONOMIC_MARKERS)
-    price = getattr(candidate, "price", None)
-    if price and int(price) <= 4_000 and not has_quality_marker:
-        return CHAIR_WEAK_MANUAL_RISK
-    if not has_quality_marker:
+    price = _candidate_price(candidate)
+    if price is not None and price < 5_000 and len(features) <= 1:
+        return CHAIR_CHEAP_MANUAL_RISK
+    strong_features = features - CHAIR_WEAK_QUALITY_FEATURES
+    if len(features) < 2 or not strong_features:
         return CHAIR_WEAK_MANUAL_RISK
     return ""
 
