@@ -46,6 +46,14 @@ from app.price_guard import (
     apply_price_rank_penalties,
     normalize_price_candidate,
 )
+from app.product_quality import (
+    BAD_PRODUCT_RISK,
+    DIRECT_QUALITY_MANUAL_RISK,
+    DIRECT_RETAIL_USED_RISK,
+    headphone_brand_quality as quality_headphone_brand_quality,
+    direct_product_quality_level as quality_direct_product_quality_level,
+    final_product_quality_level as quality_final_product_quality_level,
+)
 from app.price_extractor import extract_price
 from app.search_links import build_search_query, generate_search_links
 from app.sources.direct_retail_source import (
@@ -245,24 +253,6 @@ LOW_PRICE_LIMITS = {
 LOW_PRICE_RISK = "подозрительно низкая цена"
 CITY_MISMATCH_RISK = "город объявления не совпадает с запросом"
 GENERIC_TITLE_RISK = "слишком общий title"
-DIRECT_QUALITY_MANUAL_RISK = "нужна ручная проверка качества товара"
-DIRECT_RETAIL_USED_RISK = "новый retail-вариант, не б/у предложение"
-WEAK_CPU_MANUAL_RISK = "слабый процессор / нужна ручная проверка"
-PS5_4K_UNCONFIRMED_RISK = "4K/UHD не подтверждено для PS5"
-CHAIR_WEAK_MANUAL_RISK = "кресло требует ручной проверки эргономики"
-BAD_PRODUCT_RISK = "мусор/аксессуар, не товар"
-KNOWN_GOOD_HEADPHONE_BRANDS = (
-    "sony", "jbl", "anker", "soundcore", "xiaomi", "qcy", "baseus",
-    "samsung", "huawei", "honor", "marshall", "sennheiser",
-    "audio-technica", "audio technica", "edifier", "oneplus",
-    "nothing", "realme",
-)
-KNOWN_LAPTOP_BRANDS = (
-    "acer", "asus", "apple", "dell", "hp", "huawei", "honor", "lenovo",
-    "msi", "samsung", "xiaomi", "thunderobot", "gigabyte", "microsoft",
-    "realme", "tecno", "irbis", "digma", "maibenben",
-)
-WEAK_LAPTOP_CPUS = ("n95", "n100", "n150", "celeron", "n4020", "n4500", "n5095", "j4005")
 AVITO_CITY_SLUGS = {
     "москва": {"moskva", "moscow"},
     "ярославль": {"yaroslavl"},
@@ -435,6 +425,20 @@ def generate_search_queries(req: Request) -> list[str]:
         queries = [base]
         if budget:
             queries.extend([f"{product} до {budget}", f"{product} купить до {budget}"])
+        if _is_headphones_request(req) and (_budget_value(req) or 0) >= 3_000:
+            limit = budget or ""
+            suffix = f" до {limit}" if limit else ""
+            queries[1:1] = [
+                f"Soundcore наушники{suffix}",
+                f"JBL наушники{suffix}",
+            ]
+            queries.extend([
+                f"QCY наушники{suffix}",
+                f"Sony наушники{suffix}",
+                f"Xiaomi наушники{suffix}",
+                f"Baseus наушники{suffix}",
+                f"Anker Soundcore наушники{suffix}",
+            ])
         if req.important_criteria or req.criteria:
             queries.append(f"{product} {req.important_criteria or req.criteria}")
         if city:
@@ -975,107 +979,28 @@ def _is_headphones_request(req: Request) -> bool:
 
 
 def _headphone_brand_quality(req: Request, candidate: ProductCandidate) -> str:
-    if not _is_headphones_request(req):
-        return ""
-    if not ((_budget_value(req) or 0) >= 5_000):
-        return ""
-    text = f"{candidate.title} {candidate.snippet}".lower().replace("ё", "е")
-    for brand in KNOWN_GOOD_HEADPHONE_BRANDS:
-        pattern = rf"(?<![a-zа-яе0-9]){re.escape(brand)}(?![a-zа-яе0-9])"
-        if re.search(pattern, text):
-            return "known_headphone_brand"
-    return "unknown_headphone_brand"
+    return quality_headphone_brand_quality(candidate, enabled=_is_headphones_request(req), budget=_budget_value(req))
 
 
 def _direct_product_quality_level(req: Request, candidate: ProductCandidate) -> str:
-    if not _is_direct_retail_candidate(candidate):
-        return ""
-    if getattr(req, "is_used_allowed", False):
-        return "retail_new_for_used_request"
-    if _has_weak_classification_risk(candidate):
-        return "weak"
-    brand_quality = _headphone_brand_quality(req, candidate)
-    if brand_quality == "unknown_headphone_brand":
-        return "unknown_brand"
-    if brand_quality == "known_headphone_brand":
-        return "known_brand"
-    return "direct_store"
-
-
-def _text_for_quality(candidate: ProductCandidate) -> str:
-    return f"{candidate.title} {candidate.snippet}".lower().replace("ё", "е")
-
-
-def _has_known_laptop_brand(candidate: ProductCandidate) -> bool:
-    text = _text_for_quality(candidate)
-    return any(re.search(rf"(?<![a-zа-я0-9]){re.escape(brand)}(?![a-zа-я0-9])", text) for brand in KNOWN_LAPTOP_BRANDS)
-
-
-def _has_weak_laptop_cpu(candidate: ProductCandidate) -> bool:
-    text = _text_for_quality(candidate)
-    return any(re.search(rf"(?<![a-zа-я0-9]){re.escape(cpu)}(?![a-zа-я0-9])", text) for cpu in WEAK_LAPTOP_CPUS)
-
-
-def _chair_bad_reason(candidate: ProductCandidate) -> str:
-    text = _text_for_quality(candidate)
-    bad_markers = (
-        "чехол", "накидка", "колесо", "колеса", "колесики", "ролик",
-        "газлифт", "подлокотник", "крестовина", "запчаст", "комплектующие",
+    return quality_direct_product_quality_level(
+        candidate,
+        is_direct_retail=_is_direct_retail_candidate(candidate),
+        is_used_allowed=bool(getattr(req, "is_used_allowed", False)),
+        brand_quality=_headphone_brand_quality(req, candidate),
+        has_weak_classification=_has_weak_classification_risk(candidate),
     )
-    if any(marker in text for marker in bad_markers) and not any(word in text for word in ("кресло", "стул")):
-        return BAD_PRODUCT_RISK
-    if "газлифт" in text or "крестовина" in text:
-        return BAD_PRODUCT_RISK
-    return ""
-
-
-def _chair_weak_reason(candidate: ProductCandidate) -> str:
-    text = _text_for_quality(candidate)
-    ergonomic_markers = (
-        "эргоном", "ортопед", "пояснич", "регулиров", "подголовник",
-        "механизм качания", "поддержк", "спинк",
-    )
-    if "ротанг" in text and not any(marker in text for marker in ergonomic_markers):
-        return CHAIR_WEAK_MANUAL_RISK
-    return ""
-
-
-def _ps5_tv_has_confirmed_4k(candidate: ProductCandidate) -> bool:
-    facts = getattr(candidate, "product_facts", {}) or {}
-    resolution = str(facts.get("resolution", "") or "").lower()
-    if "4k" in resolution or "uhd" in resolution or "3840" in resolution:
-        return True
-    # Если facts уже заполнены, но resolution пустой, считаем 4K неподтвержденным.
-    if facts:
-        return False
-    text = _text_for_quality(candidate)
-    return any(marker in text for marker in ("4k", "4к", "uhd", "ultra hd", "3840"))
 
 
 def _final_product_quality_level(req: Request, candidate: ProductCandidate) -> tuple[str, str]:
-    if _is_chair_request(req):
-        bad_reason = _chair_bad_reason(candidate)
-        if bad_reason:
-            return "bad", bad_reason
-        weak_reason = _chair_weak_reason(candidate)
-        if weak_reason:
-            return "weak", weak_reason
-
-    if _is_laptop_request(req) and _has_weak_laptop_cpu(candidate) and not _has_known_laptop_brand(candidate):
-        return "weak", WEAK_CPU_MANUAL_RISK
-
-    if _is_ps5_tv(req) and not _ps5_tv_has_confirmed_4k(candidate):
-        return "weak", PS5_4K_UNCONFIRMED_RISK
-
-    if getattr(candidate, "product_quality_level", "") == "retail_new_for_used_request":
-        return "retail_new_for_used_request", getattr(candidate, "why_not_verified_good", "") or DIRECT_RETAIL_USED_RISK
-    if getattr(candidate, "product_quality_level", "") == "bad":
-        return "bad", getattr(candidate, "why_not_verified_good", "") or BAD_PRODUCT_RISK
-    if getattr(candidate, "product_quality_level", "") in {"weak", "unknown_brand"}:
-        return "weak", getattr(candidate, "why_not_verified_good", "") or DIRECT_QUALITY_MANUAL_RISK
-    if candidate.quality == QUALITY_WEAK or _has_weak_classification_risk(candidate):
-        return "weak", DIRECT_QUALITY_MANUAL_RISK
-    return getattr(candidate, "product_quality_level", "") or "", ""
+    return quality_final_product_quality_level(
+        candidate,
+        is_chair=_is_chair_request(req),
+        is_laptop=_is_laptop_request(req),
+        is_ps5_tv=_is_ps5_tv(req),
+        has_weak_classification=_has_weak_classification_risk(candidate),
+        quality_is_weak=candidate.quality == QUALITY_WEAK,
+    )
 
 
 def _candidate_budget_status(req: Request, candidate: ProductCandidate) -> str:
@@ -1846,7 +1771,7 @@ def _model_dedupe_key(candidate: ProductCandidate) -> str:
     return " ".join(words[:6]) or candidate.url.lower()
 
 
-def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, float, int, int, int, int, int, str]:
+def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, int, float, int, int, int, int, int, str]:
     order = {
         VERIFIED_GOOD: 0,
         VERIFIED_OK: 1,
@@ -1866,8 +1791,16 @@ def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, 
         or _has_risk_flag(candidate, GENERIC_TITLE_RISK)
     )
     low_price_order = int(_has_risk_flag(candidate, LOW_PRICE_RISK) or getattr(candidate, "low_price_suspect", False))
+    brand_quality = getattr(candidate, "brand_quality", "") or _headphone_brand_quality(req, candidate)
+    brand_order = 0
+    if _is_headphones_request(req):
+        if brand_quality == "known_headphone_brand":
+            brand_order = -1
+        elif brand_quality == "unknown_headphone_brand":
+            brand_order = 1
     return (
         low_price_order,
+        brand_order,
         -float(candidate.score or 0),
         risk_order,
         order.get(_verified_status(candidate), 9),
