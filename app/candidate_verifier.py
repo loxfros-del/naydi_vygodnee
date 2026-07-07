@@ -28,7 +28,7 @@ BAD_ENCODING = "BAD_ENCODING"
 REJECTED = "REJECTED"
 VERIFY_ERROR = "VERIFY_ERROR"
 VERIFY_BLOCKED = "VERIFY_BLOCKED"
-NEED_MANUAL_CHECK = VERIFY_BLOCKED
+NEED_MANUAL_CHECK = "NEED_MANUAL_CHECK"
 OVER_BUDGET_SOFT = "OVER_BUDGET_SOFT"
 OVER_BUDGET_HARD = "OVER_BUDGET_HARD"
 
@@ -800,7 +800,7 @@ def _apply_verified(candidate: Any, verified: VerifiedCandidate) -> VerifiedCand
         candidate.quality = "GOOD"
         candidate.status = "CANDIDATE"
         candidate.score = min(float(getattr(candidate, "score", 0) or 0) + 15, 99)
-    elif verified.verify_status in {VERIFIED_OK, OVER_BUDGET_SOFT, VERIFY_BLOCKED}:
+    elif verified.verify_status in {VERIFIED_OK, OVER_BUDGET_SOFT, VERIFY_BLOCKED, NEED_MANUAL_CHECK}:
         candidate.quality = "OK"
         candidate.status = "CANDIDATE"
     elif verified.keep_for_admin:

@@ -19,6 +19,7 @@ from app.request_parser import full_parse
 from app.product_search import collect_product_candidates, generate_search_queries
 from app.candidate_verifier import (
     BAD_ENCODING,
+    NEED_MANUAL_CHECK,
     PRICE_MISSING,
     REMOVED_LISTING,
     UNAVAILABLE,
@@ -80,7 +81,8 @@ def main() -> int:
         f"checked={verify_stats.get('checked', 0)}; "
         f"verified_good={verify_stats.get('VERIFIED_GOOD', 0)}; "
         f"verified_ok={verify_stats.get('VERIFIED_OK', 0)}; "
-        f"need_manual_check={verify_stats.get(VERIFY_BLOCKED, 0)}; "
+        f"need_manual_check={verify_stats.get(NEED_MANUAL_CHECK, 0)}; "
+        f"verify_blocked={verify_stats.get(VERIFY_BLOCKED, 0)}; "
         f"unavailable={verify_stats.get(UNAVAILABLE, 0)}; "
         f"removed_listing={verify_stats.get(REMOVED_LISTING, 0)}; "
         f"price_missing={verify_stats.get(PRICE_MISSING, 0)}; "
@@ -125,6 +127,7 @@ def main() -> int:
         print(
             "   diagnostics: "
             f"classification={classification}; "
+            f"product_quality_level={getattr(item, 'product_quality_level', '-') or '-'}; "
             f"brand_quality={getattr(item, 'brand_quality', '-') or '-'}; "
             f"price_source={item.price_source or '-'}; "
             f"price_reliability={item.price_reliability or '-'}; "
@@ -157,7 +160,7 @@ def main() -> int:
             )
 
     def is_manual_check_without_price(item) -> bool:
-        return item.price is None and getattr(item, "verify_status", "") in {VERIFY_BLOCKED, "NEED_MANUAL_CHECK"}
+        return item.price is None and getattr(item, "verify_status", "") in {VERIFY_BLOCKED, NEED_MANUAL_CHECK}
 
     bad_saved = [
         item for item in saved_candidates

@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.candidate_verifier import (
+    NEED_MANUAL_CHECK,
     PRICE_MISSING,
     REMOVED_LISTING,
     UNAVAILABLE,
@@ -242,6 +243,7 @@ def _print_top_candidates(candidates: list[Any]) -> None:
         price_from_budget_suspect = bool(getattr(item, "price_from_budget_suspect", False))
         bad_price_context = bool(getattr(item, "bad_price_context", False))
         score_cap_applied = getattr(item, "score_cap_applied", "") or "-"
+        product_quality_level = getattr(item, "product_quality_level", "") or "-"
         brand_quality = getattr(item, "brand_quality", "") or "-"
         why_not_verified_good = getattr(item, "why_not_verified_good", "") or "-"
         score = float(getattr(item, "score", 0) or 0)
@@ -263,6 +265,7 @@ def _print_top_candidates(candidates: list[Any]) -> None:
         print(f"       price_from_budget_suspect: {price_from_budget_suspect}")
         print(f"       bad_price_context: {bad_price_context}")
         print(f"       classification: {classification}")
+        print(f"       product_quality_level: {product_quality_level}")
         print(f"       brand_quality: {brand_quality}")
         print(f"       why_not_verified_good: {why_not_verified_good}")
         print(f"       score_cap_applied: {score_cap_applied}")
@@ -327,7 +330,7 @@ def run_one(raw_query: str, index: int) -> dict[str, Any]:
         "saved_for_admin": len(saved),
         "verified_good": verify_stats.get("VERIFIED_GOOD", 0),
         "verified_ok": verify_stats.get("VERIFIED_OK", 0),
-        "need_manual_check": verify_stats.get(VERIFY_BLOCKED, 0),
+        "need_manual_check": verify_stats.get(NEED_MANUAL_CHECK, 0),
         "verify_blocked": verify_stats.get(VERIFY_BLOCKED, 0),
         "blocked_by_site": verify_stats.get(VERIFY_BLOCKED, 0),
         "in_budget": _in_budget_count(saved, budget),

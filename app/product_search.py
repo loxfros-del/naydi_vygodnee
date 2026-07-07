@@ -19,6 +19,7 @@ import requests
 from app.config import settings
 from app.candidate_verifier import (
     BAD_ENCODING,
+    NEED_MANUAL_CHECK,
     NOT_PRODUCT_PAGE,
     OVER_BUDGET_SOFT,
     PRICE_MISSING,
@@ -140,6 +141,7 @@ class SearchCollection:
         "checked": 0,
         "VERIFY_ERROR": 0,
         "VERIFY_BLOCKED": 0,
+        "NEED_MANUAL_CHECK": 0,
         "UNAVAILABLE": 0,
         "REMOVED_LISTING": 0,
         "PRICE_MISSING": 0,
@@ -244,12 +246,23 @@ LOW_PRICE_RISK = "подозрительно низкая цена"
 CITY_MISMATCH_RISK = "город объявления не совпадает с запросом"
 GENERIC_TITLE_RISK = "слишком общий title"
 DIRECT_QUALITY_MANUAL_RISK = "нужна ручная проверка качества товара"
+DIRECT_RETAIL_USED_RISK = "новый retail-вариант, не б/у предложение"
+WEAK_CPU_MANUAL_RISK = "слабый процессор / нужна ручная проверка"
+PS5_4K_UNCONFIRMED_RISK = "4K/UHD не подтверждено для PS5"
+CHAIR_WEAK_MANUAL_RISK = "кресло требует ручной проверки эргономики"
+BAD_PRODUCT_RISK = "мусор/аксессуар, не товар"
 KNOWN_GOOD_HEADPHONE_BRANDS = (
     "sony", "jbl", "anker", "soundcore", "xiaomi", "qcy", "baseus",
     "samsung", "huawei", "honor", "marshall", "sennheiser",
     "audio-technica", "audio technica", "edifier", "oneplus",
     "nothing", "realme",
 )
+KNOWN_LAPTOP_BRANDS = (
+    "acer", "asus", "apple", "dell", "hp", "huawei", "honor", "lenovo",
+    "msi", "samsung", "xiaomi", "thunderobot", "gigabyte", "microsoft",
+    "realme", "tecno", "irbis", "digma", "maibenben",
+)
+WEAK_LAPTOP_CPUS = ("n95", "n100", "n150", "celeron", "n4020", "n4500", "n5095", "j4005")
 AVITO_CITY_SLUGS = {
     "москва": {"moskva", "moscow"},
     "ярославль": {"yaroslavl"},
@@ -728,6 +741,15 @@ def _is_tv_request(req: Request) -> bool:
     return any(word in _request_product(req).lower() for word in ("телевизор", " tv"))
 
 
+def _is_laptop_request(req: Request) -> bool:
+    return any(word in _request_product(req).lower() for word in ("ноутбук", "laptop"))
+
+
+def _is_chair_request(req: Request) -> bool:
+    product = _request_product(req).lower()
+    return "кресл" in product or "стул" in product or "chair" in product
+
+
 def is_wrong_product_type(candidate: ProductCandidate, request: Request) -> bool:
     """Исключает аксессуары и консоли для заявки на телевизор."""
     if not _is_tv_request(request):
@@ -965,6 +987,97 @@ def _headphone_brand_quality(req: Request, candidate: ProductCandidate) -> str:
     return "unknown_headphone_brand"
 
 
+def _direct_product_quality_level(req: Request, candidate: ProductCandidate) -> str:
+    if not _is_direct_retail_candidate(candidate):
+        return ""
+    if getattr(req, "is_used_allowed", False):
+        return "retail_new_for_used_request"
+    if _has_weak_classification_risk(candidate):
+        return "weak"
+    brand_quality = _headphone_brand_quality(req, candidate)
+    if brand_quality == "unknown_headphone_brand":
+        return "unknown_brand"
+    if brand_quality == "known_headphone_brand":
+        return "known_brand"
+    return "direct_store"
+
+
+def _text_for_quality(candidate: ProductCandidate) -> str:
+    return f"{candidate.title} {candidate.snippet}".lower().replace("ё", "е")
+
+
+def _has_known_laptop_brand(candidate: ProductCandidate) -> bool:
+    text = _text_for_quality(candidate)
+    return any(re.search(rf"(?<![a-zа-я0-9]){re.escape(brand)}(?![a-zа-я0-9])", text) for brand in KNOWN_LAPTOP_BRANDS)
+
+
+def _has_weak_laptop_cpu(candidate: ProductCandidate) -> bool:
+    text = _text_for_quality(candidate)
+    return any(re.search(rf"(?<![a-zа-я0-9]){re.escape(cpu)}(?![a-zа-я0-9])", text) for cpu in WEAK_LAPTOP_CPUS)
+
+
+def _chair_bad_reason(candidate: ProductCandidate) -> str:
+    text = _text_for_quality(candidate)
+    bad_markers = (
+        "чехол", "накидка", "колесо", "колеса", "колесики", "ролик",
+        "газлифт", "подлокотник", "крестовина", "запчаст", "комплектующие",
+    )
+    if any(marker in text for marker in bad_markers) and not any(word in text for word in ("кресло", "стул")):
+        return BAD_PRODUCT_RISK
+    if "газлифт" in text or "крестовина" in text:
+        return BAD_PRODUCT_RISK
+    return ""
+
+
+def _chair_weak_reason(candidate: ProductCandidate) -> str:
+    text = _text_for_quality(candidate)
+    ergonomic_markers = (
+        "эргоном", "ортопед", "пояснич", "регулиров", "подголовник",
+        "механизм качания", "поддержк", "спинк",
+    )
+    if "ротанг" in text and not any(marker in text for marker in ergonomic_markers):
+        return CHAIR_WEAK_MANUAL_RISK
+    return ""
+
+
+def _ps5_tv_has_confirmed_4k(candidate: ProductCandidate) -> bool:
+    facts = getattr(candidate, "product_facts", {}) or {}
+    resolution = str(facts.get("resolution", "") or "").lower()
+    if "4k" in resolution or "uhd" in resolution or "3840" in resolution:
+        return True
+    # Если facts уже заполнены, но resolution пустой, считаем 4K неподтвержденным.
+    if facts:
+        return False
+    text = _text_for_quality(candidate)
+    return any(marker in text for marker in ("4k", "4к", "uhd", "ultra hd", "3840"))
+
+
+def _final_product_quality_level(req: Request, candidate: ProductCandidate) -> tuple[str, str]:
+    if _is_chair_request(req):
+        bad_reason = _chair_bad_reason(candidate)
+        if bad_reason:
+            return "bad", bad_reason
+        weak_reason = _chair_weak_reason(candidate)
+        if weak_reason:
+            return "weak", weak_reason
+
+    if _is_laptop_request(req) and _has_weak_laptop_cpu(candidate) and not _has_known_laptop_brand(candidate):
+        return "weak", WEAK_CPU_MANUAL_RISK
+
+    if _is_ps5_tv(req) and not _ps5_tv_has_confirmed_4k(candidate):
+        return "weak", PS5_4K_UNCONFIRMED_RISK
+
+    if getattr(candidate, "product_quality_level", "") == "retail_new_for_used_request":
+        return "retail_new_for_used_request", getattr(candidate, "why_not_verified_good", "") or DIRECT_RETAIL_USED_RISK
+    if getattr(candidate, "product_quality_level", "") == "bad":
+        return "bad", getattr(candidate, "why_not_verified_good", "") or BAD_PRODUCT_RISK
+    if getattr(candidate, "product_quality_level", "") in {"weak", "unknown_brand"}:
+        return "weak", getattr(candidate, "why_not_verified_good", "") or DIRECT_QUALITY_MANUAL_RISK
+    if candidate.quality == QUALITY_WEAK or _has_weak_classification_risk(candidate):
+        return "weak", DIRECT_QUALITY_MANUAL_RISK
+    return getattr(candidate, "product_quality_level", "") or "", ""
+
+
 def _candidate_budget_status(req: Request, candidate: ProductCandidate) -> str:
     price = getattr(candidate, "price", None)
     if price is None:
@@ -984,6 +1097,7 @@ def _candidate_rank_score(req: Request, candidate: ProductCandidate) -> float:
     score = {
         VERIFIED_GOOD: 100.0,
         VERIFIED_OK: 70.0,
+        NEED_MANUAL_CHECK: 50.0,
         VERIFY_BLOCKED: 50.0,
         OVER_BUDGET_SOFT: 35.0,
     }.get(status, 20.0)
@@ -1031,10 +1145,7 @@ def _apply_ranking_sanity(req: Request, candidate: ProductCandidate) -> None:
         getattr(candidate, "external_source", "") == "searchapi"
         and getattr(candidate, "price_reliability", "") == "low"
     )
-    keep_direct_store_price = (
-        getattr(candidate, "price_source", "") == "direct_store"
-        and getattr(candidate, "price_reliability", "") == "medium"
-    )
+    keep_direct_store_price = getattr(candidate, "price_source", "") == "direct_store"
     normalize_price_candidate(candidate, req)
     if keep_low_searchapi_price and candidate.price is not None:
         candidate.price_reliability = "low"
@@ -1056,6 +1167,15 @@ def _apply_ranking_sanity(req: Request, candidate: ProductCandidate) -> None:
     if _has_risk_flag(candidate, DIRECT_QUALITY_MANUAL_RISK) and candidate.score > 80:
         candidate.score = 80
         candidate.score_cap_applied = "manual_quality:80"
+    if _has_risk_flag(candidate, DIRECT_RETAIL_USED_RISK) and candidate.score > 55:
+        candidate.score = 55
+        candidate.score_cap_applied = "retail_new_for_used_request:55"
+    if getattr(candidate, "product_quality_level", "") == "weak" and candidate.score > 80:
+        candidate.score = 80
+        candidate.score_cap_applied = candidate.score_cap_applied or "weak_quality:80"
+    if getattr(candidate, "product_quality_level", "") == "bad" and candidate.score > 40:
+        candidate.score = 40
+        candidate.score_cap_applied = candidate.score_cap_applied or "bad_quality:40"
 
 
 def score_result(
@@ -1730,6 +1850,7 @@ def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, 
     order = {
         VERIFIED_GOOD: 0,
         VERIFIED_OK: 1,
+        NEED_MANUAL_CHECK: 2,
         VERIFY_BLOCKED: 2,
         OVER_BUDGET_SOFT: 3,
     }
@@ -1789,7 +1910,7 @@ def _demote_verified_item(item: object, status: str, reason: str) -> None:
     candidate.why_not_verified_good = reason
     _add_risk_flag(candidate, reason)
     _add_risk_flag(candidate, DIRECT_QUALITY_MANUAL_RISK)
-    if status == VERIFY_BLOCKED:
+    if status in {VERIFY_BLOCKED, NEED_MANUAL_CHECK}:
         candidate.quality = QUALITY_WEAK
         candidate.status = "WEAK_CANDIDATE"
     elif status == VERIFIED_OK:
@@ -1805,16 +1926,63 @@ def _apply_direct_retail_verified_sanity(req: Request, verified_items: list[obje
         brand_quality = _headphone_brand_quality(req, candidate)
         if brand_quality:
             candidate.brand_quality = brand_quality
+        product_quality_level = _direct_product_quality_level(req, candidate)
+        if product_quality_level:
+            candidate.product_quality_level = product_quality_level
+        if product_quality_level == "retail_new_for_used_request":
+            _add_risk_flag(candidate, DIRECT_RETAIL_USED_RISK)
+            candidate.why_not_verified_good = DIRECT_RETAIL_USED_RISK
         weak_quality = _has_weak_classification_risk(candidate)
         if weak_quality:
             _add_risk_flag(candidate, DIRECT_QUALITY_MANUAL_RISK)
             candidate.why_not_verified_good = "weak classification не подтверждает качество товара"
         if item.verify_status != VERIFIED_GOOD:
             continue
-        if weak_quality:
-            _demote_verified_item(item, VERIFY_BLOCKED, "weak classification не может быть VERIFIED_GOOD")
+        if product_quality_level == "retail_new_for_used_request":
+            _demote_verified_item(item, NEED_MANUAL_CHECK, DIRECT_RETAIL_USED_RISK)
+        elif weak_quality:
+            _demote_verified_item(item, NEED_MANUAL_CHECK, DIRECT_QUALITY_MANUAL_RISK)
         elif brand_quality == "unknown_headphone_brand":
             _demote_verified_item(item, VERIFIED_OK, "бренд наушников не распознан")
+
+
+def _apply_final_product_quality_guard(req: Request, verified_items: list[object]) -> None:
+    for item in verified_items:
+        candidate = item.candidate
+        level, reason = _final_product_quality_level(req, candidate)
+        if not level:
+            continue
+        candidate.product_quality_level = level
+        if level == "bad":
+            _add_risk_flag(candidate, reason or BAD_PRODUCT_RISK)
+            candidate.why_not_verified_good = reason or BAD_PRODUCT_RISK
+            candidate.quality = QUALITY_TRASH
+            candidate.status = "REJECTED_AUTO"
+            item.keep_for_admin = False
+            if item.verify_status == VERIFIED_GOOD:
+                item.verify_status = NOT_PRODUCT_PAGE
+            if not getattr(item, "reason", ""):
+                item.reason = reason or BAD_PRODUCT_RISK
+            item.risk_flags = list(dict.fromkeys(list(getattr(item, "risk_flags", []) or []) + [reason or BAD_PRODUCT_RISK]))
+            continue
+        if level != "weak":
+            continue
+        _add_risk_flag(candidate, reason or DIRECT_QUALITY_MANUAL_RISK)
+        _add_risk_flag(candidate, DIRECT_QUALITY_MANUAL_RISK)
+        candidate.why_not_verified_good = reason or DIRECT_QUALITY_MANUAL_RISK
+        candidate.quality = QUALITY_WEAK
+        candidate.status = "WEAK_CANDIDATE"
+        if item.verify_status in {VERIFIED_GOOD, VERIFIED_OK, OVER_BUDGET_SOFT}:
+            item.verify_status = NEED_MANUAL_CHECK
+            candidate.verify_status = NEED_MANUAL_CHECK
+            item.keep_for_admin = True
+        else:
+            candidate.verify_status = item.verify_status
+        if not getattr(item, "reason", ""):
+            item.reason = candidate.why_not_verified_good
+        item.risk_flags = list(dict.fromkeys(
+            list(getattr(item, "risk_flags", []) or []) + [candidate.why_not_verified_good, DIRECT_QUALITY_MANUAL_RISK]
+        ))
 
 
 def _apply_verification(collection: SearchCollection, req: Request) -> None:
@@ -1825,6 +1993,7 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
     verified = verify_candidates(candidates_to_verify, req, limit=30)
     verified, playwright_summary = verify_with_playwright_fallback(verified, req)
     _apply_direct_retail_verified_sanity(req, verified)
+    _apply_final_product_quality_guard(req, verified)
     stats = collection.verify_stats
     stats["checked"] = len(verified)
     stats["playwright_used"] = playwright_summary.used
@@ -1843,7 +2012,7 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
         stats[status] = stats.get(status, 0) + 1
         if item.keep_for_admin and item.candidate.price:
             kept.append(item.candidate)
-        elif item.keep_for_admin and status == VERIFY_BLOCKED and getattr(item.candidate, "playwright_used", False):
+        elif item.keep_for_admin and status in {VERIFY_BLOCKED, NEED_MANUAL_CHECK} and getattr(item.candidate, "playwright_used", False):
             manual_without_price.append(item.candidate)
         else:
             collection.verified_rejections.append(item)
@@ -1874,6 +2043,7 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
         (
             f"VERIFY_ERROR={stats.get('VERIFY_ERROR', 0)}; "
             f"{VERIFY_BLOCKED}={stats.get(VERIFY_BLOCKED, 0)}; "
+            f"{NEED_MANUAL_CHECK}={stats.get(NEED_MANUAL_CHECK, 0)}; "
             f"UNAVAILABLE={stats.get('UNAVAILABLE', 0)}; "
             f"{REMOVED_LISTING}={stats.get(REMOVED_LISTING, 0)}; "
             f"{PRICE_MISSING}={stats.get(PRICE_MISSING, 0)}; "
