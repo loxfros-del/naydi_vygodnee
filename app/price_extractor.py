@@ -3,13 +3,35 @@ import re
 from typing import Optional
 
 
-_NOT_PRICES = {4, 43, 50, 55, 60, 65, 90, 120, 144, 720, 1080, 2160}
 _NUMBER_RE = re.compile(
     r"(?<![\w])(?P<number>\d{1,3}(?:[ \u00a0]\d{3})+|\d{4,6}|\d{2,3}\s*[кКkK])(?![\w])"
 )
 _CURRENCY_RE = re.compile(r"^(?:\s*(?:₽|руб(?:\.|лей)?|р\.))", re.IGNORECASE)
 _PRICE_MARKER_RE = re.compile(r"(?:цена|стоимость|стоит)\s*[:—–-]?\s*$", re.IGNORECASE)
 
+_SPEC_PREFIX_RE = re.compile(
+    r"(?:ram|озу|оператив(?:ная)?|память|ssd|hdd|emmc|nvme|накопитель)\s*$",
+    re.IGNORECASE,
+)
+_SPEC_SUFFIX_RE = re.compile(
+    r"^\s*(?:gb|гб|tb|тб|mah|мач|hz|гц|kg|кг|дюйм(?:ов)?|inch)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_spec_number(text: str, start: int, end: int) -> bool:
+    before = text[max(0, start - 24):start]
+    after = text[end:end + 24]
+    if _SPEC_PREFIX_RE.search(before) or _SPEC_SUFFIX_RE.search(after):
+        return True
+
+    if re.search(r"[xх]\s*$", before, re.IGNORECASE) or re.match(r"\s*[xх]", after, re.IGNORECASE):
+        return True
+
+    if re.search(r"-\s*$", before) and re.match(r"\s*(?:гц|hz)\b", after, re.IGNORECASE):
+        return True
+
+    return False
 
 def _number(raw: str) -> int:
     compact = raw.replace("\u00a0", " ").replace(" ", "")
@@ -19,7 +41,6 @@ def _number(raw: str) -> int:
 def _is_valid_price(value: int, min_price: int, max_price: int) -> bool:
     return (
         min_price <= value <= max_price
-        and value not in _NOT_PRICES
         and not 2000 <= value <= 2039
     )
 
@@ -38,6 +59,9 @@ def extract_price(text: str, min_price: int = 1_000, max_price: int = 10_000_000
     for match in _NUMBER_RE.finditer(normalized):
         raw_number = match.group("number")
         value = _number(raw_number)
+        if _looks_like_spec_number(normalized, match.start(), match.end()):
+            continue
+
         if not _is_valid_price(value, min_price, max_price):
             continue
 

@@ -5,6 +5,7 @@ Telegram handlers. It only reads request/candidate-like objects.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 import re
 
@@ -16,6 +17,10 @@ PS5_4K_UNCONFIRMED_RISK = "4K/UHD не подтверждено для PS5"
 CHAIR_WEAK_MANUAL_RISK = "кресло требует ручной проверки эргономики"
 CHAIR_CHEAP_MANUAL_RISK = "дешёвое кресло, нужна ручная проверка эргономики"
 BAD_PRODUCT_RISK = "мусор/аксессуар, не товар"
+PRICE_MISSING_RISK = "цена не подтверждена"
+UNAVAILABLE_RISK = "товар недоступен"
+OVER_BUDGET_RISK = "товар выше бюджета"
+WRONG_MODEL_RISK = "не та модель товара"
 
 KNOWN_GOOD_HEADPHONE_BRANDS = (
     "sony", "jbl", "anker", "soundcore", "xiaomi", "qcy", "baseus",
@@ -55,10 +60,41 @@ CHAIR_PART_START_MARKERS = (
     "комплект колес", "комплект колёс",
 )
 CHAIR_WEAK_QUALITY_FEATURES = {"office_or_computer"}
+UNAVAILABLE_TEXT_MARKERS = (
+    "товар закончился", "нет в наличии", "скоро снова поступит",
+    "посмотреть аналоги", "sold out", "unavailable",
+)
+ACCESSORY_START_MARKERS = (
+    "чехол", "защитное стекло", "стекло", "кабель", "зарядка", "зарядное",
+    "коробка", "запчасть", "колесо", "колеса", "колёса", "газлифт",
+    "подлокотник", "подлокотники", "пульт", "кронштейн", "муляж",
+    "копия", "реплика",
+)
+ACCESSORY_CONTEXT_MARKERS = (
+    "для iphone", "для айфон", "для samsung", "для galaxy", "для телевизор",
+    "для tv", "для ноутбук", "для наушник", "для кресл", "для стул",
+    "запчаст", "замена", "ремонт",
+)
+MODEL_VARIANTS = ("pro max", "pro", "plus", "mini", "se", "ultra", "lite", "max", "fe", "e")
+
+
+@dataclass(frozen=True)
+class FinalQualityGateResult:
+    status: str = ""
+    reason: str = ""
+    product_quality_level: str = ""
+    keep_for_admin: bool | None = None
+    score_cap: int | None = None
 
 
 def normalized_text(candidate: Any) -> str:
     return f"{getattr(candidate, 'title', '')} {getattr(candidate, 'snippet', '')}".lower().replace("ё", "е")
+
+
+def _request_text(parsed: Any) -> str:
+    return " ".join(str(getattr(parsed, attr, "") or "") for attr in (
+        "product_name", "product", "original_query", "important_criteria",
+    )).lower().replace("ё", "е")
 
 
 def _has_word(text: str, value: str) -> bool:
@@ -74,6 +110,124 @@ def _candidate_price(candidate: Any) -> int | None:
     except (TypeError, ValueError):
         digits = re.sub(r"\D+", "", str(price))
         return int(digits) if digits else None
+
+
+def _budget_value(parsed: Any) -> int | None:
+    budget = getattr(parsed, "budget", None)
+    if budget is None and isinstance(parsed, dict):
+        budget = parsed.get("budget")
+    if budget is None:
+        return None
+    try:
+        value = int(str(budget).replace(" ", ""))
+        return value if value > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _facts_text(candidate: Any) -> str:
+    facts = getattr(candidate, "product_facts", {}) or {}
+    if not isinstance(facts, dict):
+        return ""
+    return " ".join(str(value) for value in facts.values() if value is not None).lower().replace("ё", "е")
+
+
+def _combined_text(candidate: Any) -> str:
+    return " ".join((
+        normalized_text(candidate),
+        _facts_text(candidate),
+        str(getattr(candidate, "page_text", "") or "").lower().replace("ё", "е"),
+    ))
+
+
+def _is_unavailable_text(candidate: Any) -> bool:
+    text = _combined_text(candidate)
+    facts = getattr(candidate, "product_facts", {}) or {}
+    fact_availability = facts.get("availability_text", "") if isinstance(facts, dict) else ""
+    availability = str(getattr(candidate, "availability", "") or fact_availability).upper()
+    return availability == "UNAVAILABLE" or any(marker in text for marker in UNAVAILABLE_TEXT_MARKERS)
+
+
+def _is_accessory_or_wrong_product(candidate: Any) -> bool:
+    text = normalized_text(candidate)
+    stripped = text.strip()
+    if any(stripped.startswith(marker) for marker in ACCESSORY_START_MARKERS):
+        return True
+    has_accessory = any(marker in text for marker in ACCESSORY_START_MARKERS)
+    has_context = any(marker in text for marker in ACCESSORY_CONTEXT_MARKERS)
+    if has_accessory and has_context:
+        return True
+    if any(marker in text for marker in ("муляж", "копия", "реплика")):
+        return True
+    return False
+
+
+def _normalize_model_text(value: str) -> str:
+    return re.sub(r"[^a-zа-я0-9]+", " ", (value or "").lower().replace("ё", "е")).strip()
+
+
+def _extract_iphone_model(text: str) -> tuple[str, str] | None:
+    match = re.search(r"\b(?:iphone|айфон)\s*(\d{1,2})(?:\s*(pro\s+max|pro|max|plus|mini|se|ultra|lite|fe|e))?\b", text)
+    if not match:
+        return None
+    return match.group(1), _normalize_model_text(match.group(2) or "")
+
+
+def _extract_galaxy_model(text: str) -> tuple[str, str] | None:
+    match = re.search(r"\b(?:galaxy\s*)?s\s*(\d{2})(?:\s*(ultra|fe|plus|\+|lite))?\b", text)
+    if not match:
+        return None
+    variant = "plus" if match.group(2) == "+" else _normalize_model_text(match.group(2) or "")
+    return match.group(1), variant
+
+
+def _extract_sony_wh_model(text: str) -> str:
+    match = re.search(r"\bwh\s*[- ]?\s*1000\s*xm\s*(\d)\b", text)
+    return match.group(1) if match else ""
+
+
+def _contains_forbidden_variant(title_text: str, requested_variant: str) -> bool:
+    for variant in MODEL_VARIANTS:
+        if variant == requested_variant:
+            continue
+        pattern = variant.replace(" ", r"\s+")
+        if re.search(rf"\b{pattern}\b", title_text):
+            return True
+    return False
+
+
+def has_model_mismatch(candidate: Any, parsed: Any) -> bool:
+    query_text = _request_text(parsed)
+    title_text = _normalize_model_text(f"{getattr(candidate, 'title', '')} {getattr(candidate, 'snippet', '')}")
+
+    requested_iphone = _extract_iphone_model(query_text)
+    if requested_iphone:
+        number, variant = requested_iphone
+        actual = _extract_iphone_model(title_text)
+        if not actual or actual[0] != number:
+            return True
+        actual_variant = actual[1]
+        if variant:
+            return actual_variant != variant
+        return bool(actual_variant)
+
+    requested_galaxy = _extract_galaxy_model(query_text)
+    if requested_galaxy and "galaxy" in query_text:
+        number, variant = requested_galaxy
+        actual = _extract_galaxy_model(title_text)
+        if not actual or actual[0] != number:
+            return True
+        actual_variant = actual[1]
+        if variant:
+            return actual_variant != variant
+        return bool(actual_variant)
+
+    requested_sony = _extract_sony_wh_model(query_text)
+    if requested_sony:
+        actual_sony = _extract_sony_wh_model(title_text)
+        return actual_sony != requested_sony
+
+    return False
 
 
 def headphone_brand_quality(candidate: Any, *, enabled: bool, budget: int | None = None) -> str:
@@ -216,7 +370,7 @@ def final_product_quality_level(
         if weak_reason:
             return "weak", weak_reason
 
-    if is_laptop and has_weak_laptop_cpu(candidate) and not has_known_laptop_brand(candidate):
+    if is_laptop and has_weak_laptop_cpu(candidate):
         return "weak", WEAK_CPU_MANUAL_RISK
 
     if is_ps5_tv and not ps5_tv_has_confirmed_4k(candidate):
@@ -232,3 +386,31 @@ def final_product_quality_level(
     if quality_is_weak or has_weak_classification:
         return "weak", DIRECT_QUALITY_MANUAL_RISK
     return current_level, ""
+
+
+def final_quality_gate(candidate: Any, parsed: Any) -> FinalQualityGateResult:
+    """Returns category and exact-match evidence without finalizing workflow status."""
+    product_level = str(getattr(candidate, "product_quality_level", "") or "")
+
+    if product_level == "bad" or _is_accessory_or_wrong_product(candidate):
+        return FinalQualityGateResult(
+            reason=BAD_PRODUCT_RISK,
+            product_quality_level="bad",
+            score_cap=30,
+        )
+
+    if has_model_mismatch(candidate, parsed):
+        return FinalQualityGateResult(
+            reason=WRONG_MODEL_RISK,
+            product_quality_level="bad",
+            score_cap=30,
+        )
+
+    if product_level in {"weak", "unknown_brand", "retail_new_for_used_request"}:
+        return FinalQualityGateResult(
+            reason=getattr(candidate, "why_not_verified_good", "") or DIRECT_QUALITY_MANUAL_RISK,
+            product_quality_level="weak",
+            score_cap=80,
+        )
+
+    return FinalQualityGateResult()

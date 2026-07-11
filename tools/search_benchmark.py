@@ -31,12 +31,16 @@ from app.request_parser import full_parse
 
 
 BENCHMARK_QUERIES = [
-    "Нужен телевизор для PS5 до 65к в Ярославле",
-    "Нужен телевизор для PS5 до 45к в Ярославле",
-    "Нужен ноутбук для учёбы до 50к в Москве",
+    "Нужен смартфон Samsung Galaxy A55 256 ГБ до 35к в Москве",
+    "Нужен телевизор 55 дюймов 4К до 45к в Ярославле",
+    "Нужны беспроводные наушники с ANC до 12к",
+    "Нужен ноутбук Ryzen 5 16 ГБ 512 ГБ до 55к в Москве",
+    "Нужно офисное кресло с поясничной поддержкой до 15к",
+    "Нужен iPhone 15 Pro 256 ГБ до 100к",
     "Нужен iPhone 13 б/у до 40к в Ярославле",
-    "Нужны наушники до 10к",
-    "Нужно офисное кресло для учёбы до 15к",
+    "Нужен вертикальный пылесос до 20к для квартиры",
+    "Нужен матрас 160x200 до 18к",
+    "Нужна кровать 160x200 до 20к в Ярославле",
 ]
 
 
@@ -322,26 +326,27 @@ def run_one(raw_query: str, index: int) -> dict[str, Any]:
     checked_candidates = _verified_candidates(collection)
     fetch_stats = _fetch_stats(checked_candidates)
     quality = _quality_label(len(saved), has_missing_price)
+    saved_statuses = Counter(str(getattr(item, "verify_status", item.quality) or "") for item in saved)
     stats = {
         "parsed_product_name": parsed.get("product_name") or "",
         "category": category,
         "RAW": len(raw_candidates),
         "checked": verify_stats.get("checked", 0),
         "saved_for_admin": len(saved),
-        "verified_good": verify_stats.get("VERIFIED_GOOD", 0),
-        "verified_ok": verify_stats.get("VERIFIED_OK", 0),
-        "need_manual_check": verify_stats.get(NEED_MANUAL_CHECK, 0),
-        "verify_blocked": verify_stats.get(VERIFY_BLOCKED, 0),
-        "blocked_by_site": verify_stats.get(VERIFY_BLOCKED, 0),
+        "VERIFIED_GOOD": saved_statuses["VERIFIED_GOOD"],
+        "VERIFIED_OK": saved_statuses["VERIFIED_OK"],
+        "NEED_MANUAL_CHECK": saved_statuses[NEED_MANUAL_CHECK],
+        "VERIFY_BLOCKED": saved_statuses[VERIFY_BLOCKED],
+        "PRICE_MISSING saved": saved_statuses[PRICE_MISSING],
+        "WRONG_PRODUCT": verify_stats.get("WRONG_PRODUCT", 0),
+        "UNAVAILABLE": verify_stats.get(UNAVAILABLE, 0),
+        "OVER_BUDGET_SOFT": verify_stats.get("OVER_BUDGET_SOFT", 0),
+        "OVER_BUDGET_HARD": verify_stats.get("OVER_BUDGET_HARD", 0),
         "in_budget": _in_budget_count(saved, budget),
         "low_price_suspect": sum(1 for item in saved if _has_risk(item, LOW_PRICE_RISK)),
         "city_mismatch": sum(1 for item in saved if _has_risk(item, CITY_MISMATCH_RISK)),
         "ranked_top_has_price": _has_price_count(ranked_top),
         "ranked_top_in_budget": _in_budget_count(ranked_top, budget),
-        "over_budget_soft": verify_stats.get("OVER_BUDGET_SOFT", 0),
-        "over_budget_hard": verify_stats.get("OVER_BUDGET_HARD", 0),
-        "price_missing_hidden": verify_stats.get(PRICE_MISSING, 0),
-        "unavailable_hidden": verify_stats.get(UNAVAILABLE, 0),
         "not_product_page_hidden": verify_stats.get("NOT_PRODUCT_PAGE", 0),
         "removed_listing_hidden": verify_stats.get(REMOVED_LISTING, 0),
         "duplicates_hidden": hidden_duplicates,

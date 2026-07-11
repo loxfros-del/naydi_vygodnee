@@ -609,6 +609,96 @@ def detect_product_category(req: Request, candidate: Any = None, text: str = "")
     return _category_from_text(candidate_text)
 
 
+def _extract_phone_facts(text: str) -> dict[str, Any]:
+    lowered = text.lower()
+    model = ""
+    match = re.search(r"\b(?:apple\s*)?(iphone|айфон)\s*(\d{1,2})(?:\s*(pro\s+max|pro|max|plus|mini|se|e))?\b", lowered)
+    if match:
+        model = "iPhone " + match.group(2) + (f" {match.group(3).upper()}" if match.group(3) else "")
+    memory_match = re.search(r"\b(64|128|256|512|1024)\s*(?:гб|gb|tb|тб)\b", lowered)
+    color = next((value for marker, value in (
+        ("черн", "черный"), ("бел", "белый"), ("красн", "красный"),
+        ("син", "синий"), ("зелен", "зеленый"), ("розов", "розовый"),
+        ("starlight", "starlight"), ("midnight", "midnight"),
+    ) if marker in lowered), "")
+    condition = "б/у" if any(marker in lowered for marker in ("б/у", "бу ", "used", "восстанов")) else "новый" if any(marker in lowered for marker in ("новый", "new")) else ""
+    return {
+        "model": model,
+        "memory": f"{memory_match.group(1)} ГБ" if memory_match else "",
+        "color": color,
+        "condition": condition,
+    }
+
+
+def _extract_laptop_facts(text: str) -> dict[str, Any]:
+    lowered = text.lower()
+    laptop_brands = (
+        "LUNNEN", "EXPEcomp", "ECHIPS", "Acer", "Asus", "Apple", "Dell", "HP",
+        "Huawei", "Honor", "Lenovo", "MSI", "Samsung", "Xiaomi", "Thunderobot",
+        "Maibenben", "Digma",
+    )
+    brand = next((brand for brand in laptop_brands if re.search(
+        rf"(?<![a-zа-я0-9]){re.escape(brand.lower())}(?![a-zа-я0-9])", lowered,
+    )), "")
+    cpu_match = re.search(r"\b((?:intel\s*)?(?:core\s*)?i[3579][-\s]?\d{3,5}[a-z]*|ryzen\s*[3579]\s*\d{3,4}[a-z]*|n95|n100|n150|n5095|celeron)\b", lowered, re.I)
+    ram_match = re.search(r"\b(?:ram\s*)?(\d{1,2})\s*(?:гб|gb)\b", lowered)
+    ssd_match = re.search(r"\b(?:ssd\s*)?(\d{3,4}|1\s*тб|1\s*tb)\s*(?:гб|gb|тб|tb)?\b", lowered)
+    screen_match = re.search(r"\b(13|14|15[.,]6|16|17[.,]3)\s*(?:\"|дюйм|inch)?", lowered)
+    return {
+        "brand": brand,
+        "cpu": cpu_match.group(1).upper() if cpu_match else "",
+        "ram": f"{ram_match.group(1)} ГБ" if ram_match else "",
+        "ssd": ssd_match.group(0).upper() if ssd_match else "",
+        "screen": screen_match.group(1).replace(",", ".") if screen_match else "",
+    }
+
+
+def _extract_headphone_facts(text: str) -> dict[str, Any]:
+    lowered = text.lower()
+    brand = next((brand for brand in (
+        "Sony", "JBL", "Anker", "Soundcore", "Xiaomi", "QCY", "Baseus",
+        "Samsung", "Huawei", "Honor", "Marshall", "Sennheiser", "Edifier",
+        "OnePlus", "Nothing", "Realme",
+    ) if brand.lower() in lowered), "")
+    if "tws" in lowered:
+        hp_type = "TWS"
+    elif any(marker in lowered for marker in ("беспровод", "bluetooth", "wireless")):
+        hp_type = "wireless"
+    elif any(marker in lowered for marker in ("проводн", "wired", "3.5", "3,5")):
+        hp_type = "wired"
+    else:
+        hp_type = ""
+    anc = any(marker in lowered for marker in ("anc", "шумоподав", "noise cancelling"))
+    model_match = re.search(r"\b([a-z]{1,8}\s?[-]?\s?\d{1,4}[a-z0-9-]*|wh-?1000xm\d|melobuds\s+\w+|liberty\s+\d+\s*\w*)\b", text, re.I)
+    return {
+        "brand": brand,
+        "headphone_type": hp_type,
+        "anc": anc if anc else "",
+        "model": model_match.group(1).strip() if model_match else "",
+    }
+
+
+def _extract_chair_facts(text: str) -> dict[str, Any]:
+    lowered = text.lower()
+    ergonomics = any(marker in lowered for marker in ("эргоном", "ортопед", "анатом"))
+    lumbar = "пояснич" in lowered
+    adjustments = []
+    if "регулиров" in lowered and "высот" in lowered:
+        adjustments.append("высота")
+    if "регулиров" in lowered and "подлокот" in lowered:
+        adjustments.append("подлокотники")
+    if "подголовник" in lowered:
+        adjustments.append("подголовник")
+    load_match = re.search(r"(?<!\d)(120|125|130|150)\s*кг", lowered)
+    return {
+        "ergonomics": ergonomics if ergonomics else "",
+        "lumbar_support": lumbar if lumbar else "",
+        "adjustments": adjustments,
+        "headrest": "подголовник" in lowered,
+        "load_capacity": f"{load_match.group(1)} кг" if load_match else "",
+    }
+
+
 def extract_product_facts(
     candidate: Any,
     req: Request,
@@ -642,10 +732,19 @@ def extract_product_facts(
     url = str(getattr(candidate, "url", "") or "")
     category = detect_product_category(req, candidate, combined)
     if category != "tv":
+        category_facts: dict[str, Any] = {}
+        if category == "phone":
+            category_facts = _extract_phone_facts(combined)
+        elif category == "laptop":
+            category_facts = _extract_laptop_facts(combined)
+        elif category == "headphones":
+            category_facts = _extract_headphone_facts(combined)
+        elif category == "chair":
+            category_facts = _extract_chair_facts(combined)
         return {
             "category": category,
-            "brand": brand,
-            "model": model,
+            "brand": category_facts.get("brand", brand),
+            "model": category_facts.get("model", model),
             "model_key": model_key,
             "price": actual_price,
             "store": source,
@@ -656,6 +755,7 @@ def extract_product_facts(
             "reviews_count": reviews_count,
             "budget_status": _budget_status(actual_price, req),
             "warnings": [],
+            **category_facts,
         }
     facts = {
         "category": category,
@@ -876,6 +976,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
         if _is_blocked_error(exc) and _looks_safe_for_manual_check(candidate, req, source, url):
             risks = [
                 "страница заблокировала проверку",
+                "network block",
                 "цена найдена в выдаче, нужна ручная проверка",
             ]
             if source == "avito_search":

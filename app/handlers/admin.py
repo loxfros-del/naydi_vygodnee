@@ -145,6 +145,7 @@ def format_search_result_card(sr: SearchResult, idx: int) -> str:
     else:
         line += "\n💰 Цена: <i>цена не найдена</i>"
     line += f"\n🏪 Источник: {html.escape(sr.source or 'generic_web')}"
+    line += f"\n🔎 Проверка: {html.escape(_verify_status_label(_stored_verify_status(sr)))}"
     line += f"\n📊 Score: {int(round(sr.score))}"
     try:
         risk_flags = json.loads(sr.risk_flags) if sr.risk_flags else []
@@ -218,6 +219,22 @@ def _parse_facts(value: str) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _stored_verify_status(sr: SearchResult) -> str:
+    facts = _parse_facts(getattr(sr, "facts_json", ""))
+    return str(facts.get("verify_status") or "").upper()
+
+
+def _verify_status_label(status: str) -> str:
+    return {
+        "VERIFIED_GOOD": "проверен: хороший",
+        "VERIFIED_OK": "проверен: подходит",
+        "NEED_MANUAL_CHECK": "нужна ручная проверка",
+        "VERIFY_BLOCKED": "проверка страницы заблокирована",
+        "PRICE_MISSING": "цена не подтверждена",
+        "OVER_BUDGET_SOFT": "чуть выше бюджета",
+    }.get(status, "статус проверки не подтверждён")
+
+
 def _budget_status_label(status: str) -> str:
     return {
         "IN_BUDGET": "в бюджете",
@@ -237,12 +254,40 @@ def _availability_label(facts: dict) -> str:
 
 
 def _facts_compact_line(facts: dict) -> str:
+    category = str(facts.get("category") or "")
     parts = []
-    if facts.get("diagonal"):
+    if category == "phone":
+        for key in ("model", "memory", "color", "condition"):
+            if facts.get(key):
+                parts.append(str(facts[key]))
+    elif category == "laptop":
+        for key in ("brand", "cpu", "ram", "ssd", "screen"):
+            if facts.get(key):
+                parts.append(str(facts[key]))
+    elif category == "headphones":
+        for key in ("brand", "headphone_type", "model"):
+            if facts.get(key):
+                parts.append(str(facts[key]))
+        if facts.get("anc"):
+            parts.append("ANC")
+    elif category == "chair":
+        if facts.get("ergonomics"):
+            parts.append("эргономика")
+        if facts.get("lumbar_support"):
+            parts.append("поясничная поддержка")
+        if facts.get("adjustments"):
+            parts.append("регулировки: " + ", ".join(str(item) for item in facts["adjustments"]))
+        if facts.get("headrest"):
+            parts.append("подголовник")
+        if facts.get("load_capacity"):
+            parts.append(str(facts["load_capacity"]))
+    elif facts.get("diagonal"):
         parts.append(f'{facts["diagonal"]}"')
-    for key in ("resolution", "refresh_rate", "matrix_type"):
-        if facts.get(key):
-            parts.append(str(facts[key]))
+        for key in ("resolution", "refresh_rate", "matrix_type"):
+            if facts.get(key):
+                parts.append(str(facts[key]))
+    if not parts:
+        parts.append("факты не подтверждены")
     if facts.get("budget_status"):
         parts.append(_budget_status_label(str(facts["budget_status"])))
     return ", ".join(parts)
@@ -259,21 +304,65 @@ def _facts_detail_lines(sr: SearchResult) -> list[str]:
     facts = _parse_facts(getattr(sr, "facts_json", ""))
     if not facts:
         return []
-    model = facts.get("model") or facts.get("model_key") or "не подтверждена"
-    diagonal = f'{facts.get("diagonal")}"' if facts.get("diagonal") else "не подтверждена"
-    lines = [
-        "",
-        "<b>Факты:</b>",
-        f"- Модель: {html.escape(str(model))}",
-        f"- Диагональ: {html.escape(diagonal)}",
-        f"- Разрешение: {html.escape(str(facts.get('resolution') or 'не подтверждено'))}",
-        f"- Частота: {html.escape(str(facts.get('refresh_rate') or 'не подтверждена'))}",
-        f"- Матрица: {html.escape(str(facts.get('matrix_type') or 'не подтверждена'))}",
+    category = str(facts.get("category") or "unknown")
+    lines = ["", "<b>Факты:</b>"]
+    if category == "phone":
+        items = (
+            ("Модель", facts.get("model")),
+            ("Память", facts.get("memory")),
+            ("Цвет", facts.get("color")),
+            ("Состояние", facts.get("condition")),
+        )
+    elif category == "laptop":
+        items = (
+            ("Бренд", facts.get("brand")),
+            ("CPU", facts.get("cpu")),
+            ("RAM", facts.get("ram")),
+            ("SSD", facts.get("ssd")),
+            ("Экран", facts.get("screen")),
+        )
+    elif category == "headphones":
+        items = (
+            ("Бренд", facts.get("brand")),
+            ("Тип", facts.get("headphone_type")),
+            ("ANC", "есть" if facts.get("anc") else ""),
+            ("Модель", facts.get("model")),
+        )
+    elif category == "chair":
+        adjustments = ", ".join(str(item) for item in facts.get("adjustments") or [])
+        items = (
+            ("Эргономика", "есть" if facts.get("ergonomics") else ""),
+            ("Поясничная поддержка", "есть" if facts.get("lumbar_support") else ""),
+            ("Регулировки", adjustments),
+            ("Подголовник", "есть" if facts.get("headrest") else ""),
+            ("Нагрузка", facts.get("load_capacity")),
+        )
+    elif category == "tv":
+        diagonal = f'{facts.get("diagonal")}"' if facts.get("diagonal") else ""
+        items = (
+            ("Модель", facts.get("model") or facts.get("model_key")),
+            ("Диагональ", diagonal),
+            ("Разрешение", facts.get("resolution")),
+            ("Частота", facts.get("refresh_rate")),
+            ("HDMI", facts.get("hdmi")),
+            ("Матрица", facts.get("matrix_type")),
+        )
+    else:
+        items = ()
+    confirmed = False
+    for label, value in items:
+        text = str(value or "").strip()
+        if text:
+            confirmed = True
+        lines.append(f"- {label}: {html.escape(text or 'не подтверждено')}")
+    if not confirmed:
+        lines.append("- факты не подтверждены")
+    lines.extend([
         f"- Наличие: {html.escape(_availability_label(facts))}",
         f"- Бюджет: {html.escape(_budget_status_label(str(facts.get('budget_status') or '')))}",
-    ]
+    ])
     ps5_line = _facts_ps5_line(facts)
-    if ps5_line:
+    if category == "tv" and ps5_line:
         lines.append(f"- PS5: {html.escape(ps5_line)}")
     return lines
 
@@ -283,7 +372,7 @@ def format_search_result_summary(sr: SearchResult, idx: int) -> str:
     title = html.escape(_clip_text(sr.title or "без названия", 95))
     price = format_price(sr.price) if sr.price else "цена не найдена"
     source = html.escape(_clip_text(sr.source or "generic_web", 45))
-    status = html.escape(_result_status_label(sr.status))
+    status = html.escape(_verify_status_label(_stored_verify_status(sr)))
     facts = _parse_facts(getattr(sr, "facts_json", ""))
     facts_line = _facts_compact_line(facts)
     ps5_line = _facts_ps5_line(facts)
@@ -334,6 +423,11 @@ async def _safe_edit_text(callback: CallbackQuery, text: str, reply_markup: Inli
 
 
 def build_results_page(req_id: int, results: list[SearchResult], rejected_auto_count: int, page: int) -> tuple[str, InlineKeyboardMarkup]:
+    normal_count = sum(
+        1 for item in results
+        if _stored_verify_status(item) in {"VERIFIED_GOOD", "VERIFIED_OK"}
+    )
+    manual_count = len(results) - normal_count
     total = len(results)
     page_count = max(1, (total + RESULTS_PAGE_SIZE - 1) // RESULTS_PAGE_SIZE)
     page = max(0, min(page, page_count - 1))
@@ -342,7 +436,11 @@ def build_results_page(req_id: int, results: list[SearchResult], rejected_auto_c
 
     lines = [
         f"📦 <b>Найденные варианты (заявка #{req_id})</b>",
-        f"Страница {page + 1} из {page_count}. Нормальных: {total}",
+        (
+            f"Страница {page + 1} из {page_count}. Проверенных хороших: {normal_count}"
+            if normal_count
+            else f"Страница {page + 1} из {page_count}. Проверенных хороших: 0. Требуют ручной проверки: {manual_count}"
+        ),
     ]
     if rejected_auto_count:
         lines.append(f"Автоматически отклонено: {rejected_auto_count}")
@@ -477,6 +575,11 @@ def format_alice_card(sr: SearchResult, idx: int) -> str:
     lines.append(f"<b>Название:</b> {html.escape(sr.title or 'не указано')}")
     lines.append(f"<b>Цена:</b> {format_price(sr.price) if sr.price else 'уточнить'}")
     lines.append(f"<b>Магазин:</b> {html.escape(sr.source or 'не указан')}")
+    facts = _parse_facts(getattr(sr, "facts_json", ""))
+    lines.append(f"<b>Проверка:</b> {html.escape(_verify_status_label(_stored_verify_status(sr)))}")
+    why_not_good = str(facts.get("why_not_verified_good") or "").strip()
+    if why_not_good:
+        lines.append(f"<b>Почему не GOOD:</b> {html.escape(_clip_text(why_not_good, 180))}")
     if _link_status(sr.url) == "✅ есть":
         safe_url = html.escape(sr.url, quote=True)
         lines.append(f'<b>Ссылка:</b> <a href="{safe_url}">открыть</a>')

@@ -3,7 +3,16 @@
 Поиск никогда не считает ссылку на страницу поиска товаром. Если источники
 недоступны, диагностическая информация и ручные ссылки сохраняются отдельно.
 """
+
+   
 from __future__ import annotations
+
+from app.search_policy import (
+    is_normal_candidate,
+    normalize_for_admin_save,
+    should_save_for_admin,
+    summarize_saved_statuses,
+)
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -15,12 +24,61 @@ from typing import Any, Iterable, Optional
 from urllib.parse import urlparse, urlunparse, urlencode
 
 import requests
+SPEC_NEAR_PRICE_RE = re.compile(
+    r"""
+    (
+        ram|озу|оператив|оперативная|память|
+        ssd|hdd|emmc|nvme|накопитель|
+        gb|гб|tb|тб|
+        mah|мач|мАч|
+        hz|гц|
+        kg|кг|
+        дюйм|дюймов|inch|
+        1920|1080|1440|2160|3840|
+        full\s*hd|uhd|4k|2k
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _looks_like_spec_number(text: str, start: int, end: int) -> bool:
+    if not text:
+        return False
+
+    window = text[max(0, start - 40): min(len(text), end + 40)].lower()
+
+    if SPEC_NEAR_PRICE_RE.search(window):
+        return True
+
+    if re.search(r"\d+\s*[xх]\s*\d+", window):
+        return True
+
+    if re.search(r"\d+\s*-\s*\d+\s*(гц|hz)", window):
+        return True
+
+    return False
+
+
+def _too_low_for_category(price: int, category: str = "") -> bool:
+    category = (category or "").lower()
+
+    min_prices = {
+        "phone": 3000,
+        "laptop": 10000,
+        "tv": 5000,
+        "chair": 1000,
+        "headphones": 300,
+    }
+
+    return price < min_prices.get(category, 100)
 
 from app.config import settings
 from app.candidate_verifier import (
     BAD_ENCODING,
     NEED_MANUAL_CHECK,
     NOT_PRODUCT_PAGE,
+    OVER_BUDGET_HARD,
     OVER_BUDGET_SOFT,
     PRICE_MISSING,
     REMOVED_LISTING,
@@ -28,6 +86,7 @@ from app.candidate_verifier import (
     VERIFIED_GOOD,
     VERIFIED_OK,
     VERIFY_BLOCKED,
+    WRONG_PRODUCT,
     detect_product_category,
     verify_candidate,
     verify_candidates,
@@ -53,6 +112,7 @@ from app.product_quality import (
     headphone_brand_quality as quality_headphone_brand_quality,
     headphone_feature_profile as quality_headphone_feature_profile,
     direct_product_quality_level as quality_direct_product_quality_level,
+    final_quality_gate as quality_final_quality_gate,
     final_product_quality_level as quality_final_product_quality_level,
 )
 from app.price_extractor import extract_price
@@ -1114,6 +1174,11 @@ def _apply_ranking_sanity(req: Request, candidate: ProductCandidate) -> None:
     if getattr(candidate, "product_quality_level", "") == "bad" and candidate.score > 40:
         candidate.score = 40
         candidate.score_cap_applied = candidate.score_cap_applied or "bad_quality:40"
+    final_cap = getattr(candidate, "final_quality_score_cap", None)
+    if final_cap is not None and candidate.score > float(final_cap):
+        candidate.score = float(final_cap)
+        reason = getattr(candidate, "final_quality_score_cap_reason", "") or "final_quality_gate"
+        candidate.score_cap_applied = candidate.score_cap_applied or f"final_quality_gate:{final_cap}:{reason}"
 
 
 def score_result(
@@ -1850,27 +1915,6 @@ def _dedupe_verified_candidates(req: Request, candidates: list[ProductCandidate]
     return result
 
 
-def _demote_verified_item(item: object, status: str, reason: str) -> None:
-    candidate = item.candidate
-    item.verify_status = status
-    item.keep_for_admin = True
-    if not getattr(item, "reason", ""):
-        item.reason = reason
-    risks = list(getattr(item, "risk_flags", []) or [])
-    risks.extend([reason, DIRECT_QUALITY_MANUAL_RISK])
-    item.risk_flags = list(dict.fromkeys(str(risk) for risk in risks if str(risk).strip()))
-    candidate.verify_status = status
-    candidate.why_not_verified_good = reason
-    _add_risk_flag(candidate, reason)
-    _add_risk_flag(candidate, DIRECT_QUALITY_MANUAL_RISK)
-    if status in {VERIFY_BLOCKED, NEED_MANUAL_CHECK}:
-        candidate.quality = QUALITY_WEAK
-        candidate.status = "WEAK_CANDIDATE"
-    elif status == VERIFIED_OK:
-        candidate.quality = QUALITY_OK
-        candidate.status = "CANDIDATE"
-
-
 def _apply_direct_retail_verified_sanity(req: Request, verified_items: list[object]) -> None:
     for item in verified_items:
         candidate = item.candidate
@@ -1889,54 +1933,95 @@ def _apply_direct_retail_verified_sanity(req: Request, verified_items: list[obje
         if weak_quality:
             _add_risk_flag(candidate, DIRECT_QUALITY_MANUAL_RISK)
             candidate.why_not_verified_good = "weak classification не подтверждает качество товара"
-        if item.verify_status != VERIFIED_GOOD:
-            continue
         if product_quality_level == "retail_new_for_used_request":
-            _demote_verified_item(item, NEED_MANUAL_CHECK, DIRECT_RETAIL_USED_RISK)
+            _add_risk_flag(candidate, DIRECT_RETAIL_USED_RISK)
+            candidate.why_not_verified_good = DIRECT_RETAIL_USED_RISK
         elif weak_quality:
-            _demote_verified_item(item, NEED_MANUAL_CHECK, DIRECT_QUALITY_MANUAL_RISK)
+            _add_risk_flag(candidate, DIRECT_QUALITY_MANUAL_RISK)
+            candidate.why_not_verified_good = DIRECT_QUALITY_MANUAL_RISK
         elif brand_quality == "unknown_headphone_brand":
-            _demote_verified_item(item, VERIFIED_OK, "бренд наушников не распознан")
+            candidate.product_quality_level = "unknown_brand"
+            _add_risk_flag(candidate, "бренд наушников не распознан")
+            candidate.why_not_verified_good = "бренд наушников не распознан"
 
 
-def _apply_final_product_quality_guard(req: Request, verified_items: list[object]) -> None:
+def _apply_category_product_quality(req: Request, verified_items: list[object]) -> None:
     for item in verified_items:
         candidate = item.candidate
         level, reason = _final_product_quality_level(req, candidate)
-        if not level:
-            continue
-        candidate.product_quality_level = level
-        if level == "bad":
-            _add_risk_flag(candidate, reason or BAD_PRODUCT_RISK)
-            candidate.why_not_verified_good = reason or BAD_PRODUCT_RISK
+        if level == "retail_new_for_used_request":
+            level = "weak"
+        if level:
+            candidate.product_quality_level = level
+        if reason:
+            candidate.why_not_verified_good = reason
+            _add_risk_flag(candidate, reason)
+
+        evidence = quality_final_quality_gate(candidate, req)
+        if evidence.product_quality_level:
+            candidate.product_quality_level = evidence.product_quality_level
+        if evidence.reason:
+            candidate.why_not_verified_good = evidence.reason
+            _add_risk_flag(candidate, evidence.reason)
+        if evidence.score_cap is not None:
+            candidate.final_quality_score_cap = evidence.score_cap
+            candidate.final_quality_score_cap_reason = evidence.reason or "category_quality"
+
+
+def _apply_final_search_policy(req: Request, verified_items: list[object]) -> None:
+    for item in verified_items:
+        candidate = item.candidate
+        budget_status = _candidate_budget_status(req, candidate)
+        policy_candidate = normalize_for_admin_save({
+            "title": candidate.title,
+            "url": candidate.url,
+            "source": candidate.source,
+            "price": getattr(item, "price", None) if getattr(item, "price", None) is not None else candidate.price,
+            "snippet": candidate.snippet,
+            "description": candidate.description,
+            "score": candidate.score,
+            "status": item.verify_status,
+            "verify_status": item.verify_status,
+            "product_quality_level": getattr(candidate, "product_quality_level", ""),
+            "budget_status": budget_status,
+            "risk_flags": list(getattr(item, "risk_flags", []) or []) + list(candidate.risk_flags or []),
+            "reasons": [
+                getattr(item, "reason", ""),
+                *list(getattr(item, "risk_flags", []) or []),
+                *list(candidate.risk_flags or []),
+            ],
+            "why_not_verified_good": getattr(candidate, "why_not_verified_good", ""),
+        })
+
+        status = str(policy_candidate.get("verify_status") or item.verify_status or "")
+        item.verify_status = status
+        candidate.verify_status = status
+        candidate.score = policy_candidate.get("score", candidate.score)
+        candidate.why_not_verified_good = policy_candidate.get(
+            "why_not_verified_good", candidate.why_not_verified_good,
+        )
+        candidate.risk_flags = list(dict.fromkeys(
+            list(candidate.risk_flags or []) + list(policy_candidate.get("reasons") or [])
+        ))
+        if policy_candidate.get("score_cap_applied"):
+            candidate.score_cap_applied = policy_candidate["score_cap_applied"]
+
+        if status in {WRONG_PRODUCT, NOT_PRODUCT_PAGE, UNAVAILABLE, REMOVED_LISTING, OVER_BUDGET_HARD, BAD_ENCODING}:
             candidate.quality = QUALITY_TRASH
             candidate.status = "REJECTED_AUTO"
-            item.keep_for_admin = False
-            if item.verify_status == VERIFIED_GOOD:
-                item.verify_status = NOT_PRODUCT_PAGE
-            if not getattr(item, "reason", ""):
-                item.reason = reason or BAD_PRODUCT_RISK
-            item.risk_flags = list(dict.fromkeys(list(getattr(item, "risk_flags", []) or []) + [reason or BAD_PRODUCT_RISK]))
-            continue
-        if level != "weak":
-            continue
-        _add_risk_flag(candidate, reason or DIRECT_QUALITY_MANUAL_RISK)
-        _add_risk_flag(candidate, DIRECT_QUALITY_MANUAL_RISK)
-        candidate.why_not_verified_good = reason or DIRECT_QUALITY_MANUAL_RISK
-        candidate.quality = QUALITY_WEAK
-        candidate.status = "WEAK_CANDIDATE"
-        if item.verify_status in {VERIFIED_GOOD, VERIFIED_OK, OVER_BUDGET_SOFT}:
-            item.verify_status = NEED_MANUAL_CHECK
-            candidate.verify_status = NEED_MANUAL_CHECK
-            item.keep_for_admin = True
+        elif status in {VERIFIED_GOOD, VERIFIED_OK}:
+            candidate.quality = QUALITY_GOOD if status == VERIFIED_GOOD else QUALITY_OK
+            candidate.status = "CANDIDATE"
         else:
-            candidate.verify_status = item.verify_status
-        if not getattr(item, "reason", ""):
-            item.reason = candidate.why_not_verified_good
-        item.risk_flags = list(dict.fromkeys(
-            list(getattr(item, "risk_flags", []) or []) + [candidate.why_not_verified_good, DIRECT_QUALITY_MANUAL_RISK]
-        ))
-
+            candidate.quality = QUALITY_WEAK
+            candidate.status = "WEAK_CANDIDATE"
+        item.keep_for_admin = should_save_for_admin(policy_candidate)
+        facts = dict(candidate.product_facts or {})
+        facts["verify_status"] = status
+        facts["why_not_verified_good"] = candidate.why_not_verified_good
+        facts["budget_status"] = budget_status
+        candidate.product_facts = facts
+        candidate.facts_json = json.dumps(facts, ensure_ascii=False)
 
 def _apply_verification(collection: SearchCollection, req: Request) -> None:
     candidates_to_verify = [
@@ -1946,7 +2031,8 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
     verified = verify_candidates(candidates_to_verify, req, limit=30)
     verified, playwright_summary = verify_with_playwright_fallback(verified, req)
     _apply_direct_retail_verified_sanity(req, verified)
-    _apply_final_product_quality_guard(req, verified)
+    _apply_category_product_quality(req, verified)
+    _apply_final_search_policy(req, verified)
     stats = collection.verify_stats
     stats["checked"] = len(verified)
     stats["playwright_used"] = playwright_summary.used
@@ -1959,21 +2045,18 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
     stats["manual_check_after_playwright"] = playwright_summary.manual_check
 
     kept: list[ProductCandidate] = []
-    manual_without_price: list[ProductCandidate] = []
     for item in verified:
         status = item.verify_status
         stats[status] = stats.get(status, 0) + 1
-        if item.keep_for_admin and item.candidate.price:
+        if item.keep_for_admin:
             kept.append(item.candidate)
-        elif item.keep_for_admin and status in {VERIFY_BLOCKED, NEED_MANUAL_CHECK} and getattr(item.candidate, "playwright_used", False):
-            manual_without_price.append(item.candidate)
         else:
             collection.verified_rejections.append(item)
 
-    if len(kept) < 3 and manual_without_price:
-        extra = manual_without_price[:3 - len(kept)]
-        kept.extend(extra)
-        stats["manual_check_saved_without_price"] = len(extra)
+    stats["manual_check_saved_without_price"] = sum(
+        1 for candidate in kept
+        if candidate.price is None and _verified_status(candidate) in {NEED_MANUAL_CHECK, VERIFY_BLOCKED, PRICE_MISSING}
+    )
 
     for candidate in kept:
         _apply_ranking_sanity(req, candidate)
@@ -2149,7 +2232,8 @@ def _run_compare_search(req: Request, candidates: list[ProductCandidate], attemp
                 if normalized_url in existing_urls:
                     continue
                 verified = verify_candidate(comp, req)
-                if not verified.keep_for_admin or not comp.price or _verified_status(comp) not in {VERIFIED_GOOD, VERIFIED_OK, OVER_BUDGET_SOFT, VERIFY_BLOCKED}:
+                _apply_universal_final_quality_gate(req, [verified])
+                if not verified.keep_for_admin or not comp.price or _verified_status(comp) not in {VERIFIED_GOOD, VERIFIED_OK}:
                     continue
                 existing_urls.add(normalized_url)
                 # Если цена ниже, чем у оригинального кандидата с тем же ключом
@@ -2208,7 +2292,7 @@ def run_product_search(req: Request, max_results: int = 15) -> dict:
             added += 1
 
     # Compare search: ищем ту же модель дешевле на других площадках
-    normal_candidates = [c for c in collection.candidates if c.quality in {QUALITY_GOOD, QUALITY_OK}]
+    normal_candidates = [c for c in collection.candidates if _verified_status(c) in {VERIFIED_GOOD, VERIFIED_OK}]
     compare_found = _run_compare_search(req, normal_candidates, collection.attempts)
     stats = collection.quality_stats
     stats["compare_total"] = len([a for a in collection.attempts if a.source.startswith("compare_")])
