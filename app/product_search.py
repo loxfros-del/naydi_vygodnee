@@ -170,6 +170,12 @@ class ProductCandidate:
     score_cap_applied: str = ""
     low_price_suspect: bool = False
     external_source: str = ""
+    verify_status: str = ""
+    product_quality_level: str = ""
+    brand_quality: str = ""
+    why_not_verified_good: str = ""
+    final_quality_score_cap: Optional[int] = None
+    final_quality_score_cap_reason: str = ""
     raw: dict[str, object] = field(default_factory=dict)
     created_at: str = ""
 
@@ -2261,6 +2267,17 @@ def _run_compare_search(req: Request, candidates: list[ProductCandidate], attemp
             status = "OK" if rows else "EMPTY"
             attempts.append(SearchAttemptData(f"compare_{source}", query, status, len(rows), kept))
     return found_cheaper
+
+
+def _apply_universal_final_quality_gate(req: Request, verified_items: list[object]) -> None:
+    """Применяет финальные проверки качества и политики к verified-объектам.
+
+    Используется в compare-поиске, где проверяется единственный кандидат,
+    минуя полный пайплайн ``_apply_verification``.
+    """
+    _apply_direct_retail_verified_sanity(req, verified_items)
+    _apply_category_product_quality(req, verified_items)
+    _apply_final_search_policy(req, verified_items)
 
 
 def run_product_search(req: Request, max_results: int = 15) -> dict:

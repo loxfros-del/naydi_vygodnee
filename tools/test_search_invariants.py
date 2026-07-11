@@ -9,11 +9,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.candidate_verifier import _extract_laptop_facts
+from app.candidate_verifier import PRICE_MISSING, VerifiedCandidate, _extract_laptop_facts
 from app.db import Request
 from app.price_extractor import extract_price
 from app.product_quality import final_product_quality_level, has_model_mismatch
-from app.product_search import ProductCandidate, _verification_rank
+from app.product_search import ProductCandidate, _apply_final_search_policy, _verification_rank
 from app.search_policy import (
     is_normal_candidate,
     normalize_for_admin_save,
@@ -82,6 +82,15 @@ class SearchInvariantTests(unittest.TestCase):
         candidate = policy_candidate(price=None)
         self.assertEqual(candidate["verify_status"], "PRICE_MISSING")
         self.assertTrue(should_save_for_admin(candidate))
+
+    def test_final_policy_keeps_price_missing_product_card(self) -> None:
+        req = request("наушники", budget="5000")
+        candidate = ProductCandidate(title="Наушники Sony WH-C510", url=PRODUCT_URL, price=None)
+        verified = VerifiedCandidate(candidate, PRICE_MISSING, price=None, keep_for_admin=False)
+        _apply_final_search_policy(req, [verified])
+        self.assertTrue(verified.keep_for_admin)
+        self.assertEqual(candidate.status, "WEAK_CANDIDATE")
+        self.assertEqual(candidate.product_facts["verify_status"], PRICE_MISSING)
 
     def test_price_missing_article_is_not_saved(self) -> None:
         candidate = policy_candidate(
