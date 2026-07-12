@@ -14,6 +14,8 @@ from bs4 import BeautifulSoup
 from app.net_client import fetch_http, get_domain_policy
 from app.config import settings
 from app.db import Request
+from app.category_registry import detect_category as detect_registry_category
+from app.category_facts import extract_category_facts
 
 
 VERIFIED_GOOD = "VERIFIED_GOOD"
@@ -582,18 +584,7 @@ def _availability_bool(availability: str) -> Optional[bool]:
 
 
 def _category_from_text(text: str) -> str:
-    lowered = (text or "").lower()
-    if any(word in lowered for word in ("ноутбук", "ноут", "laptop", "macbook")):
-        return "laptop"
-    if any(word in lowered for word in ("iphone", "айфон", "смартфон", "телефон")):
-        return "phone"
-    if any(word in lowered for word in ("наушник", "гарнитур", "headphone", "earbuds", "airpods")):
-        return "headphones"
-    if any(word in lowered for word in ("кресло", "стул", "chair")):
-        return "chair"
-    if any(word in lowered for word in ("телевизор", " smart tv", " tv ", " qled", " oled")):
-        return "tv"
-    return "unknown"
+    return detect_registry_category(text)
 
 
 def detect_product_category(req: Request, candidate: Any = None, text: str = "") -> str:
@@ -710,65 +701,21 @@ def extract_product_facts(
 ) -> dict[str, Any]:
     """Собирает структурированные факты товара без генерации описания."""
     soup_text = text or BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)
-    combined = _normalise_space(
-        " ".join([
-            title or getattr(candidate, "title", "") or "",
-            getattr(candidate, "snippet", "") or "",
-            soup_text[:6000],
-        ])
-    )
-    brand = _extract_brand(combined)
-    model, model_key = _extract_model(combined, brand)
-    diagonal = _extract_diagonal(combined, model_key)
-    resolution = _extract_resolution(combined)
-    refresh_rate = _extract_refresh_rate(combined)
-    hdmi = _extract_hdmi(combined)
-    matrix_type = _extract_matrix_type(combined)
-    smart_tv = _extract_smart_tv(combined)
-    os_name = _extract_os(combined)
-    rating, reviews_count = _extract_rating_reviews(combined)
+    identity_text = _normalise_space(title or getattr(candidate, "title", "") or "")
+    supplemental_text = _normalise_space(" ".join([
+        getattr(candidate, "title", "") or "",
+        getattr(candidate, "snippet", "") or "",
+        soup_text[:6000],
+    ]))
+    combined = _normalise_space(f"{identity_text} {supplemental_text}")
     actual_price = price if price is not None else getattr(candidate, "price", None)
     source = str(getattr(candidate, "source", "") or _source_from_url(getattr(candidate, "url", "")))
     url = str(getattr(candidate, "url", "") or "")
-    category = detect_product_category(req, candidate, combined)
-    if category != "tv":
-        category_facts: dict[str, Any] = {}
-        if category == "phone":
-            category_facts = _extract_phone_facts(combined)
-        elif category == "laptop":
-            category_facts = _extract_laptop_facts(combined)
-        elif category == "headphones":
-            category_facts = _extract_headphone_facts(combined)
-        elif category == "chair":
-            category_facts = _extract_chair_facts(combined)
-        return {
-            "category": category,
-            "brand": category_facts.get("brand", brand),
-            "model": category_facts.get("model", model),
-            "model_key": model_key,
-            "price": actual_price,
-            "store": source,
-            "url": url,
-            "available": _availability_bool(availability),
-            "availability_text": availability or "UNKNOWN",
-            "rating": rating,
-            "reviews_count": reviews_count,
-            "budget_status": _budget_status(actual_price, req),
-            "warnings": [],
-            **category_facts,
-        }
-    facts = {
-        "category": category,
-        "brand": brand,
-        "model": model,
-        "model_key": model_key,
-        "diagonal": diagonal,
-        "resolution": resolution,
-        "refresh_rate": refresh_rate,
-        "hdmi": hdmi,
-        "matrix_type": matrix_type,
-        "smart_tv": smart_tv,
-        "os": os_name,
+    category = detect_product_category(req, candidate, identity_text)
+    facts = extract_category_facts(category, identity_text, supplemental_text)
+    rating, reviews_count = _extract_rating_reviews(supplemental_text)
+    facts.update({
+        "model_key": facts.get("model", ""),
         "price": actual_price,
         "store": source,
         "url": url,
@@ -777,11 +724,19 @@ def extract_product_facts(
         "rating": rating,
         "reviews_count": reviews_count,
         "budget_status": _budget_status(actual_price, req),
-        "ps5_flags": [],
         "warnings": [],
-    }
-    if _is_ps5_tv_request(req):
+    })
+    if category == "tv":
+        facts["smart_tv"] = _extract_smart_tv(combined)
+        facts["os"] = facts.get("smart_platform", "") or _extract_os(combined)
+        facts.setdefault("matrix_type", facts.get("panel", ""))
+        facts["ps5_flags"] = []
+    if category == "tv" and _is_ps5_tv_request(req):
         lowered = combined.lower()
+        resolution = str(facts.get("resolution") or "")
+        refresh_rate = str(facts.get("refresh_rate") or "")
+        hdmi = str(facts.get("hdmi") or "")
+        matrix_type = str(facts.get("matrix_type") or facts.get("panel") or "")
         if resolution == "4K":
             facts["ps5_flags"].append("4K")
         if refresh_rate in {"120 Гц", "144 Гц"}:
@@ -800,7 +755,8 @@ def extract_product_facts(
             facts["warnings"].append("HDMI 2.1 не подтверждён")
         if resolution == "Full HD":
             facts["warnings"].append("Full HD слабый вариант для PS5")
-    facts["ps5_flags"] = list(dict.fromkeys(facts["ps5_flags"]))
+    if "ps5_flags" in facts:
+        facts["ps5_flags"] = list(dict.fromkeys(facts["ps5_flags"]))
     facts["warnings"] = list(dict.fromkeys(facts["warnings"]))
     return facts
 
@@ -890,6 +846,9 @@ def _apply_verified(candidate: Any, verified: VerifiedCandidate) -> VerifiedCand
         candidate.price = verified.price
         if not getattr(candidate, "price_source", ""):
             candidate.price_source = "requests" if verified.html_loaded else "search"
+        if verified.html_loaded:
+            candidate.price_confidence = "high"
+            candidate.price_evidence = "structured_page"
     candidate.availability = verified.availability
     if verified.facts:
         candidate.product_facts = verified.facts

@@ -13,6 +13,7 @@ from app.search_policy import (
     should_save_for_admin,
     summarize_saved_statuses,
 )
+from app.query_planner import plan_search_queries
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -20,7 +21,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urlparse, urlunparse, urlencode
 
 import requests
@@ -87,6 +88,7 @@ from app.candidate_verifier import (
     VERIFIED_OK,
     VERIFY_BLOCKED,
     WRONG_PRODUCT,
+    VerifiedCandidate,
     detect_product_category,
     verify_candidate,
     verify_candidates,
@@ -99,7 +101,7 @@ from app.db import (
     replace_manual_search_links,
 )
 from app.net_client import FetchResult, fetch_http
-from app.playwright_verifier import verify_with_playwright_fallback
+from app.playwright_verifier import PlaywrightFallbackSummary, verify_with_playwright_fallback
 from app.price_guard import (
     TOO_CHEAP_FOR_BUDGET_RISK,
     apply_price_rank_penalties,
@@ -115,7 +117,11 @@ from app.product_quality import (
     final_quality_gate as quality_final_quality_gate,
     final_product_quality_level as quality_final_product_quality_level,
 )
-from app.price_extractor import extract_price
+from app.category_quality import evaluate_category_quality
+from app.search_evidence import assess_product_card, assess_source_trust
+from app.ranking import rank_candidate
+from app.candidate_dedupe import dedupe_candidates, diversify_top_sources
+from app.price_extractor import extract_price, extract_price_evidence
 from app.search_links import build_search_query, generate_search_links
 from app.sources.direct_retail_source import (
     CITILINK_DIRECT_SOURCE,
@@ -164,6 +170,8 @@ class ProductCandidate:
     facts_json: str = ""
     price_source: str = ""
     price_reliability: str = "none"
+    price_confidence: str = "none"
+    price_evidence: str = ""
     price_rejected_reason: str = ""
     price_from_budget_suspect: bool = False
     bad_price_context: bool = False
@@ -171,6 +179,17 @@ class ProductCandidate:
     low_price_suspect: bool = False
     external_source: str = ""
     verify_status: str = ""
+    exact_match_status: str = ""
+    exact_match_reason: str = ""
+    product_card_confidence: str = "none"
+    product_card_reason: str = ""
+    source_confidence: str = "low"
+    verification_confidence: str = "none"
+    category_quality_score: float = 0.0
+    category_quality_reasons: list[str] = field(default_factory=list)
+    score_breakdown: dict[str, float] = field(default_factory=dict)
+    score_raw: float = 0.0
+    score_cap_reasons: list[str] = field(default_factory=list)
     product_quality_level: str = ""
     brand_quality: str = ""
     why_not_verified_good: str = ""
@@ -467,71 +486,9 @@ def _headphone_brand_queries(budget: str = "") -> list[str]:
 
 
 def generate_search_queries(req: Request) -> list[str]:
-    """Создаёт пачку запросов, включая целевые site:-запросы.
-
-    Для телевизора для PS5 список намеренно предсказуем: так его удобно
-    проверять из ``tools/test_search.py`` и в отладке бота.
-    """
-    product = _request_product(req)
-    budget = str(req.budget or "").strip()
-    city = str(req.city or "").strip()
-    # Если парсер уже собрал чистый запрос — используем его как основной
-    clean = str(req.clean_search_query or "").strip()
-    base = clean or build_search_query(
-        product,
-        req.use_case or req.purpose,
-        budget,
-        city,
-        req.important_criteria or req.criteria,
-    )
-
-    queries: list[str] = []
-    if _is_ps5_tv(req):
-        limit = budget or "45000"
-        # Если есть чистый запрос, начинаем с него — он точнее шаблонных вариаций
-        if clean:
-            queries = [clean]
-        queries += [
-            f"телевизор 4K для PS5 до {limit}" + (f" {city}" if city else ""),
-            f"телевизор 43 4K Smart TV до {limit}",
-            f"телевизор 55 4K Smart TV до {limit}",
-            f"телевизор 4K HDMI PS5 до {limit}",
-            f"телевизор TCL 43 4K до {limit}",
-            f"телевизор Haier 43 4K до {limit}",
-            f"телевизор Hisense 43 4K до {limit}",
-            f"телевизор Tuvio 55 4K до {limit}",
-        ]
-    else:
-        queries = [base]
-        if budget:
-            queries.extend([f"{product} до {budget}", f"{product} купить до {budget}"])
-        if _is_headphones_request(req) and (_budget_value(req) or 0) >= 3_000:
-            brand_queries = _headphone_brand_queries(budget)
-            queries[1:1] = brand_queries[:2]
-            queries.extend(brand_queries[2:])
-        if req.important_criteria or req.criteria:
-            queries.append(f"{product} {req.important_criteria or req.criteria}")
-        if city:
-            queries.append(f"{product} купить {city}")
-
-    # Site-поиск делает отдельный адаптер, но запросы показываем в debug.
-    site_base = f"{product}"
-    if _is_ps5_tv(req):
-        site_base += " 4K PS5"
-    elif req.use_case or req.purpose:
-        site_base += f" {req.use_case or req.purpose}"
-    if budget:
-        site_base += f" до {budget}"
-    queries.extend(f"site:{source.domains[0]} {site_base}" for source in _enabled_site_sources())
-
-    unique: list[str] = []
-    seen: set[str] = set()
-    for query in queries:
-        normalized = " ".join(query.split())
-        if normalized.lower() not in seen:
-            seen.add(normalized.lower())
-            unique.append(normalized)
-    return unique
+    """Совместимая строковая оболочка над typed query planner."""
+    domains = [source.domains[0] for source in _enabled_site_sources() if source.domains]
+    return [item.text for item in plan_search_queries(req, max_queries=14, site_domains=domains)]
 
 
 def _source_from_url(url: str, default: str = "generic_web") -> str:
@@ -1092,56 +1049,7 @@ def _candidate_budget_status(req: Request, candidate: ProductCandidate) -> str:
 
 
 def _candidate_rank_score(req: Request, candidate: ProductCandidate) -> float:
-    status = _verified_status(candidate)
-    score = {
-        VERIFIED_GOOD: 100.0,
-        VERIFIED_OK: 70.0,
-        NEED_MANUAL_CHECK: 50.0,
-        VERIFY_BLOCKED: 50.0,
-        OVER_BUDGET_SOFT: 35.0,
-    }.get(status, 20.0)
-
-    price = getattr(candidate, "price", None)
-    budget_status = _candidate_budget_status(req, candidate)
-    if price is None:
-        score -= 40
-    else:
-        score += 30
-    if budget_status == "IN_BUDGET":
-        score += 20
-    elif budget_status == OVER_BUDGET_SOFT:
-        score -= 10
-    elif budget_status == "OVER_BUDGET_HARD":
-        score -= 40
-
-    if candidate.source in RANK_TRUSTED_SOURCES:
-        score += 10
-    elif candidate.source == "avito_search":
-        score += 5
-
-    brand_quality = getattr(candidate, "brand_quality", "") or _headphone_brand_quality(req, candidate)
-    if brand_quality == "known_headphone_brand":
-        score += 8
-    elif brand_quality == "unknown_headphone_brand" and _is_direct_retail_candidate(candidate):
-        score -= 15
-    headphone_profile = _headphone_feature_profile(req, candidate)
-    if headphone_profile == "wireless_good":
-        score += 12
-    elif headphone_profile == "wired_basic":
-        score -= 35
-
-    if _has_risk_flag(candidate, LOW_PRICE_RISK):
-        score = min(score - 50, 80)
-    if _has_risk_flag(candidate, CITY_MISMATCH_RISK):
-        score = min(score - 50, 75)
-    if status in {NOT_PRODUCT_PAGE, UNAVAILABLE, REMOVED_LISTING, PRICE_MISSING}:
-        score -= 80 if status != PRICE_MISSING else 40
-    if _has_risk_flag(candidate, GENERIC_TITLE_RISK):
-        score -= 30
-    if not candidate.title or not candidate.url:
-        score -= 80
-
-    return max(0.0, min(200.0, score))
+    return rank_candidate(req, candidate).score
 
 
 def _apply_ranking_sanity(req: Request, candidate: ProductCandidate) -> None:
@@ -1167,24 +1075,22 @@ def _apply_ranking_sanity(req: Request, candidate: ProductCandidate) -> None:
 
     if _has_risk_flag(candidate, LOW_PRICE_RISK) or _has_risk_flag(candidate, CITY_MISMATCH_RISK):
         candidate.quality = QUALITY_WEAK if candidate.quality != QUALITY_TRASH else candidate.quality
-    candidate.score = apply_price_rank_penalties(candidate, _candidate_rank_score(req, candidate), verify_status=_verified_status(candidate))
-    if _has_risk_flag(candidate, DIRECT_QUALITY_MANUAL_RISK) and candidate.score > 80:
-        candidate.score = 80
-        candidate.score_cap_applied = "manual_quality:80"
-    if _has_risk_flag(candidate, DIRECT_RETAIL_USED_RISK) and candidate.score > 55:
-        candidate.score = 55
-        candidate.score_cap_applied = "retail_new_for_used_request:55"
-    if getattr(candidate, "product_quality_level", "") == "weak" and candidate.score > 80:
-        candidate.score = 80
-        candidate.score_cap_applied = candidate.score_cap_applied or "weak_quality:80"
-    if getattr(candidate, "product_quality_level", "") == "bad" and candidate.score > 40:
-        candidate.score = 40
-        candidate.score_cap_applied = candidate.score_cap_applied or "bad_quality:40"
-    final_cap = getattr(candidate, "final_quality_score_cap", None)
-    if final_cap is not None and candidate.score > float(final_cap):
-        candidate.score = float(final_cap)
-        reason = getattr(candidate, "final_quality_score_cap_reason", "") or "final_quality_gate"
-        candidate.score_cap_applied = candidate.score_cap_applied or f"final_quality_gate:{final_cap}:{reason}"
+    ranking = rank_candidate(req, candidate)
+    candidate.score = ranking.score
+    candidate.score_raw = ranking.raw_score
+    candidate.score_breakdown = dict(ranking.breakdown)
+    candidate.score_cap_reasons = list(ranking.cap_reasons)
+    candidate.score_cap_applied = (
+        f"{'+'.join(ranking.cap_reasons)}:{ranking.score_cap}"
+        if ranking.score_cap is not None and ranking.cap_reasons else ""
+    )
+    facts = dict(candidate.product_facts or {})
+    facts["score_breakdown"] = candidate.score_breakdown
+    facts["score_raw"] = candidate.score_raw
+    facts["score_cap"] = ranking.score_cap
+    facts["score_cap_reasons"] = candidate.score_cap_reasons
+    candidate.product_facts = facts
+    candidate.facts_json = json.dumps(facts, ensure_ascii=False)
 
 
 def score_result(
@@ -1404,8 +1310,18 @@ def _candidate_from_row(row: dict, req: Request, default_source: str) -> Optiona
     if isinstance(price, int) and min_price <= price <= max_price:
         if not price_source:
             price_source = "api" if source == "wildberries" else "search_result"
+        price_result = extract_price_evidence(
+            f"{title} {snippet}",
+            min_price=min_price,
+            max_price=max_price,
+            structured_price=price,
+            price_source=price_source,
+        )
     else:
-        price = extract_price(f"{title} {snippet}", min_price=min_price, max_price=max_price)
+        price_result = extract_price_evidence(
+            f"{title} {snippet}", min_price=min_price, max_price=max_price,
+        )
+        price = price_result.price
         if not price_source:
             price_source = "search_snippet" if price is not None else ""
     rating = row.get("rating")
@@ -1439,11 +1355,17 @@ def _candidate_from_row(row: dict, req: Request, default_source: str) -> Optiona
         description=str(row.get("description") or snippet or "").strip()[:500],
         price_source=price_source,
         price_reliability=explicit_reliability or "none",
+        price_confidence=price_result.confidence,
+        price_evidence=price_result.evidence,
         created_at=datetime.now().isoformat(),
     )
     normalize_price_candidate(candidate, req, raw_price=raw_price, price_source=price_source, text=f"{title} {snippet}")
     if explicit_reliability:
         candidate.price_reliability = explicit_reliability if candidate.price is not None else "none"
+    elif candidate.price is not None:
+        candidate.price_reliability = candidate.price_confidence
+    else:
+        candidate.price_confidence = "none"
     for attr in ("price_rejected_reason", "price_from_budget_suspect", "bad_price_context"):
         if row.get(attr) and not getattr(candidate, attr, None):
             setattr(candidate, attr, row.get(attr))
@@ -1855,7 +1777,7 @@ def _model_dedupe_key(candidate: ProductCandidate) -> str:
     return " ".join(words[:6]) or candidate.url.lower()
 
 
-def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, int, int, float, int, int, int, int, int, str]:
+def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[object, ...]:
     order = {
         VERIFIED_GOOD: 0,
         VERIFIED_OK: 1,
@@ -1888,37 +1810,48 @@ def _verification_rank(req: Request, candidate: ProductCandidate) -> tuple[int, 
         feature_order = -1
     elif headphone_profile == "wired_basic":
         feature_order = 2
+    exact_status = str(getattr(candidate, "exact_match_status", "") or "")
+    fatal_order = int(
+        exact_status in {"MODEL_MISMATCH", "ACCESSORY"}
+        or _verified_status(candidate) in {WRONG_PRODUCT, UNAVAILABLE, REMOVED_LISTING, NOT_PRODUCT_PAGE}
+    )
+    source_order = {"high": 0, "medium": 1, "low": 2}.get(str(getattr(candidate, "source_confidence", "") or ""), 3)
     return (
-        low_price_order,
-        brand_order,
-        feature_order,
-        -float(candidate.score or 0),
-        risk_order,
+        fatal_order,
         order.get(_verified_status(candidate), 9),
         1 if candidate.price is None else 0,
         budget_order,
+        -float(candidate.score or 0),
+        low_price_order,
+        risk_order,
+        brand_order,
+        feature_order,
+        source_order,
         price or 10_000_000,
         candidate.title.lower(),
     )
 
 
 def _dedupe_verified_candidates(req: Request, candidates: list[ProductCandidate]) -> list[ProductCandidate]:
-    grouped: dict[str, list[ProductCandidate]] = {}
-    for candidate in candidates:
-        grouped.setdefault(_model_dedupe_key(candidate), []).append(candidate)
-
-    result: list[ProductCandidate] = []
-    for items in grouped.values():
-        items.sort(key=lambda item: _verification_rank(req, item))
-        kept_for_group = items[:2]
-        hidden = max(0, len(items) - len(kept_for_group))
-        if hidden:
-            kept_for_group[0].risk_flags = list(dict.fromkeys(
-                list(kept_for_group[0].risk_flags) + [f"скрыто дублей: {hidden}"]
-            ))
-        result.extend(kept_for_group)
-    result.sort(key=lambda item: _verification_rank(req, item))
-    return result
+    result = dedupe_candidates(candidates, sort_key=lambda item: _verification_rank(req, item))
+    hidden = max(0, len(candidates) - len(result))
+    if hidden and result:
+        result[0].risk_flags = list(dict.fromkeys(
+            list(result[0].risk_flags) + [f"скрыто дублей: {hidden}"]
+        ))
+    status_tier = {
+        VERIFIED_GOOD: 0,
+        VERIFIED_OK: 1,
+        NEED_MANUAL_CHECK: 2,
+        VERIFY_BLOCKED: 2,
+        PRICE_MISSING: 3,
+        OVER_BUDGET_SOFT: 4,
+    }
+    return diversify_top_sources(
+        result,
+        tier=lambda item: status_tier.get(_verified_status(item), 9),
+        limit=3,
+    )
 
 
 def _apply_direct_retail_verified_sanity(req: Request, verified_items: list[object]) -> None:
@@ -1954,6 +1887,9 @@ def _apply_direct_retail_verified_sanity(req: Request, verified_items: list[obje
 def _apply_category_product_quality(req: Request, verified_items: list[object]) -> None:
     for item in verified_items:
         candidate = item.candidate
+        card = assess_product_card(candidate)
+        candidate.product_card_confidence = card.confidence
+        candidate.product_card_reason = card.reason
         level, reason = _final_product_quality_level(req, candidate)
         if level == "retail_new_for_used_request":
             level = "weak"
@@ -1964,6 +1900,8 @@ def _apply_category_product_quality(req: Request, verified_items: list[object]) 
             _add_risk_flag(candidate, reason)
 
         evidence = quality_final_quality_gate(candidate, req)
+        candidate.exact_match_status = evidence.exact_match_status
+        candidate.exact_match_reason = evidence.exact_match_reason
         if evidence.product_quality_level:
             candidate.product_quality_level = evidence.product_quality_level
         if evidence.reason:
@@ -1973,15 +1911,35 @@ def _apply_category_product_quality(req: Request, verified_items: list[object]) 
             candidate.final_quality_score_cap = evidence.score_cap
             candidate.final_quality_score_cap_reason = evidence.reason or "category_quality"
 
+        category_quality = evaluate_category_quality(req, candidate)
+        candidate.category_quality_score = category_quality.score
+        candidate.category_quality_reasons = list(category_quality.reasons) + list(category_quality.missing_required)
+        level_order = {"": 0, "good": 1, "ok": 2, "weak": 3, "bad": 4}
+        current_level = str(getattr(candidate, "product_quality_level", "") or "")
+        if level_order.get(category_quality.level, 0) > level_order.get(current_level, 0):
+            candidate.product_quality_level = category_quality.level
+        for quality_reason in candidate.category_quality_reasons:
+            _add_risk_flag(candidate, quality_reason)
+        if category_quality.reasons and not candidate.why_not_verified_good:
+            candidate.why_not_verified_good = category_quality.reasons[0]
+        if category_quality.score_cap is not None:
+            existing_cap = getattr(candidate, "final_quality_score_cap", None)
+            candidate.final_quality_score_cap = min(existing_cap, category_quality.score_cap) if existing_cap is not None else category_quality.score_cap
+            candidate.final_quality_score_cap_reason = candidate.final_quality_score_cap_reason or "category_quality"
+
 
 def _apply_final_search_policy(req: Request, verified_items: list[object]) -> None:
     for item in verified_items:
         candidate = item.candidate
+        trust = assess_source_trust(candidate, item.verify_status)
+        candidate.source_confidence = trust.source_confidence
+        candidate.verification_confidence = trust.verification_confidence
         budget_status = _candidate_budget_status(req, candidate)
         policy_candidate = normalize_for_admin_save({
             "title": candidate.title,
             "url": candidate.url,
             "source": candidate.source,
+            "price_source": candidate.price_source,
             "price": getattr(item, "price", None) if getattr(item, "price", None) is not None else candidate.price,
             "snippet": candidate.snippet,
             "description": candidate.description,
@@ -1997,6 +1955,9 @@ def _apply_final_search_policy(req: Request, verified_items: list[object]) -> No
                 *list(candidate.risk_flags or []),
             ],
             "why_not_verified_good": getattr(candidate, "why_not_verified_good", ""),
+            "product_card_confidence": getattr(candidate, "product_card_confidence", "none"),
+            "source_confidence": trust.source_confidence,
+            "verification_confidence": trust.verification_confidence,
         })
 
         status = str(policy_candidate.get("verify_status") or item.verify_status or "")
@@ -2026,16 +1987,80 @@ def _apply_final_search_policy(req: Request, verified_items: list[object]) -> No
         facts["verify_status"] = status
         facts["why_not_verified_good"] = candidate.why_not_verified_good
         facts["budget_status"] = budget_status
+        facts["price_confidence"] = getattr(candidate, "price_confidence", "none")
+        facts["price_evidence"] = getattr(candidate, "price_evidence", "")
+        facts["exact_match"] = getattr(candidate, "exact_match_status", "")
+        facts["exact_match_reason"] = getattr(candidate, "exact_match_reason", "")
+        facts["product_card_confidence"] = getattr(candidate, "product_card_confidence", "none")
+        facts["product_card_reason"] = getattr(candidate, "product_card_reason", "")
+        facts["source_confidence"] = getattr(candidate, "source_confidence", "low")
+        facts["verification_confidence"] = getattr(candidate, "verification_confidence", "none")
+        facts["category_quality_score"] = getattr(candidate, "category_quality_score", 0.0)
+        facts["category_quality_reasons"] = list(getattr(candidate, "category_quality_reasons", []) or [])
         candidate.product_facts = facts
         candidate.facts_json = json.dumps(facts, ensure_ascii=False)
 
-def _apply_verification(collection: SearchCollection, req: Request) -> None:
+def _manual_verification_items(candidates: list[ProductCandidate]) -> list[VerifiedCandidate]:
+    """Safe no-page-verification fallback for benchmark fast/none modes."""
+    result: list[VerifiedCandidate] = []
+    for candidate in candidates:
+        status = PRICE_MISSING if candidate.price is None else NEED_MANUAL_CHECK
+        reason = "цена не подтверждена" if status == PRICE_MISSING else "страница не проверялась"
+        result.append(VerifiedCandidate(
+            candidate,
+            status,
+            price=candidate.price,
+            title=candidate.title,
+            availability=candidate.availability,
+            reason=reason,
+            risk_flags=[reason],
+            facts=dict(candidate.product_facts or {}),
+            keep_for_admin=True,
+        ))
+    return result
+
+
+def verification_candidate_limit(mode: str) -> int:
+    normalized = mode.lower().strip()
+    if normalized == "full":
+        return 30
+    if normalized == "fast":
+        return 3
+    if normalized == "none":
+        return 0
+    raise ValueError(f"unknown verification mode: {mode}")
+
+
+def _apply_verification(
+    collection: SearchCollection,
+    req: Request,
+    *,
+    verification_mode: str = "full",
+) -> None:
     candidates_to_verify = [
         item for item in collection.candidates
         if item.status != "REJECTED_AUTO" and item.quality != QUALITY_TRASH
     ]
-    verified = verify_candidates(candidates_to_verify, req, limit=30)
-    verified, playwright_summary = verify_with_playwright_fallback(verified, req)
+    mode = verification_mode.lower().strip()
+    verification_limit = verification_candidate_limit(mode)
+
+    if mode == "none":
+        verified = _manual_verification_items(candidates_to_verify)
+        playwright_summary = PlaywrightFallbackSummary(
+            skipped=len(candidates_to_verify),
+            skipped_reason={"verification_none": len(candidates_to_verify)},
+        )
+    else:
+        verified = verify_candidates(candidates_to_verify, req, limit=verification_limit)
+        if mode == "full":
+            verified, playwright_summary = verify_with_playwright_fallback(verified, req)
+        else:
+            playwright_summary = PlaywrightFallbackSummary(
+                skipped=max(0, len(candidates_to_verify) - len(verified)),
+                skipped_reason={"fast_browser_skipped": len(verified)},
+            )
+        if mode == "fast" and len(candidates_to_verify) > verification_limit:
+            verified.extend(_manual_verification_items(candidates_to_verify[verification_limit:]))
     _apply_direct_retail_verified_sanity(req, verified)
     _apply_category_product_quality(req, verified)
     _apply_final_search_policy(req, verified)
@@ -2116,10 +2141,93 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
     ))
 
 
-def collect_product_candidates(req: Request, max_results: int = 15) -> SearchCollection:
-    """Собирает кандидатов без записи в БД; удобно для консольного теста."""
+def collect_product_candidates(
+    req: Request,
+    max_results: int = 15,
+    *,
+    verification_mode: str = "full",
+    source_timeout_seconds: float | None = None,
+    source_observer: Callable[[SearchAttemptData, list[ProductCandidate]], None] | None = None,
+    stage_observer: Callable[[str, SearchCollection, dict[str, Any]], None] | None = None,
+) -> SearchCollection:
+    """Collect candidates with optional benchmark-only stage callbacks.
+
+    Defaults preserve the Telegram application's full verification behavior.
+    """
     collection = SearchCollection()
-    queries = generate_search_queries(req)
+    source_stage_started = time.monotonic()
+    source_deadline = (
+        source_stage_started + max(0.0, source_timeout_seconds)
+        if source_timeout_seconds is not None else None
+    )
+
+    def emit_stage(stage: str, **details: Any) -> None:
+        if stage_observer is None:
+            return
+        try:
+            stage_observer(stage, collection, details)
+        except Exception as exc:  # observer must never break production search
+            logger.debug("Автопоиск: stage observer %s failed: %s", stage, exc)
+
+    def emit_source(attempt: SearchAttemptData, candidates: list[ProductCandidate]) -> None:
+        if source_observer is None:
+            return
+        try:
+            source_observer(attempt, candidates)
+        except Exception as exc:  # source cache diagnostics are best effort
+            logger.debug("Автопоиск: source observer %s failed: %s", attempt.source, exc)
+
+    blocked_sources: set[str] = set()
+
+    def run_source_step(source: str, query: str, loader: Callable[[], None]) -> None:
+        before_attempts = len(collection.attempts)
+        before_candidates = len(collection.raw_candidates)
+        started = time.monotonic()
+        if source in blocked_sources:
+            attempt = SearchAttemptData(source, query, "SKIPPED_BLOCKED", error_text="same source was blocked earlier in this run")
+            collection.attempts.append(attempt)
+            emit_source(attempt, [])
+            emit_stage("collect_source_results", source=source, query=query, duration_ms=0, status=attempt.status)
+            return
+        if source_deadline is not None and started >= source_deadline:
+            attempt = SearchAttemptData(source, query, "SOURCE_TIMEOUT", error_text="source collection budget exhausted")
+            collection.attempts.append(attempt)
+            emit_source(attempt, [])
+            emit_stage("collect_source_results", source=source, query=query, duration_ms=0, status=attempt.status)
+            return
+        emit_stage("source_start", source=source, query=query)
+        loader()
+        duration_ms = int((time.monotonic() - started) * 1000)
+        attempts = collection.attempts[before_attempts:]
+        candidates = collection.raw_candidates[before_candidates:]
+        if not attempts:
+            attempts = [SearchAttemptData(source, query, "ERROR", error_text="source returned no diagnostic")]
+            collection.attempts.extend(attempts)
+        for attempt in attempts:
+            attempt.duration_ms = duration_ms
+            source_candidates = [item for item in candidates if item.source == attempt.source]
+            emit_source(attempt, source_candidates or candidates)
+            attempt_text = f"{attempt.status} {attempt.error_text}".lower()
+            if any(marker in attempt_text for marker in ("401", "403", "429", "498", "captcha", "rate_limit", "blocked")):
+                blocked_sources.add(source)
+        emit_stage(
+            "collect_source_results",
+            source=source,
+            query=query,
+            duration_ms=duration_ms,
+            candidate_count=len(collection.raw_candidates),
+            attempt_count=len(collection.attempts),
+        )
+
+    emit_stage("parse", request_product=req.product_name or req.product)
+    site_domains = [source.domains[0] for source in _enabled_site_sources() if source.domains]
+    query_plan = plan_search_queries(req, max_queries=14, site_domains=site_domains)
+    queries = [item.text for item in query_plan]
+    emit_stage(
+        "generate_queries",
+        queries=queries,
+        query_plan=[{"query": item.text, "priority": item.priority, "reason": item.reason, "kind": item.kind} for item in query_plan],
+    )
     seen_urls: set[str] = set()
     generic = GenericSearchAdapter()
 
@@ -2127,37 +2235,55 @@ def collect_product_candidates(req: Request, max_results: int = 15) -> SearchCol
     if _is_generic_enabled():
         generic_queries = [query for query in queries if not query.startswith("site:")]
         for query in generic_queries[:3]:
-            _collect_from_adapter(generic, req, "generic_web", query, 5, collection, seen_urls)
+            run_source_step(
+                "generic_web", query,
+                lambda query=query: _collect_from_adapter(generic, req, "generic_web", query, 5, collection, seen_urls),
+            )
 
     wb_query = (req.clean_search_query or "").strip() or build_search_query(
         _request_product(req), req.use_case or req.purpose, req.budget, "", req.important_criteria or req.criteria,
     )
     wb_source = next((source for source in SEARCH_SOURCES if source.key == "wildberries"), None)
     if wb_source and _is_source_enabled(wb_source):
-        _collect_from_adapter(WildberriesAdapter(), req, "wildberries", wb_query, 10, collection, seen_urls)
+        run_source_step(
+            "wildberries", wb_query,
+            lambda: _collect_from_adapter(WildberriesAdapter(), req, "wildberries", wb_query, 10, collection, seen_urls),
+        )
 
     site_adapter = SearchBySiteAdapter()
     for query in (query for query in queries if query.startswith("site:")):
         domain_match = re.match(r"site:([^\s]+)", query)
         source = MARKETPLACE_SOURCES.get(domain_match.group(1), "generic_web") if domain_match else "generic_web"
-        _collect_from_adapter(site_adapter, req, source, query, 6, collection, seen_urls)
+        run_source_step(
+            source, query,
+            lambda source=source, query=query: _collect_from_adapter(site_adapter, req, source, query, 6, collection, seen_urls),
+        )
 
     if settings.DIRECT_RETAIL_ENABLED:
-        direct_query = (req.clean_search_query or "").strip() or wb_query
-        _collect_from_direct_retail(req, direct_query, collection, seen_urls)
-        if _is_headphones_request(req) and (_budget_value(req) or 0) >= 3_000:
-            for brand_query in _headphone_brand_queries(str(req.budget or "").strip())[:2]:
-                _collect_from_direct_retail(req, brand_query, collection, seen_urls)
+        direct_queries = [item.text for item in query_plan if item.direct_eligible and item.kind != "site"][:2]
+        for direct_query in direct_queries or [(req.clean_search_query or "").strip() or wb_query]:
+            run_source_step(
+                "direct_retail", direct_query,
+                lambda direct_query=direct_query: _collect_from_direct_retail(req, direct_query, collection, seen_urls),
+            )
 
     if settings.SEARCHAPI_ENABLED:
         searchapi_query = (req.clean_search_query or "").strip() or wb_query
-        _collect_from_searchapi(req, searchapi_query, collection, seen_urls)
+        run_source_step(
+            SEARCHAPI_SOURCE, searchapi_query,
+            lambda: _collect_from_searchapi(req, searchapi_query, collection, seen_urls),
+        )
 
     if settings.SERPAPI_ENABLED:
         serpapi_query = (req.clean_search_query or "").strip() or wb_query
-        _collect_from_serpapi(req, serpapi_query, collection, seen_urls)
+        run_source_step(
+            SERPAPI_SOURCE, serpapi_query,
+            lambda: _collect_from_serpapi(req, serpapi_query, collection, seen_urls),
+        )
 
-    _apply_verification(collection, req)
+    emit_stage("normalize_dedupe", candidate_count=len(collection.raw_candidates))
+    _apply_verification(collection, req, verification_mode=verification_mode)
+    emit_stage("verify_and_policy", verification_mode=verification_mode, candidate_count=len(collection.candidates))
     collection.candidates = collection.candidates[:min(max_results, 10)]
     collection.verify_stats["saved"] = len(collection.candidates)
     collection.quality_stats["saved"] = len(collection.candidates)
@@ -2189,6 +2315,7 @@ def collect_product_candidates(req: Request, max_results: int = 15) -> SearchCol
         )
         collection.attempts.append(SearchAttemptData("manual_fallback", wb_query, "OK", len(collection.manual_links), 0,
                                                      "Проверенных вариантов мало или нет; сохранены ручные поисковые ссылки."))
+    emit_stage("final_snapshot", candidate_count=len(collection.candidates), raw_candidate_count=len(collection.raw_candidates))
     return collection
 
 

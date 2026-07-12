@@ -400,6 +400,388 @@
           "note": "вставь вручную нормальное кресло"
         }
       ]
+    },
+    {
+      "id": "galaxy_a55_256_35k_moscow",
+      "query": "Нужен Samsung Galaxy A55 256 ГБ до 35к в Москве",
+      "category": "phone", "expected_category": "phone", "budget": 35000, "city": "Москва",
+      "required_criteria": {"storage_gb": 256}, "forbidden_candidate_markers": ["Galaxy A35", "чехол", "стекло"],
+      "expected_model_modifiers": [], "expected_storage": 256, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["Galaxy A55", "256"]
+    },
+    {
+      "id": "monitor_27_qhd_144_35k",
+      "query": "Нужен монитор 27 дюймов QHD 144 Гц до 35к",
+      "category": "monitor", "expected_category": "monitor", "budget": 35000, "city": "",
+      "required_criteria": {"diagonal": "27", "resolution": "QHD", "refresh_rate": 144}, "forbidden_candidate_markers": ["24 дюйма", "75 Гц", "кронштейн"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": "27",
+      "minimum_saved_for_admin": 1, "top_expectations": ["27", "144"]
+    },
+    {
+      "id": "robot_lidar_wet_30k",
+      "query": "Нужен робот-пылесос с лидаром и влажной уборкой до 30к",
+      "category": "robot_vacuum", "expected_category": "robot_vacuum", "budget": 30000, "city": "",
+      "required_criteria": {"lidar": true, "wet_cleaning": true}, "forbidden_candidate_markers": ["вертикальный", "фильтр", "щетка"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["робот", "пылесос"]
+    },
+    {
+      "id": "coffee_auto_cappuccino_45k",
+      "query": "Нужна автоматическая кофемашина с капучинатором до 45к",
+      "category": "coffee_machine", "expected_category": "coffee_machine", "budget": 45000, "city": "",
+      "required_criteria": {"automatic": true, "cappuccinator": true}, "forbidden_candidate_markers": ["кофемолка", "капсулы", "зерно"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["кофемашина"]
+    },
+    {
+      "id": "microwave_20_25l_15k",
+      "query": "Нужна микроволновка 20–25 литров до 15к",
+      "category": "microwave", "expected_category": "microwave", "budget": 15000, "city": "",
+      "required_criteria": {"volume_l": [20, 25]}, "forbidden_candidate_markers": ["тарелка", "слюда", "посуда"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["микроволнов"]
+    },
+    {
+      "id": "mattress_160x200_medium_20k",
+      "query": "Нужен матрас 160x200 средней жёсткости до 20к",
+      "category": "mattress", "expected_category": "mattress", "budget": 20000, "city": "",
+      "required_criteria": {"size": "160x200", "medium_firmness": true}, "forbidden_candidate_markers": ["140x200", "наматрасник", "топпер"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": "160x200", "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["160", "200"]
+    },
+    {
+      "id": "bed_160x200_lift_30k",
+      "query": "Нужна кровать 160x200 с подъёмным механизмом до 30к",
+      "category": "bed", "expected_category": "bed", "budget": 30000, "city": "",
+      "required_criteria": {"size": "160x200", "lift_mechanism": true}, "forbidden_candidate_markers": ["180x200", "изголовье отдельно", "матрас"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": "160x200", "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["кровать", "160"]
+    },
+    {
+      "id": "headphones_overear_anc_15k",
+      "query": "Нужны полноразмерные беспроводные наушники с ANC до 15к",
+      "category": "headphones", "expected_category": "headphones", "budget": 15000, "city": "",
+      "required_criteria": {"wireless": true, "anc": true}, "forbidden_candidate_markers": ["проводные", "кейс", "амбушюры"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["наушники"]
+    },
+    {
+      "id": "laptop_ryzen_16_512_60k",
+      "query": "Нужен ноутбук Ryzen 5, 16 ГБ, SSD 512 до 60к",
+      "category": "laptop", "expected_category": "laptop", "budget": 60000, "city": "",
+      "required_criteria": {"cpu": "RYZEN 5", "ssd_gb": 512}, "forbidden_candidate_markers": ["N95", "N100", "сумка", "зарядка"],
+      "expected_model_modifiers": [], "expected_storage": 512, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["Ryzen", "512"]
+    },
+    {
+      "id": "tv_55_4k_120_ps5_70k",
+      "query": "Нужен телевизор 55 дюймов 4К 120 Гц для PS5 до 70к",
+      "category": "tv", "expected_category": "tv", "budget": 70000, "city": "",
+      "required_criteria": {"diagonal": "55", "resolution": "4K", "refresh_rate": 120}, "forbidden_candidate_markers": ["43 дюйма", "Full HD", "кронштейн"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": "55",
+      "minimum_saved_for_admin": 1, "top_expectations": ["55", "4K"]
+    },
+    {
+      "id": "vacuum_vertical_pet_hair_25k",
+      "query": "Нужен вертикальный пылесос для шерсти животных до 25к",
+      "category": "vacuum", "expected_category": "vacuum", "budget": 25000, "city": "",
+      "required_criteria": {"pet_hair": true}, "forbidden_candidate_markers": ["робот-пылесос", "фильтр", "мешок"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["пылесос"]
+    },
+    {
+      "id": "iphone_15_pro_256_used_90k",
+      "query": "Нужен iPhone 15 Pro 256 ГБ б/у до 90к",
+      "category": "phone", "expected_category": "phone", "budget": 90000, "city": "",
+      "required_criteria": {"storage_gb": 256}, "forbidden_candidate_markers": ["Pro Max", "128 ГБ", "чехол"],
+      "expected_model_modifiers": ["pro"], "expected_storage": 256, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["iPhone 15 Pro", "256"]
+    },
+    {
+      "id": "iphone_17_pro_256",
+      "query": "iPhone 17 Pro 256 ГБ до 120к",
+      "category": "phone", "expected_category": "phone", "budget": 120000, "city": "",
+      "required_criteria": {"storage_gb": 256}, "forbidden_candidate_markers": ["17e", "Pro Max", "128 ГБ"],
+      "expected_model_modifiers": ["pro"], "expected_storage": 256, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["iPhone 17 Pro"]
+    },
+    {
+      "id": "galaxy_s24_ultra_512",
+      "query": "Samsung Galaxy S24 Ultra 512 ГБ до 100к",
+      "category": "phone", "expected_category": "phone", "budget": 100000, "city": "",
+      "required_criteria": {"storage_gb": 512}, "forbidden_candidate_markers": ["S24 FE", "S24 Plus", "256 ГБ"],
+      "expected_model_modifiers": ["ultra"], "expected_storage": 512, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["S24 Ultra"]
+    },
+    {
+      "id": "sony_wh1000xm5_30k",
+      "query": "Sony WH-1000XM5 до 30к",
+      "category": "headphones", "expected_category": "headphones", "budget": 30000, "city": "",
+      "required_criteria": {}, "forbidden_candidate_markers": ["XM4", "кейс", "амбушюры"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["WH-1000XM5"]
+    },
+    {
+      "id": "monitor_24_fhd_75_20k",
+      "query": "Монитор 24 дюйма Full HD 75 Гц до 20к",
+      "category": "monitor", "expected_category": "monitor", "budget": 20000, "city": "",
+      "required_criteria": {"diagonal": "24", "resolution": "Full HD", "refresh_rate": 75}, "forbidden_candidate_markers": ["27 дюймов", "кронштейн"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": "24",
+      "minimum_saved_for_admin": 1, "top_expectations": ["24"]
+    },
+    {
+      "id": "tv_43_4k_45k",
+      "query": "Телевизор 43 дюйма 4K до 45к",
+      "category": "tv", "expected_category": "tv", "budget": 45000, "city": "",
+      "required_criteria": {"diagonal": "43", "resolution": "4K"}, "forbidden_candidate_markers": ["55 дюймов", "Full HD", "пульт"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": "43",
+      "minimum_saved_for_admin": 1, "top_expectations": ["43", "4K"]
+    },
+    {
+      "id": "mattress_140x200_hard_18k",
+      "query": "Матрас 140x200 жёсткий до 18к",
+      "category": "mattress", "expected_category": "mattress", "budget": 18000, "city": "",
+      "required_criteria": {"size": "140x200"}, "forbidden_candidate_markers": ["160x200", "наматрасник"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": "140x200", "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["140", "200"]
+    },
+    {
+      "id": "bed_180x200_storage_40k",
+      "query": "Кровать 180x200 с ящиками для хранения до 40к",
+      "category": "bed", "expected_category": "bed", "budget": 40000, "city": "",
+      "required_criteria": {"size": "180x200"}, "forbidden_candidate_markers": ["160x200", "изголовье отдельно"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": "180x200", "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["кровать", "180"]
+    },
+    {
+      "id": "chair_ergonomic_25k",
+      "query": "Эргономичное офисное кресло с поясничной поддержкой до 25к",
+      "category": "chair", "expected_category": "chair", "budget": 25000, "city": "",
+      "required_criteria": {}, "forbidden_candidate_markers": ["газлифт", "колеса", "чехол"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["кресло"]
+    },
+    {
+      "id": "coffee_capsule_12k",
+      "query": "Капсульная кофемашина до 12к",
+      "category": "coffee_machine", "expected_category": "coffee_machine", "budget": 12000, "city": "",
+      "required_criteria": {}, "forbidden_candidate_markers": ["капсулы отдельно", "кофемолка"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["кофемашина"]
+    },
+    {
+      "id": "microwave_grill_23l_20k",
+      "query": "Микроволновка 23 литра с грилем до 20к",
+      "category": "microwave", "expected_category": "microwave", "budget": 20000, "city": "",
+      "required_criteria": {"volume_l": 23, "grill": true}, "forbidden_candidate_markers": ["тарелка", "магнетрон"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["микроволнов"]
+    },
+    {
+      "id": "robot_basic_20k",
+      "query": "Робот-пылесос до 20к",
+      "category": "robot_vacuum", "expected_category": "robot_vacuum", "budget": 20000, "city": "",
+      "required_criteria": {}, "forbidden_candidate_markers": ["вертикальный", "фильтр"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["робот-пылесос"]
+    },
+    {
+      "id": "vacuum_wet_30k",
+      "query": "Моющий вертикальный пылесос до 30к",
+      "category": "vacuum", "expected_category": "vacuum", "budget": 30000, "city": "",
+      "required_criteria": {"wet_cleaning": true}, "forbidden_candidate_markers": ["робот-пылесос", "шланг отдельно"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["пылесос"]
+    },
+    {
+      "id": "pixel_8_new_60k",
+      "query": "Новый Google Pixel 8 128 ГБ до 60к",
+      "category": "phone", "expected_category": "phone", "budget": 60000, "city": "",
+      "required_criteria": {"storage_gb": 128}, "forbidden_candidate_markers": ["Pixel 7", "чехол", "б/у"],
+      "expected_model_modifiers": [], "expected_storage": 128, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["Pixel 8"]
+    },
+    {
+      "id": "macbook_air_16_512",
+      "query": "MacBook Air 16 ГБ SSD 512 до 120к",
+      "category": "laptop", "expected_category": "laptop", "budget": 120000, "city": "",
+      "required_criteria": {"ssd_gb": 512}, "forbidden_candidate_markers": ["MacBook Pro", "чехол", "зарядка"],
+      "expected_model_modifiers": ["air"], "expected_storage": 512, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["MacBook Air"]
+    },
+    {
+      "id": "wired_headphones_5k",
+      "query": "Проводные полноразмерные наушники до 5к",
+      "category": "headphones", "expected_category": "headphones", "budget": 5000, "city": "",
+      "required_criteria": {}, "forbidden_candidate_markers": ["кейс", "амбушюры"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["наушники"]
+    },
+    {
+      "id": "unknown_drill_10k_perm",
+      "query": "Нужна аккумуляторная дрель до 10к в Перми",
+      "category": "unknown", "expected_category": "unknown", "budget": 10000, "city": "Пермь",
+      "required_criteria": {}, "forbidden_candidate_markers": ["набор бит отдельно"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 0, "top_expectations": ["manual-first"]
+    },
+    {
+      "id": "iphone_15_256_no_budget",
+      "query": "iPhone 15 256 ГБ",
+      "category": "phone", "expected_category": "phone", "budget": null, "city": "",
+      "required_criteria": {"storage_gb": 256}, "forbidden_candidate_markers": ["128 ГБ", "Pro", "Plus"],
+      "expected_model_modifiers": [], "expected_storage": 256, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["iPhone 15", "256"]
+    },
+    {
+      "id": "monitor_27_144_moscow",
+      "query": "Монитор 27 дюймов 144 Гц до 30к в Москве",
+      "category": "monitor", "expected_category": "monitor", "budget": 30000, "city": "Москва",
+      "required_criteria": {"diagonal": "27", "refresh_rate": 144}, "forbidden_candidate_markers": ["24 дюйма", "75 Гц"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": "27",
+      "minimum_saved_for_admin": 1, "top_expectations": ["27", "144"]
+    },
+    {
+      "id": "mattress_160_yaroslavl",
+      "query": "Матрас 160x200 до 25к в Ярославле",
+      "category": "mattress", "expected_category": "mattress", "budget": 25000, "city": "Ярославль",
+      "required_criteria": {"size": "160x200"}, "forbidden_candidate_markers": ["140x200", "наматрасник"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": "160x200", "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["160x200"]
+    },
+    {
+      "id": "bed_160_with_base",
+      "query": "Кровать 160x200 с основанием до 35к",
+      "category": "bed", "expected_category": "bed", "budget": 35000, "city": "",
+      "required_criteria": {"size": "160x200"}, "forbidden_candidate_markers": ["основание отдельно", "матрас отдельно"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": "160x200", "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["кровать", "основание"]
+    },
+    {
+      "id": "tv_65_oled_no_budget",
+      "query": "Телевизор 65 дюймов OLED 4K",
+      "category": "tv", "expected_category": "tv", "budget": null, "city": "",
+      "required_criteria": {"diagonal": "65", "resolution": "4K"}, "forbidden_candidate_markers": ["55 дюймов", "кронштейн"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": "65",
+      "minimum_saved_for_admin": 1, "top_expectations": ["65", "OLED"]
+    },
+    {
+      "id": "chair_load_120_18k",
+      "query": "Офисное кресло с нагрузкой 120 кг до 18к",
+      "category": "chair", "expected_category": "chair", "budget": 18000, "city": "",
+      "required_criteria": {"load_kg": 120}, "forbidden_candidate_markers": ["газлифт", "колеса отдельно"],
+      "expected_model_modifiers": [], "expected_storage": null, "expected_size": null, "expected_diagonal": null,
+      "minimum_saved_for_admin": 1, "top_expectations": ["кресло", "120"]
+    }
+  ],
+  "synthetic_candidates": [
+    {
+      "id": "syn_iphone_storage",
+      "query": "iPhone 15 Pro 256 ГБ до 90к",
+      "expected_top_title": "Apple iPhone 15 Pro 256 ГБ",
+      "candidates": [
+        {"title": "Apple iPhone 15 Pro 256 ГБ", "price": 85000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "EXACT", "relevant": true},
+        {"title": "Apple iPhone 15 Pro 128 ГБ", "price": 75000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "MODEL_MISMATCH", "relevant": false}
+      ]
+    },
+    {
+      "id": "syn_iphone_variant",
+      "query": "iPhone 17 Pro до 120к",
+      "expected_top_title": "Apple iPhone 17 Pro 256 ГБ",
+      "candidates": [
+        {"title": "Apple iPhone 17 Pro 256 ГБ", "price": 115000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "COMPATIBLE_VARIANT", "relevant": true},
+        {"title": "Apple iPhone 17 Pro Max 256 ГБ", "price": 110000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "MODEL_MISMATCH", "relevant": false}
+      ]
+    },
+    {
+      "id": "syn_galaxy",
+      "query": "Samsung Galaxy A55 256 ГБ до 35к",
+      "expected_top_title": "Samsung Galaxy A55 256 ГБ",
+      "candidates": [
+        {"title": "Samsung Galaxy A55 256 ГБ", "price": 34000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "EXACT", "relevant": true},
+        {"title": "Samsung Galaxy A35 256 ГБ", "price": 28000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "MODEL_MISMATCH", "relevant": false}
+      ]
+    },
+    {
+      "id": "syn_sony",
+      "query": "Sony WH-1000XM5 до 30к",
+      "expected_top_title": "Sony WH-1000XM5",
+      "candidates": [
+        {"title": "Sony WH-1000XM5", "price": 29000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "EXACT", "relevant": true},
+        {"title": "Sony WH-1000XM4", "price": 22000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "MODEL_MISMATCH", "relevant": false}
+      ]
+    },
+    {
+      "id": "syn_monitor",
+      "query": "Монитор 27 дюймов QHD 144 Гц до 35к",
+      "expected_top_title": "Монитор AOC 27 QHD 144 Гц IPS",
+      "candidates": [
+        {"title": "Монитор AOC 27 QHD 144 Гц IPS", "price": 33000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "GENERIC_MATCH", "relevant": true},
+        {"title": "Монитор AOC 24 Full HD 75 Гц", "price": 15000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "MODEL_MISMATCH", "relevant": false}
+      ]
+    },
+    {
+      "id": "syn_mattress",
+      "query": "Матрас 160x200 до 20к",
+      "expected_top_title": "Матрас Askona 160x200",
+      "candidates": [
+        {"title": "Матрас Askona 160x200", "price": 19000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "GENERIC_MATCH", "relevant": true},
+        {"title": "Матрас Askona 140x200", "price": 17000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "MODEL_MISMATCH", "relevant": false}
+      ]
+    },
+    {
+      "id": "syn_accessory",
+      "query": "iPhone 15 Pro до 90к",
+      "expected_top_title": "Apple iPhone 15 Pro",
+      "candidates": [
+        {"title": "Apple iPhone 15 Pro", "price": 88000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "EXACT", "relevant": true},
+        {"title": "Чехол для iPhone 15 Pro", "price": 1500, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "ACCESSORY", "relevant": false, "accessory": true}
+      ]
+    },
+    {
+      "id": "syn_good_manual",
+      "query": "Беспроводные наушники до 15к",
+      "expected_top_title": "Sony беспроводные наушники ANC",
+      "candidates": [
+        {"title": "Sony беспроводные наушники ANC", "price": 14000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "GENERIC_MATCH", "relevant": true},
+        {"title": "Generic беспроводные наушники", "price": 9000, "status": "NEED_MANUAL_CHECK", "availability": "UNKNOWN", "expected_exact": "GENERIC_MATCH", "relevant": true}
+      ]
+    },
+    {
+      "id": "syn_laptop_cpu",
+      "query": "Ноутбук Ryzen 5 16 ГБ SSD 512 до 60к",
+      "expected_top_title": "Lenovo ноутбук Ryzen 5 RAM 16 ГБ SSD 512 ГБ",
+      "candidates": [
+        {"title": "Lenovo ноутбук Ryzen 5 RAM 16 ГБ SSD 512 ГБ", "price": 58000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "GENERIC_MATCH", "relevant": true},
+        {"title": "ECHIPS ноутбук N95 RAM 16 ГБ SSD 512 ГБ", "price": 35000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "GENERIC_MATCH", "relevant": true}
+      ]
+    },
+    {
+      "id": "syn_tv_ps5",
+      "query": "Телевизор 55 4K 120 Гц для PS5 до 70к",
+      "expected_top_title": "Hisense телевизор 55 4K 120 Гц HDMI 2.1",
+      "candidates": [
+        {"title": "Hisense телевизор 55 4K 120 Гц HDMI 2.1", "price": 68000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "GENERIC_MATCH", "relevant": true},
+        {"title": "Hisense телевизор 55 Full HD 60 Гц", "price": 40000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "MODEL_MISMATCH", "relevant": false}
+      ]
+    },
+    {
+      "id": "syn_unavailable",
+      "query": "Samsung Galaxy A55 256 ГБ до 35к",
+      "expected_top_title": "Samsung Galaxy A55 256 ГБ в наличии",
+      "candidates": [
+        {"title": "Samsung Galaxy A55 256 ГБ в наличии", "price": 35000, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "EXACT", "relevant": true},
+        {"title": "Samsung Galaxy A55 256 ГБ нет в наличии", "price": 30000, "status": "UNAVAILABLE", "availability": "UNAVAILABLE", "expected_exact": "EXACT", "relevant": true}
+      ]
+    },
+    {
+      "id": "syn_over_budget",
+      "query": "Sony WH-1000XM5 до 30к",
+      "expected_top_title": "Sony WH-1000XM5 29 990 ₽",
+      "candidates": [
+        {"title": "Sony WH-1000XM5 29 990 ₽", "price": 29990, "status": "VERIFIED_GOOD", "availability": "AVAILABLE", "expected_exact": "EXACT", "relevant": true},
+        {"title": "Sony WH-1000XM5 36 000 ₽", "price": 36000, "status": "OVER_BUDGET_HARD", "availability": "AVAILABLE", "expected_exact": "EXACT", "relevant": true}
+      ]
     }
   ]
 }

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import Any
 import re
 
+from app.exact_match import ACCESSORY, GENERIC_MATCH, MODEL_MISMATCH, UNKNOWN, match_candidate
+
 
 DIRECT_QUALITY_MANUAL_RISK = "нужна ручная проверка качества товара"
 DIRECT_RETAIL_USED_RISK = "новый retail-вариант, не б/у предложение"
@@ -85,6 +87,8 @@ class FinalQualityGateResult:
     product_quality_level: str = ""
     keep_for_admin: bool | None = None
     score_cap: int | None = None
+    exact_match_status: str = ""
+    exact_match_reason: str = ""
 
 
 def normalized_text(candidate: Any) -> str:
@@ -197,6 +201,9 @@ def _contains_forbidden_variant(title_text: str, requested_variant: str) -> bool
 
 
 def has_model_mismatch(candidate: Any, parsed: Any) -> bool:
+    reusable = match_candidate(parsed, candidate)
+    if reusable.status in {MODEL_MISMATCH, ACCESSORY}:
+        return True
     query_text = _request_text(parsed)
     title_text = _normalize_model_text(f"{getattr(candidate, 'title', '')} {getattr(candidate, 'snippet', '')}")
 
@@ -391,19 +398,33 @@ def final_product_quality_level(
 def final_quality_gate(candidate: Any, parsed: Any) -> FinalQualityGateResult:
     """Returns category and exact-match evidence without finalizing workflow status."""
     product_level = str(getattr(candidate, "product_quality_level", "") or "")
+    exact = match_candidate(parsed, candidate)
 
-    if product_level == "bad" or _is_accessory_or_wrong_product(candidate):
+    if product_level == "bad" or _is_accessory_or_wrong_product(candidate) or exact.status == ACCESSORY:
         return FinalQualityGateResult(
-            reason=BAD_PRODUCT_RISK,
+            reason=exact.reason or BAD_PRODUCT_RISK,
             product_quality_level="bad",
             score_cap=30,
+            exact_match_status=exact.status,
+            exact_match_reason=exact.reason,
         )
 
-    if has_model_mismatch(candidate, parsed):
+    if exact.status == MODEL_MISMATCH:
         return FinalQualityGateResult(
-            reason=WRONG_MODEL_RISK,
+            reason=exact.reason or WRONG_MODEL_RISK,
             product_quality_level="bad",
             score_cap=30,
+            exact_match_status=exact.status,
+            exact_match_reason=exact.reason,
+        )
+
+    if exact.status == UNKNOWN or (exact.status == GENERIC_MATCH and exact.differences):
+        return FinalQualityGateResult(
+            reason=exact.reason or "точное соответствие не подтверждено",
+            product_quality_level="weak",
+            score_cap=65,
+            exact_match_status=exact.status,
+            exact_match_reason=exact.reason,
         )
 
     if product_level in {"weak", "unknown_brand", "retail_new_for_used_request"}:
@@ -411,6 +432,11 @@ def final_quality_gate(candidate: Any, parsed: Any) -> FinalQualityGateResult:
             reason=getattr(candidate, "why_not_verified_good", "") or DIRECT_QUALITY_MANUAL_RISK,
             product_quality_level="weak",
             score_cap=80,
+            exact_match_status=exact.status,
+            exact_match_reason=exact.reason,
         )
 
-    return FinalQualityGateResult()
+    return FinalQualityGateResult(
+        exact_match_status=exact.status,
+        exact_match_reason=exact.reason,
+    )

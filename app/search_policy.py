@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.search_evidence import assess_product_card
+
 
 NORMAL_STATUSES = {"VERIFIED_GOOD", "VERIFIED_OK"}
 
@@ -148,23 +150,7 @@ def looks_like_article_or_category(candidate: dict[str, Any]) -> bool:
 
 
 def looks_like_product_card(candidate: dict[str, Any]) -> bool:
-    url = str(candidate.get("url") or "").lower()
-    title = str(candidate.get("title") or "").lower()
-
-    if not title or len(title) < 8:
-        return False
-
-    if looks_like_article_or_category(candidate):
-        return False
-
-    if any(marker in url for marker in PRODUCT_URL_MARKERS):
-        return True
-
-    source = str(candidate.get("source") or "").lower()
-    if any(x in source for x in ("direct", "ozon", "market", "mvideo", "dns", "citilink", "megamarket", "avito")):
-        return True
-
-    return False
+    return assess_product_card(candidate).is_product_card
 
 
 def normalize_for_admin_save(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -179,6 +165,9 @@ def normalize_for_admin_save(candidate: dict[str, Any]) -> dict[str, Any]:
     price = candidate.get("price")
     budget_status = str(candidate.get("budget_status") or "").upper()
     text = _text(candidate)
+    card = assess_product_card(candidate)
+    candidate["product_card_confidence"] = card.confidence
+    candidate["product_card_reason"] = card.reason
 
     if quality == "bad":
         set_status(candidate, "WRONG_PRODUCT")
@@ -190,6 +179,12 @@ def normalize_for_admin_save(candidate: dict[str, Any]) -> dict[str, Any]:
         set_status(candidate, "NOT_PRODUCT_PAGE")
         cap_score(candidate, 30, "not_product_page")
         add_reason(candidate, "не карточка товара")
+        return candidate
+
+    if not card.is_product_card and card.confidence == "none":
+        set_status(candidate, "NOT_PRODUCT_PAGE")
+        cap_score(candidate, 30, "not_product_page")
+        add_reason(candidate, card.reason or "не карточка товара")
         return candidate
 
     unavailable_markers = (
@@ -207,6 +202,11 @@ def normalize_for_admin_save(candidate: dict[str, Any]) -> dict[str, Any]:
         return candidate
 
     status = get_status(candidate)
+    if status in NORMAL_STATUSES and card.confidence == "low":
+        set_status(candidate, "NEED_MANUAL_CHECK")
+        cap_score(candidate, 65, "low_product_card_confidence")
+        add_reason(candidate, "низкая уверенность, что это карточка товара")
+        status = "NEED_MANUAL_CHECK"
     if status == "VERIFY_BLOCKED" and not is_real_block(candidate):
         set_status(candidate, "NEED_MANUAL_CHECK")
         cap_score(candidate, 80, "manual_check_not_blocked")

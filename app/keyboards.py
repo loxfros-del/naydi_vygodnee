@@ -21,53 +21,82 @@ def kb_confirm_cancel() -> InlineKeyboardMarkup:
     ])
 
 
-def kb_admin_menu() -> InlineKeyboardMarkup:
-    """Главное меню админа."""
+def kb_admin_menu(counts: dict[str, int] | None = None) -> InlineKeyboardMarkup:
+    """Главное меню админа со счётчиками очередей."""
+    counts = counts or {}
+
+    def label(text: str, key: str) -> str:
+        return f"{text} · {counts.get(key, 0)}"
+
     return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=label("📥 Новые", "new"), callback_data="admin_new"),
+            InlineKeyboardButton(text=label("🔎 В поиске", "searching"), callback_data="admin_searching"),
+        ],
+        [InlineKeyboardButton(text=label("🧑‍💻 Требуют проверки", "review"), callback_data="admin_review")],
+        [
+            InlineKeyboardButton(text=label("✅ Готовые", "ready"), callback_data="admin_ready"),
+            InlineKeyboardButton(text=label("💳 Ожидают оплаты", "waiting"), callback_data="admin_waiting"),
+        ],
+        [
+            InlineKeyboardButton(text=label("📤 Отправленные", "delivered"), callback_data="admin_delivered"),
+            InlineKeyboardButton(text=label("⚠️ Проблемные", "problem"), callback_data="admin_problem"),
+        ],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="📋 Все заявки", callback_data="admin_all")],
-        [InlineKeyboardButton(text="🆕 Новые", callback_data="admin_new")],
-        [InlineKeyboardButton(text="🔎 В поиске", callback_data="admin_searching")],
-        [InlineKeyboardButton(text="⏳ Ожидают оплаты", callback_data="admin_waiting")],
     ])
 
 
 def kb_admin_request(req_id: int, status: str) -> InlineKeyboardMarkup:
     """Кнопки действий с заявкой."""
     buttons = []
+    status = (status or "NEW").upper()
 
     if status == "NEW":
         buttons.append([InlineKeyboardButton(text="📂 Взять в работу", callback_data=f"take_{req_id}")])
-    elif status == "SEARCHING":
+    elif status in ("SEARCHING", "ADMIN_REVIEW", "AI_CARDS_DRAFT"):
         # Автопоиск и работа с вариантами
-        buttons.append([InlineKeyboardButton(text="🔎 Запустить автопоиск", callback_data=f"autosearch_{req_id}")])
+        buttons.append([InlineKeyboardButton(text="🔎 Запустить / повторить поиск", callback_data=f"autosearch_{req_id}")])
         buttons.append([InlineKeyboardButton(text="📦 Показать найденные варианты", callback_data=f"showresults_{req_id}")])
-        buttons.append([InlineKeyboardButton(text="🤖 Сделать ИИ-карточки из автопоиска", callback_data=f"aicards_{req_id}")])
-        buttons.append([InlineKeyboardButton(text="🧪 Debug поиска", callback_data=f"debugsearch_{req_id}")])
+        buttons.append([InlineKeyboardButton(text="🤖 Создать карточки", callback_data=f"aicards_{req_id}")])
         buttons.append([InlineKeyboardButton(text="➕ Добавить вариант вручную", callback_data=f"addprod_{req_id}")])
-        buttons.append([InlineKeyboardButton(text="🧩 Карточки ИИ", callback_data=f"alicecards_{req_id}")])
-        buttons.append([InlineKeyboardButton(text="👁 Полный предпросмотр для админа", callback_data=f"adminpreview_{req_id}")])
-        buttons.append([InlineKeyboardButton(text="👀 Клиентский предпросмотр до оплаты", callback_data=f"preview_{req_id}")])
-    elif status == "PREVIEW_SENT":
-        buttons.append([InlineKeyboardButton(text="👁 Полный предпросмотр для админа", callback_data=f"adminpreview_{req_id}")])
+        buttons.append([InlineKeyboardButton(text="🧩 Проверить карточки", callback_data=f"alicecards_{req_id}")])
+        buttons.append([InlineKeyboardButton(text="👁 Клиентский предпросмотр", callback_data=f"adminpreview_{req_id}")])
+        buttons.append([InlineKeyboardButton(text="💳 Отправить предпросмотр и запросить оплату", callback_data=f"readytopay_{req_id}")])
+    elif status in ("PREVIEW_SENT", "WAITING_PAYMENT"):
+        buttons.append([InlineKeyboardButton(text="👁 Клиентский предпросмотр", callback_data=f"adminpreview_{req_id}")])
         buttons.append([InlineKeyboardButton(text="✅ Оплата подтверждена", callback_data=f"paid_{req_id}")])
     elif status == "PAID":
-        buttons.append([InlineKeyboardButton(text="👁 Полный предпросмотр для админа", callback_data=f"adminpreview_{req_id}")])
+        buttons.append([InlineKeyboardButton(text="👁 Клиентский предпросмотр", callback_data=f"adminpreview_{req_id}")])
+        buttons.append([InlineKeyboardButton(text="✅ Утвердить результат", callback_data=f"markready_{req_id}")])
+    elif status == "READY":
+        buttons.append([InlineKeyboardButton(text="👁 Клиентский предпросмотр", callback_data=f"adminpreview_{req_id}")])
         buttons.append([InlineKeyboardButton(text="📩 Отправить полный отчёт", callback_data=f"sendreport_{req_id}")])
 
-    if status in ("SEARCHING", "PREVIEW_SENT", "PAID"):
+    if status in ("SEARCHING", "ADMIN_REVIEW", "AI_CARDS_DRAFT", "PREVIEW_SENT", "WAITING_PAYMENT", "PAID", "READY"):
         buttons.append([InlineKeyboardButton(text="📊 Проверить готовность", callback_data=f"readiness_{req_id}")])
 
-    if status in ("NEW", "SEARCHING", "PREVIEW_SENT", "PAID"):
+    if status in ("NEW", "SEARCHING", "ADMIN_REVIEW", "AI_CARDS_DRAFT", "PREVIEW_SENT", "WAITING_PAYMENT", "PAID"):
         buttons.append([InlineKeyboardButton(text="🟡 Проверить через Алису", callback_data=f"alice_{req_id}")])
 
-    if status in ("SEARCHING", "PREVIEW_SENT", "PAID"):
+    if status in ("SEARCHING", "ADMIN_REVIEW", "AI_CARDS_DRAFT", "PREVIEW_SENT", "WAITING_PAYMENT", "PAID"):
         buttons.append([InlineKeyboardButton(text="🔍 Проверка рынка выполнена", callback_data=f"mcstart_{req_id}")])
 
+    buttons.append([InlineKeyboardButton(text="📝 Заметка по заявке", callback_data=f"reqnote_{req_id}")])
+    if status not in ("DELIVERED", "REPORT_SENT", "CANCELLED"):
+        buttons.append([InlineKeyboardButton(text="❌ Отменить заявку", callback_data=f"admincancel_{req_id}")])
+    buttons.append([InlineKeyboardButton(text="🛠 Debug", callback_data=f"debugsearch_{req_id}")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад к списку", callback_data="admin_all")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def kb_alice_product(result_id: int, status: str, link_check_status: str = LinkCheckStatus.NEEDED.value, price_verified: bool = False) -> InlineKeyboardMarkup:
+def kb_alice_product(
+    result_id: int,
+    status: str,
+    link_check_status: str = LinkCheckStatus.NEEDED.value,
+    price_verified: bool = False,
+    ai_card_status: str = "",
+) -> InlineKeyboardMarkup:
     """Действия под одной карточкой, полученной из ответа Алисы."""
     top_label = "🏆 ТОП-1 выбран" if status == "BEST" else "🏆 ТОП-1"
     keep_label = "✅ Оставлен" if status in ("APPROVED", "BEST") else "✅ Оставить"
@@ -94,7 +123,18 @@ def kb_alice_product(result_id: int, status: str, link_check_status: str = LinkC
     budget_label = "💰 Бюджетный выбран" if status == "BUDGET" else "💰 Бюджетный"
     caution_label = "⚠️ Осторожно выбрано" if status == "DO_NOT_BUY" else "⚠️ Осторожно"
 
-    return InlineKeyboardMarkup(inline_keyboard=[
+    lifecycle_buttons = []
+    if (ai_card_status or "").upper() != "APPROVED":
+        lifecycle_buttons.append([
+            InlineKeyboardButton(text="✅ Утвердить карточку", callback_data=f"aiapprove_{result_id}"),
+            InlineKeyboardButton(text="✏️ Изменить текст", callback_data=f"aiedit_{result_id}"),
+        ])
+    lifecycle_buttons.append([
+        InlineKeyboardButton(text="🖼 Заменить изображение", callback_data=f"aiimage_{result_id}"),
+        InlineKeyboardButton(text="🔄 Перегенерировать", callback_data=f"airegen_{result_id}"),
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=lifecycle_buttons + [
         [
             InlineKeyboardButton(text=top_label, callback_data=f"alicetop_{result_id}"),
         ],
@@ -240,7 +280,7 @@ def kb_market_check_reasons() -> InlineKeyboardMarkup:
         "цена ниже рынка и выглядит подозрительно",
         "нет нормальной доставки/возврата",
     ]
-    buttons = [[InlineKeyboardButton(text=r, callback_data=f"mcreason_set_{r}")] for r in reasons]
+    buttons = [[InlineKeyboardButton(text=r, callback_data=f"mcreason_set_{index}")] for index, r in enumerate(reasons)]
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="mcreason_cancel")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -341,10 +381,6 @@ def kb_admin_detail_bottom(req_id: int, readiness_percent: int, is_paid: bool, r
         buttons.append([InlineKeyboardButton(
             text="👀 Отправить предпросмотр до оплаты",
             callback_data=f"preview_{req_id}",
-        )])
-        buttons.append([InlineKeyboardButton(
-            text="⚠️ Отправить без оплаты",
-            callback_data=f"sos_sendreport_{req_id}",
         )])
     buttons.append([InlineKeyboardButton(text="🔙 К заявке", callback_data=f"view_{req_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)

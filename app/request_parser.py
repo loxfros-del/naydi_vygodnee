@@ -1,134 +1,464 @@
-"""Чистый парсер текстовой заявки без зависимости от Telegram/aiogram."""
-import re
+"""Детерминированный parser пользовательского товарного запроса."""
+from __future__ import annotations
 
+import re
+from typing import Any
+
+from app.category_registry import detect_category, get_category_spec, known_brand, normalize_text
 from app.search_links import build_search_query
 
 
+_SPACE_RE = re.compile(r"\s+")
+_BUDGET_AMOUNT = (
+    r"(?:\d{1,3}(?:[ \u00a0.]\d{3})+|\d{4,6}|"
+    r"\d{1,3}\s*(?:[кk]|тыс(?:яч(?:а|и)?|\.)?))"
+)
+_BUDGET_CONTEXT_RE = re.compile(
+    rf"(?:\bдо\b|\bне\s+дороже\b|\bмаксимум\b|\bбюджет(?:ом)?\b|"
+    rf"\bв\s+пределах\b|\bза\b)\s*(?P<amount>{_BUDGET_AMOUNT})",
+    re.IGNORECASE,
+)
+_CURRENCY_AMOUNT_RE = re.compile(
+    rf"(?P<amount>{_BUDGET_AMOUNT})\s*(?:₽|руб(?:\.|лей|ля|ль)?)(?![a-zа-я])",
+    re.IGNORECASE,
+)
+_SHORT_BUDGET_RE = re.compile(
+    r"(?<![\w])(?P<amount>\d{1,3}\s*(?:[кk]|тыс(?:яч(?:а|и)?|\.)?))(?![\w])",
+    re.IGNORECASE,
+)
+_PLAIN_BUDGET_RE = re.compile(
+    r"(?<![\w])(?P<amount>\d{1,3}(?:[ \u00a0]\d{3})+|\d{4,6})(?![\w])",
+    re.IGNORECASE,
+)
+
+_CITY_FORMS = {
+    "москве": "Москва", "москва": "Москва",
+    "санкт-петербурге": "Санкт-Петербург", "санкт-петербург": "Санкт-Петербург",
+    "петербурге": "Санкт-Петербург", "питере": "Санкт-Петербург",
+    "ярославле": "Ярославль", "ярославль": "Ярославль",
+    "казани": "Казань", "казань": "Казань",
+    "самаре": "Самара", "самара": "Самара",
+    "омске": "Омск", "омск": "Омск",
+    "перми": "Пермь", "пермь": "Пермь",
+    "тюмени": "Тюмень", "тюмень": "Тюмень",
+    "туле": "Тула", "тула": "Тула",
+    "воронеже": "Воронеж", "воронеж": "Воронеж",
+    "екатеринбурге": "Екатеринбург", "екатеринбург": "Екатеринбург",
+    "новосибирске": "Новосибирск", "новосибирск": "Новосибирск",
+    "нижнем новгороде": "Нижний Новгород", "нижний новгород": "Нижний Новгород",
+    "ростове-на-дону": "Ростов-на-Дону", "ростов-на-дону": "Ростов-на-Дону",
+    "краснодаре": "Краснодар", "краснодар": "Краснодар",
+    "красноярске": "Красноярск", "красноярск": "Красноярск",
+    "уфе": "Уфа", "уфа": "Уфа",
+    "челябинске": "Челябинск", "челябинск": "Челябинск",
+    "сочи": "Сочи",
+}
+
+_CATEGORY_DISPLAY = {
+    "phone": "смартфон",
+    "laptop": "ноутбук",
+    "tv": "телевизор",
+    "headphones": "наушники",
+    "chair": "офисное кресло",
+    "monitor": "монитор",
+    "robot_vacuum": "робот-пылесос",
+    "vacuum": "пылесос",
+    "microwave": "микроволновка",
+    "coffee_machine": "кофемашина",
+    "mattress": "матрас",
+    "bed": "кровать",
+    "unknown": "товар",
+}
+
+_MODEL_VARIANT_DISPLAY = {
+    "pro max": "Pro Max", "pro": "Pro", "max": "Max", "plus": "Plus",
+    "mini": "Mini", "se": "SE", "fe": "FE", "ultra": "Ultra",
+    "lite": "Lite", "air": "Air", "e": "e",
+}
+
+
+def _amount_to_int(raw: str) -> int | None:
+    text = normalize_text(raw).replace("\u00a0", " ").strip(" .")
+    multiplier = 1
+    if re.search(r"(?:[кk]|тыс)", text, re.IGNORECASE):
+        multiplier = 1_000
+    digits = re.sub(r"\D", "", text)
+    if not digits:
+        return None
+    value = int(digits) * multiplier
+    return value if 1_000 <= value <= 10_000_000 and not 2000 <= value <= 2039 else None
+
+
 def parse_budget(text: str) -> str:
-    t = text.lower()
-    match = re.search(r"\b(\d{1,3})\s*[кКkK]\b", t)
-    if match:
-        return str(int(match.group(1)) * 1000)
-    match = re.search(r"\b(\d{1,3})\s*тыс(?:яч|\.|и)?\.?\b", t)
-    if match:
-        return str(int(match.group(1)) * 1000)
-    match = re.search(r"\b(\d{1,3})\s+(\d{3})\b", t)
-    if match:
-        value = int(match.group(1) + match.group(2))
-        if 1000 <= value <= 999999:
-            return str(value)
-    match = re.search(r"\b(\d{4,6})\b", t)
-    if match and 1000 <= int(match.group(1)) <= 999999:
-        return match.group(1)
+    """Возвращает бюджет, не принимая за него размеры и характеристики."""
+    for pattern in (_BUDGET_CONTEXT_RE, _CURRENCY_AMOUNT_RE, _SHORT_BUDGET_RE, _PLAIN_BUDGET_RE):
+        for match in pattern.finditer(text or ""):
+            before = (text or "")[max(0, match.start() - 24):match.start()]
+            tail = (text or "")[match.end():match.end() + 16]
+            if pattern is _SHORT_BUDGET_RE and re.fullmatch(r"4\s*[кk]", match.group("amount"), re.IGNORECASE):
+                continue
+            if pattern is _PLAIN_BUDGET_RE and re.search(r"(?:модель|артикул|код|год)\s*$", before, re.IGNORECASE):
+                continue
+            if re.match(r"\s*(?:mah|мач|гц|hz|гб|gb|кг|kg|вт|w|л(?:итр)?)\b", tail, re.IGNORECASE):
+                continue
+            value = _amount_to_int(match.group("amount"))
+            if value is not None:
+                return str(value)
     return ""
 
 
 def parse_city(text: str) -> str:
-    city_forms = {
-        "ярославле": "Ярославль", "москве": "Москва", "санкт-петербурге": "Санкт-Петербург",
-        "петербурге": "Санкт-Петербург", "казани": "Казань", "самаре": "Самара",
-        "омске": "Омск", "перми": "Пермь", "тюмени": "Тюмень", "туле": "Тула",
-        "воронеже": "Воронеж", "екатеринбурге": "Екатеринбург", "новосибирске": "Новосибирск",
-        "нижнем новгороде": "Нижний Новгород", "ростове-на-дону": "Ростов-на-Дону",
-    }
-    match = re.search(r"в\s+([А-Яа-яЁё]+(?:[-\s][А-Яа-яЁё]+)*)\b", text)
-    if not match:
-        return ""
-    city = match.group(1).strip()
-    stop_words = {"видео", "случае", "итоге", "результате", "плане", "магазине", "интернете", "городе", "районе", "центре", "смысле", "отличие", "моменте", "процессе", "конце", "начале", "примере"}
-    if city.lower() in stop_words or len(city) < 3:
-        return ""
-    return city_forms.get(city.lower(), city.title())
+    normalized = normalize_text(text)
+    for form in sorted(_CITY_FORMS, key=len, reverse=True):
+        pattern = re.escape(form).replace(r"\ ", r"\s+")
+        if re.search(rf"(?:\bв\s+|\bгород(?:е)?\s+){pattern}\b", normalized):
+            return _CITY_FORMS[form]
+    match = re.search(
+        r"(?:\bв\s+|\bгород(?:е)?\s+)([А-ЯЁ][а-яё-]{2,}(?:\s+[А-ЯЁ][а-яё-]{2,}){0,2})"
+        r"(?=\s+(?:до|за|бюджет)|[,.!?]|$)",
+        text or "",
+    )
+    return match.group(1).strip() if match else ""
 
 
 def parse_use_case(text: str) -> str:
-    lowered = text.lower()
-    match = re.search(r"для\s+([А-Яа-яЁёA-Za-z0-9\s]+?)(?:\s+до\s|\s+в\s|\s+купить|$)", text)
+    lowered = normalize_text(text)
+    match = re.search(
+        r"\bдля\s+(.+?)(?=\s+(?:до|за|бюджет(?:ом)?|в\s+[А-ЯЁ])\b|[,.;]|$)",
+        text or "",
+        re.IGNORECASE,
+    )
     if match:
-        use_case = match.group(1).strip()
-        if 2 <= len(use_case) <= 50:
-            return use_case
-    if any(word in lowered for word in ("ps5", "плейстейшен", "playstation", "приставк")):
+        value = _SPACE_RE.sub(" ", match.group(1)).strip()
+        if 2 <= len(value) <= 80:
+            return value
+    if any(word in lowered for word in ("ps5", "ps 5", "playstation", "плейстейшен")):
         return "PS5"
-    for phrase in ("для игр", "для работы", "для кухни", "для дома", "для офиса"):
-        if phrase in lowered:
-            return phrase.removeprefix("для ")
+    for marker, value in (
+        ("для игр", "игр"), ("для работы", "работы"), ("для учебы", "учёбы"),
+        ("для учебы", "учёбы"), ("для офиса", "офиса"), ("для дома", "дома"),
+    ):
+        if marker in lowered:
+            return value
     return ""
 
 
+def parse_condition(text: str) -> str:
+    lowered = normalize_text(text)
+    if re.search(r"(?<![a-zа-я0-9])(?:б\s*/?\s*у|бу|used|подержан\w*|с\s+рук)(?![a-zа-я0-9])", lowered):
+        return "used"
+    if re.search(r"(?<![a-zа-я0-9])(?:нов(?:ый|ая|ое|ые)|new)(?![a-zа-я0-9])", lowered):
+        return "new"
+    return "any"
+
+
+def _extract_model(text: str, category: str, brand: str) -> str:
+    normalized = normalize_text(text)
+    iphone = re.search(
+        r"\b(?:apple\s+)?(?:iphone|айфон)\s*(\d{1,2})\s*"
+        r"(pro\s+max|pro|max|plus|mini|se|ultra|lite|air|fe|e)?\b",
+        normalized,
+    )
+    if iphone:
+        variant = _MODEL_VARIANT_DISPLAY.get(_SPACE_RE.sub(" ", iphone.group(2) or "").strip(), "")
+        suffix = variant if variant == "e" else f" {variant}" if variant else ""
+        return f"iPhone {iphone.group(1)}{suffix}"
+
+    galaxy = re.search(
+        r"\b(?:samsung\s+)?galaxy\s+([asz]\s*\d{2,3})\s*(ultra|fe|plus|\+|lite)?\b",
+        normalized,
+    )
+    if galaxy:
+        code = galaxy.group(1).replace(" ", "").upper()
+        variant_key = "plus" if galaxy.group(2) == "+" else (galaxy.group(2) or "")
+        variant = _MODEL_VARIANT_DISPLAY.get(variant_key, variant_key.upper())
+        prefix = "Samsung " if brand.lower() == "samsung" or "samsung" in normalized else ""
+        return f"{prefix}Galaxy {code}{f' {variant}' if variant else ''}"
+
+    sony = re.search(r"\b(?:sony\s+)?(wh\s*[- ]?\s*1000\s*xm\s*\d)\b", normalized)
+    if sony:
+        code = re.sub(r"\s+", "", sony.group(1)).upper().replace("WH-", "WH-")
+        if not code.startswith("WH-"):
+            code = "WH-" + code.removeprefix("WH")
+        return f"Sony {code}"
+
+    if category in {"phone", "laptop", "tv", "monitor", "headphones"} and brand:
+        escaped = re.escape(brand.lower())
+        match = re.search(
+            rf"\b{escaped}\s+([a-z0-9][a-z0-9-]*(?:\s+[a-z0-9][a-z0-9-]*){{0,2}})",
+            normalized,
+        )
+        if match and re.search(r"\d", match.group(1)):
+            tokens = [token for token in match.group(1).split() if token not in {"гб", "gb", "дюймов", "дюйма"}]
+            return f"{brand} {' '.join(tokens[:3]).upper()}".strip()
+    return ""
+
+
+def _extract_model_modifiers(text: str, model: str) -> list[str]:
+    normalized = normalize_text(f"{model} {text}")
+    result: list[str] = []
+    for modifier in get_category_spec("phone").model_modifiers:
+        if modifier == "e":
+            if re.search(r"\b(?:iphone\s*\d{1,2}|galaxy\s*[asz]\d{2,3})e\b", normalized):
+                result.append("e")
+            continue
+        pattern = re.escape(modifier).replace(r"\ ", r"\s+")
+        if re.search(rf"\b{pattern}\b", normalized):
+            result.append(modifier)
+    generation = re.search(r"\b(\d{1,2})(?:-?е|го)?\s+поколени", normalized)
+    if generation:
+        result.append(f"{generation.group(1)} поколение")
+    return list(dict.fromkeys(result))
+
+
+def _storage_gb(text: str) -> int | None:
+    normalized = normalize_text(text)
+    matches: list[int] = []
+    for match in re.finditer(r"(?<!\d)(1|2|32|64|128|256|512|1024|2048)\s*(тб|tb|гб|gb)\b", normalized):
+        value = int(match.group(1)) * (1024 if match.group(2) in {"тб", "tb"} else 1)
+        before = normalized[max(0, match.start() - 18):match.start()]
+        if re.search(r"(?:озу|ram|оператив)\s*$", before):
+            continue
+        matches.append(value)
+    return max(matches) if matches else None
+
+
+def _labeled_capacity(text: str, labels: str) -> int | None:
+    normalized = normalize_text(text)
+    patterns = (
+        rf"(?:{labels})\s*[:/-]?\s*(\d{{1,4}})\s*(?:гб|gb)?\b",
+        rf"(\d{{1,4}})\s*(?:гб|gb)\s*(?:{labels})\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _extract_major_criteria(text: str, category: str) -> dict[str, Any]:
+    normalized = normalize_text(text)
+    criteria: dict[str, Any] = {}
+
+    size_match = re.search(r"(?<!\d)(\d{2,3})\s*[xх×]\s*(\d{2,3})(?!\d)", normalized)
+    if size_match:
+        criteria["size"] = f"{size_match.group(1)}x{size_match.group(2)}"
+
+    diagonal_match = re.search(
+        r"(?<!\d)(\d{2,3}(?:[.,]\d)?)\s*(?:\"|”|″|дюйм(?:а|ов)?)(?![a-zа-я])",
+        normalized,
+    )
+    if diagonal_match:
+        criteria["diagonal"] = diagonal_match.group(1).replace(",", ".")
+
+    refresh_match = re.search(r"(?<!\d)(50|60|75|90|100|120|144|165|180|240|360)\s*(?:гц|hz)\b", normalized)
+    if refresh_match:
+        criteria["refresh_rate"] = int(refresh_match.group(1))
+
+    storage = _storage_gb(normalized)
+    if storage is not None:
+        criteria["storage_gb"] = storage
+    ram = _labeled_capacity(normalized, r"ram|озу|оператив(?:ная)?\s+память")
+    if ram is not None:
+        criteria["ram_gb"] = ram
+    ssd = _labeled_capacity(normalized, r"ssd|накопитель")
+    if ssd is not None:
+        criteria["ssd_gb"] = ssd
+
+    if re.search(r"\b(?:4k|4к|uhd|ultra\s*hd)\b", normalized):
+        criteria["resolution"] = "4K"
+    elif re.search(r"\b(?:qhd|wqhd|2k|2560\s*[xх×]\s*1440)\b", normalized):
+        criteria["resolution"] = "QHD"
+    elif re.search(r"\b(?:full\s*hd|fhd|1080p|1920\s*[xх×]\s*1080)\b", normalized):
+        criteria["resolution"] = "Full HD"
+
+    cpu = re.search(
+        r"\b((?:amd\s+)?ryzen\s*[3579](?:\s+\d{3,5}[a-z]*)?|"
+        r"(?:intel\s+)?(?:core\s+)?i[3579](?:[- ]?\d{3,5}[a-z]*)?|"
+        r"n95|n100|n150|n5095|celeron|pentium\s+silver)\b",
+        normalized,
+    )
+    if cpu:
+        criteria["cpu"] = _SPACE_RE.sub(" ", cpu.group(1)).upper()
+
+    volume = re.search(r"(?<!\d)(\d{1,2})(?:\s*[-–—]\s*(\d{1,2}))?\s*(?:л|литр(?:а|ов)?)\b", normalized)
+    if volume:
+        criteria["volume_l"] = (
+            [int(volume.group(1)), int(volume.group(2))]
+            if volume.group(2) else int(volume.group(1))
+        )
+    load = re.search(r"(?<!\d)(\d{2,3})\s*(?:кг|kg)\b", normalized)
+    if load:
+        criteria["load_kg"] = int(load.group(1))
+    battery = re.search(r"(?<!\d)(\d{4,6})\s*(?:mah|мач|мaч)\b", normalized)
+    if battery:
+        criteria["battery_mah"] = int(battery.group(1))
+
+    boolean_markers = (
+        ("wet_cleaning", ("влажная уборка", "влажной уборкой", "моющий")),
+        ("lidar", ("лидар", "lidar")),
+        ("cappuccinator", ("капучинатор", "milk system", "молочная система")),
+        ("lift_mechanism", ("подъемн", "подъёмн")),
+        ("anc", ("anc", "шумоподавление", "шумоподавлением", "noise cancelling")),
+        ("wireless", ("беспровод", "wireless", "bluetooth")),
+        ("ips", ("ips",)),
+        ("adaptive_sync", ("adaptive sync", "freesync", "g-sync", "gsync")),
+        ("grill", ("грил", "grill")),
+        ("inverter", ("инвертор", "inverter")),
+        ("medium_firmness", ("средней жесткости", "средней жёсткости")),
+        ("automatic", ("автоматическая", "автоматический")),
+        ("pet_hair", ("шерсть животных", "шерсти животных")),
+    )
+    for key, markers in boolean_markers:
+        if any(marker in normalized for marker in markers):
+            criteria[key] = True
+
+    if category == "tv" and "ps5" in normalized:
+        criteria.setdefault("resolution", "4K")
+    return criteria
+
+
+def _human_criteria(criteria: dict[str, Any], brand: str = "") -> list[str]:
+    result: list[str] = []
+    if brand:
+        result.append(f"бренд {brand}")
+    labels = {
+        "size": lambda value: str(value),
+        "diagonal": lambda value: f"диагональ {value}\"",
+        "refresh_rate": lambda value: f"{value} Гц",
+        "storage_gb": lambda value: f"{value} ГБ",
+        "ram_gb": lambda value: f"RAM {value} ГБ",
+        "ssd_gb": lambda value: f"SSD {value} ГБ",
+        "resolution": str,
+        "cpu": str,
+        "volume_l": lambda value: f"{value[0]}–{value[1]} л" if isinstance(value, list) else f"{value} л",
+        "load_kg": lambda value: f"нагрузка {value} кг",
+        "battery_mah": lambda value: f"{value} mAh",
+        "wet_cleaning": lambda _: "влажная уборка",
+        "lidar": lambda _: "лидар",
+        "cappuccinator": lambda _: "капучинатор",
+        "lift_mechanism": lambda _: "подъёмный механизм",
+        "anc": lambda _: "ANC",
+        "wireless": lambda _: "беспроводные",
+        "ips": lambda _: "IPS",
+        "adaptive_sync": lambda _: "Adaptive Sync",
+        "grill": lambda _: "гриль",
+        "inverter": lambda _: "инвертор",
+        "medium_firmness": lambda _: "средняя жёсткость",
+        "automatic": lambda _: "автоматическая",
+        "pet_hair": lambda _: "для шерсти животных",
+    }
+    for key, value in criteria.items():
+        if value in (None, "", False) or key not in labels:
+            continue
+        result.append(labels[key](value))
+    return list(dict.fromkeys(result))
+
+
+def parse_request_details(text: str) -> dict[str, Any]:
+    category = detect_category(text)
+    brand = known_brand(category, text)
+    model = _extract_model(text, category, brand)
+    criteria = _extract_major_criteria(text, category)
+    condition = parse_condition(text)
+    modifiers = _extract_model_modifiers(text, model)
+    desired: dict[str, Any] = {}
+    required = dict(criteria)
+    desired_hint = re.search(r"(?:желательно|лучше|хорошо\s+бы)\s+(.+?)(?:[,.;]|$)", normalize_text(text))
+    if desired_hint:
+        hinted = _extract_major_criteria(desired_hint.group(1), category)
+        for key, value in hinted.items():
+            desired[key] = required.pop(key, value)
+    return {
+        "category": category,
+        "brand": brand,
+        "model": model,
+        "model_modifiers": modifiers,
+        "condition": condition,
+        "budget": parse_budget(text),
+        "city": parse_city(text),
+        "use_case": parse_use_case(text),
+        "required_criteria": required,
+        "desired_criteria": desired,
+        **criteria,
+    }
+
+
 def parse_product_name(text: str) -> str:
-    result = text.lower().strip()
-    for pattern in (
-        r"^нуж(?:ен|на|но|ны)\s+",
-        r"^хочу\s+", r"^ищу\s+", r"^посоветуйте\s+", r"^подскажите\s+",
-        r"^порекомендуйте\s+", r"^мне\s+нуж(?:ен|на|но|ны)\s+",
-        r"^мне\s+хочется\s+", r"^дайте\s+", r"^найдите\s+",
-        r"^какой\s+", r"^какую\s+", r"^какие\s+",
-    ):
-        result = re.sub(pattern, "", result)
-    result = re.sub(r"\s*до\s+\d{1,3}\s+\d{3}\s*", " ", result)
-    result = re.sub(r"\s*до\s+\d+\s*[кК]?\s*", " ", result)
-    result = re.sub(r"\s*до\s+\d+\s*тыс.*?\s*", " ", result)
-    result = re.sub(r"\s+в\s+[А-Яа-яЁё]+\s*$", " ", result)
-    result = re.sub(r"\s+для\s+.+?(?=\s+до\s|\s+в\s|$)", " ", result)
-    result = re.sub(r"\s*купить\s*", " ", result)
-    result = re.sub(r"(?<![а-яёa-z0-9])б/?у(?![а-яёa-z0-9])", " ", result)
-    result = re.sub(r"(?<![а-яёa-z0-9])бу(?![а-яёa-z0-9])", " ", result)
-    result = re.sub(r"(?<![а-яёa-z0-9])новый?(?![а-яёa-z0-9])", " ", result)
-    result = re.sub(r"\s+", " ", result).strip()
-    words = result.split()
-    return " ".join(words[:4])[:40] if words else text[:40]
+    details = parse_request_details(text)
+    if details["model"]:
+        return str(details["model"])
+    category = str(details["category"])
+    display = _CATEGORY_DISPLAY.get(category, "товар")
+    brand = str(details["brand"] or "")
+    if brand and category not in {"unknown", "mattress", "bed"}:
+        return f"{brand} {display}"
+    if category != "unknown":
+        return display
+
+    result = normalize_text(text)
+    result = re.sub(
+        r"^(?:мне\s+)?(?:нуж(?:ен|на|но|ны)|хочу|ищу|посоветуйте|подскажите|"
+        r"порекомендуйте|найдите|купить)\s+",
+        "",
+        result,
+    )
+    result = _BUDGET_CONTEXT_RE.sub("", result)
+    result = _CURRENCY_AMOUNT_RE.sub("", result)
+    result = _SPACE_RE.sub(" ", result).strip(" ,.-")
+    return " ".join(result.split()[:8])[:80] or (text or "товар")[:80]
 
 
 def parse_is_used_allowed(text: str) -> bool:
-    lowered = text.lower()
-    return any(word in lowered for word in ("б/у", "бу ", "б/у ", "второй рук", "с рук", "подержан"))
+    return parse_condition(text) == "used"
 
 
 def parse_important_criteria(text: str) -> str:
-    lowered = text.lower()
-    criteria: list[str] = []
-    match = re.search(r"(\d{2})\s*(?:дюйм|\")", lowered)
-    if match:
-        criteria.append(f"диагональ {match.group(1)}\"")
-    if any(word in lowered for word in ("4k", "ultra hd", "ультра hd")):
-        criteria.append("4K")
-    if any(word in lowered for word in ("full hd", "фулл hd")):
-        criteria.append("Full HD")
-    if "120 гц" in lowered or "120hz" in lowered:
-        criteria.append("120 Гц")
-    if "hdmi" in lowered:
-        criteria.append("HDMI")
-    for brand in ("samsung", "lg", "sony", "xiaomi", "tcl", "hisense", "haier"):
-        if brand in lowered:
-            criteria.append(f"бренд {brand.title()}")
-    return ", ".join(criteria)
+    details = parse_request_details(text)
+    values = _human_criteria(
+        {**details.get("required_criteria", {}), **details.get("desired_criteria", {})},
+        str(details.get("brand") or ""),
+    )
+    return ", ".join(values)
 
 
 def is_ps5_tv(product_name: str, use_case: str, original_query: str) -> bool:
-    return "телевизор" in product_name.lower() and any(
-        word in f"{use_case} {original_query}".lower()
+    return detect_category(f"{product_name} {original_query}") == "tv" and any(
+        word in normalize_text(f"{use_case} {original_query}")
         for word in ("ps5", "ps 5", "playstation", "плейстейшен", "приставк", "игр")
     )
 
 
-def full_parse(text: str) -> dict:
+def full_parse(text: str) -> dict[str, Any]:
+    details = parse_request_details(text)
     product_name = parse_product_name(text)
-    use_case = parse_use_case(text)
-    budget = parse_budget(text)
-    city = parse_city(text)
     criteria = parse_important_criteria(text)
+    use_case = str(details["use_case"])
     if is_ps5_tv(product_name, use_case, text):
-        required = ["4K", "HDMI", "43–55 дюймов", "игровой режим/низкая задержка", "120 Гц желательно"]
+        required = ["4K", "HDMI", "игровой режим/низкая задержка", "120 Гц желательно"]
         existing = {item.strip().lower() for item in criteria.split(",") if item.strip()}
         criteria = ", ".join([item for item in required if item.lower() not in existing] + ([criteria] if criteria else []))
-    return {
-        "original_query": text.strip(),
+    result: dict[str, Any] = {
+        "original_query": (text or "").strip(),
         "product_name": product_name,
         "use_case": use_case,
-        "budget": budget,
-        "city": city,
+        "budget": str(details["budget"]),
+        "city": str(details["city"]),
         "important_criteria": criteria,
-        "clean_search_query": build_search_query(product_name, use_case, budget, city, criteria),
-        "is_used_allowed": parse_is_used_allowed(text),
+        "clean_search_query": build_search_query(product_name, use_case, str(details["budget"]), str(details["city"]), criteria),
+        "is_used_allowed": details["condition"] == "used",
+        "category": details["category"],
+        "brand": details["brand"],
+        "model": details["model"],
+        "model_modifiers": details["model_modifiers"],
+        "condition": details["condition"],
+        "required_criteria": details["required_criteria"],
+        "desired_criteria": details["desired_criteria"],
     }
+    for key in (
+        "size", "diagonal", "refresh_rate", "storage_gb", "ram_gb", "ssd_gb",
+        "resolution", "cpu", "volume_l", "load_kg", "battery_mah",
+    ):
+        if key in details:
+            result[key] = details[key]
+    return result

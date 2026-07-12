@@ -16,7 +16,7 @@ from typing import Any, Callable, TypeVar
 from uuid import uuid4
 
 
-CACHE_VERSION = "search-cache-v1"
+CACHE_VERSION = "search-cache-v2"
 DEFAULT_SUCCESS_TTL_SECONDS = 2 * 60 * 60
 DEFAULT_EMPTY_TTL_SECONDS = 20 * 60
 DEFAULT_NEGATIVE_TTL_SECONDS = 10 * 60
@@ -68,7 +68,7 @@ def sanitize_payload(value: Any) -> Any:
 
 def ttl_for_status(status: str) -> int:
     normal = normalize_text(status)
-    if normal in {"ok", "success", "done", "cache_hit"}:
+    if normal in {"ok", "success", "partial_success", "done", "cache_hit"}:
         return DEFAULT_SUCCESS_TTL_SECONDS
     if normal in {"empty", "no_results"}:
         return DEFAULT_EMPTY_TTL_SECONDS
@@ -213,20 +213,54 @@ class SearchCache:
 
         return self._run(operation)
 
-    def cache_stats(self) -> dict[str, int]:
+    def cache_stats(self) -> dict[str, Any]:
         now = int(time.time())
 
-        def operation(conn: sqlite3.Connection) -> dict[str, int]:
+        def operation(conn: sqlite3.Connection) -> dict[str, Any]:
             total = int(conn.execute("SELECT COUNT(*) FROM cache_entries").fetchone()[0])
             expired = int(conn.execute("SELECT COUNT(*) FROM cache_entries WHERE expires_at <= ?", (now,)).fetchone()[0])
             runs = int(conn.execute("SELECT COUNT(*) FROM benchmark_runs").fetchone()[0])
             cases = int(conn.execute("SELECT COUNT(*) FROM benchmark_cases").fetchone()[0])
+            source_entries = int(conn.execute("SELECT COUNT(*) FROM cache_entries WHERE stage = 'source'").fetchone()[0])
+            snapshots = int(conn.execute("SELECT COUNT(*) FROM cache_entries WHERE stage = 'benchmark_snapshot'").fetchone()[0])
+            cache_rows = conn.execute("SELECT status, COUNT(*) AS count FROM cache_entries GROUP BY status").fetchall()
+            cache_details = conn.execute("SELECT status, error_text, expires_at FROM cache_entries").fetchall()
+            case_rows = conn.execute("SELECT status, COUNT(*) AS count FROM benchmark_cases GROUP BY status").fetchall()
+            run_rows = conn.execute(
+                "SELECT run_id, COUNT(*) AS count FROM benchmark_cases GROUP BY run_id ORDER BY MAX(finished_at) DESC"
+            ).fetchall()
+            last_run = conn.execute("SELECT run_id FROM benchmark_runs ORDER BY started_at DESC LIMIT 1").fetchone()
+            grouped_cache = {str(row["status"]): int(row["count"]) for row in cache_rows}
+            grouped_cases = {str(row["status"]): int(row["count"]) for row in case_rows}
+            cache_buckets = {"SUCCESS": 0, "EMPTY": 0, "BLOCKED": 0, "TIMEOUT": 0, "EXPIRED": 0, "ERROR": 0}
+            for row in cache_details:
+                status_text = f"{row['status']} {row['error_text'] or ''}".lower()
+                if int(row["expires_at"]) <= now:
+                    cache_buckets["EXPIRED"] += 1
+                elif any(marker in status_text for marker in ("401", "403", "429", "498", "captcha", "blocked", "rate_limit")):
+                    cache_buckets["BLOCKED"] += 1
+                elif "timeout" in status_text:
+                    cache_buckets["TIMEOUT"] += 1
+                elif "empty" in status_text:
+                    cache_buckets["EMPTY"] += 1
+                elif any(marker in status_text for marker in ("ok", "success", "done", "cache_hit")):
+                    cache_buckets["SUCCESS"] += 1
+                else:
+                    cache_buckets["ERROR"] += 1
             return {
                 "entries": total,
                 "fresh_entries": total - expired,
                 "expired_entries": expired,
                 "benchmark_runs": runs,
                 "benchmark_cases": cases,
+                "source_cache_entries": source_entries,
+                "benchmark_snapshots": snapshots,
+                "cache_entry_statuses": grouped_cache,
+                "cache_entry_buckets": cache_buckets,
+                "benchmark_case_statuses": grouped_cases,
+                "benchmark_cases_by_run": {str(row["run_id"]): int(row["count"]) for row in run_rows},
+                "last_run_id": str(last_run["run_id"]) if last_run else "",
+                "unique_run_ids": runs,
                 "size_bytes": self.path.stat().st_size if self.path.exists() else 0,
             }
 
@@ -308,7 +342,11 @@ class SearchCache:
     def completed_case_ids(self, run_id: str) -> set[str]:
         def operation(conn: sqlite3.Connection) -> set[str]:
             rows = conn.execute(
-                "SELECT case_id FROM benchmark_cases WHERE run_id = ? AND finished_at IS NOT NULL",
+                """
+                SELECT case_id FROM benchmark_cases
+                WHERE run_id = ? AND finished_at IS NOT NULL
+                  AND status IN ('DONE', 'SUCCESS', 'CACHE_HIT', 'EMPTY')
+                """,
                 (run_id,),
             ).fetchall()
             return {str(row["case_id"]) for row in rows}

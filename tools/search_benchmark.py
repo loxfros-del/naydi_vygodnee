@@ -77,9 +77,27 @@ SMOKE_CASES = (
     BenchmarkCase("smoke_monitor_27", "Нужен монитор 27 дюймов 144 Гц до 30к"),
     BenchmarkCase("smoke_microwave", "Нужна микроволновка до 12к"),
 )
-ALL_CASES = {case.case_id: case for case in (*EXTENDED_CASES, *SMOKE_CASES)}
+EXTRA_CASES = (
+    BenchmarkCase("coffee_machine", "Нужна кофемашина с капучинатором до 35к"),
+)
+QUALITY_V3_CASES = (
+    BenchmarkCase("quality_v3_galaxy_a55", "Нужен Samsung Galaxy A55 256 ГБ до 35к в Москве"),
+    BenchmarkCase("quality_v3_monitor", "Нужен монитор 27 дюймов QHD 144 Гц до 35к"),
+    BenchmarkCase("quality_v3_robot_vacuum", "Нужен робот-пылесос с лидаром и влажной уборкой до 30к"),
+    BenchmarkCase("quality_v3_coffee_machine", "Нужна автоматическая кофемашина с капучинатором до 45к"),
+    BenchmarkCase("quality_v3_microwave", "Нужна микроволновка 20–25 литров до 15к"),
+    BenchmarkCase("quality_v3_mattress", "Нужен матрас 160x200 средней жёсткости до 20к"),
+    BenchmarkCase("quality_v3_bed", "Нужна кровать 160x200 с подъёмным механизмом до 30к"),
+    BenchmarkCase("quality_v3_headphones", "Нужны полноразмерные беспроводные наушники с ANC до 15к"),
+    BenchmarkCase("quality_v3_laptop", "Нужен ноутбук Ryzen 5, 16 ГБ, SSD 512 до 60к"),
+    BenchmarkCase("quality_v3_tv", "Нужен телевизор 55 дюймов 4К 120 Гц для PS5 до 70к"),
+    BenchmarkCase("quality_v3_vacuum", "Нужен вертикальный пылесос для шерсти животных до 25к"),
+    BenchmarkCase("quality_v3_iphone_used", "Нужен iPhone 15 Pro 256 ГБ б/у до 90к"),
+)
+ALL_CASES = {case.case_id: case for case in (*EXTENDED_CASES, *SMOKE_CASES, *EXTRA_CASES, *QUALITY_V3_CASES)}
 CACHE_STAGE = "benchmark_snapshot"
 CACHE_SOURCE = "search_benchmark"
+SNAPSHOT_STATUS_PRIORITY = ("SUCCESS", "PARTIAL_SUCCESS", "CASE_TIMEOUT", "ERROR", "EMPTY")
 
 
 def _budget_value(parsed: dict[str, Any]) -> int | None:
@@ -89,13 +107,22 @@ def _budget_value(parsed: dict[str, Any]) -> int | None:
 
 def _make_request(raw_query: str, request_id: int) -> tuple[Request, dict[str, Any]]:
     parsed = full_parse(raw_query)
+    request_fields = {
+        key: parsed[key]
+        for key in (
+            "original_query", "product_name", "use_case", "budget", "city",
+            "important_criteria", "clean_search_query", "is_used_allowed",
+        )
+        if key in parsed
+    }
     request = Request(
         id=request_id,
         user_id=0,
         username="benchmark",
         product=parsed.get("product_name", ""),
-        **parsed,
+        **request_fields,
     )
+    request.parsed_details = parsed
     return request, parsed
 
 
@@ -451,11 +478,21 @@ def _candidate_snapshot(candidate: Any) -> dict[str, Any]:
         "product_facts", "facts_json", "price_source", "price_reliability", "price_rejected_reason",
         "price_from_budget_suspect", "bad_price_context", "score_cap_applied", "low_price_suspect",
         "external_source", "verify_status", "product_quality_level", "brand_quality", "why_not_verified_good",
+        "price_confidence", "price_evidence", "exact_match_status", "exact_match_reason",
+        "product_card_confidence", "product_card_reason", "source_confidence", "verification_confidence",
+        "category_quality_score", "category_quality_reasons", "score_breakdown", "score_raw", "score_cap_reasons",
     )
     return {field: getattr(candidate, field, None) for field in fields if getattr(candidate, field, None) is not None}
 
 
-def _snapshot_collection(collection: Any, parsed: dict[str, Any], category: str) -> dict[str, Any]:
+def _snapshot_collection(
+    collection: Any,
+    parsed: dict[str, Any],
+    category: str,
+    *,
+    stages: list[dict[str, Any]] | None = None,
+    snapshot_status: str = "",
+) -> dict[str, Any]:
     now = int(time.time())
     attempts = [
         {
@@ -468,6 +505,17 @@ def _snapshot_collection(collection: Any, parsed: dict[str, Any], category: str)
         }
         for item in getattr(collection, "attempts", [])
     ]
+    source_attempts = [item for item in attempts if item["source"] not in {"quality_filter", "candidate_verifier", "manual_fallback"}]
+    completed_sources = sorted({
+        str(item["source"])
+        for item in source_attempts
+        if str(item["status"]).upper() in {"OK", "EMPTY"} and int(item.get("found_count") or 0) > 0
+    })
+    failed_sources = sorted({
+        str(item["source"])
+        for item in source_attempts
+        if str(item["status"]).upper() not in {"OK", "EMPTY"}
+    })
     return {
         "parsed": parsed,
         "category": category,
@@ -476,6 +524,10 @@ def _snapshot_collection(collection: Any, parsed: dict[str, Any], category: str)
         "verify_stats": dict(getattr(collection, "verify_stats", {}) or {}),
         "quality_stats": dict(getattr(collection, "quality_stats", {}) or {}),
         "attempts": attempts,
+        "stages": stages or [],
+        "snapshot_status": snapshot_status,
+        "completed_sources": completed_sources,
+        "failed_sources": failed_sources,
         "source_data_timestamp": now,
     }
 
@@ -491,10 +543,15 @@ def _hydrate_collection(snapshot: dict[str, Any]) -> Any:
     )
 
 
-def _snapshot_key(cache: SearchCache, request: Request, parsed: dict[str, Any]) -> str:
+def _snapshot_key(
+    cache: SearchCache,
+    request: Request,
+    parsed: dict[str, Any],
+    snapshot_status: str = "SUCCESS",
+) -> str:
     return cache.make_cache_key(
         stage=CACHE_STAGE,
-        source=CACHE_SOURCE,
+        source=f"{CACHE_SOURCE}:{snapshot_status.lower()}",
         query=request.clean_search_query or request.original_query or request.product_name or request.product,
         category=detect_product_category(request),
         city=request.city,
@@ -507,6 +564,28 @@ def _snapshot_key(cache: SearchCache, request: Request, parsed: dict[str, Any]) 
 def cached_snapshot_only(cache: SearchCache, cache_key: str) -> CacheLookup:
     """Cached mode helper. It intentionally has no loader or network fallback."""
     return cache.get(cache_key)
+
+
+def preferred_snapshot(
+    cache: SearchCache,
+    request: Request,
+    parsed: dict[str, Any],
+) -> tuple[str, CacheLookup, str]:
+    """Return fresh snapshots in quality order, never letting a timeout hide success."""
+    last_lookup = CacheLookup("CACHE_MISS")
+    last_key = ""
+    for status in SNAPSHOT_STATUS_PRIORITY:
+        key = _snapshot_key(cache, request, parsed, status)
+        lookup = cached_snapshot_only(cache, key)
+        if lookup.state == "HIT":
+            return status, lookup, key
+        if lookup.state != "CACHE_MISS":
+            last_lookup, last_key = lookup, key
+    return "", last_lookup, last_key
+
+
+def status_after_case_timeout(snapshot: dict[str, Any] | None) -> str:
+    return "PARTIAL_SUCCESS" if snapshot and snapshot.get("raw_candidates") else "CASE_TIMEOUT"
 
 
 def snapshot_or_load(
@@ -525,22 +604,184 @@ def snapshot_or_load(
     return "LIVE_REQUIRED", loader(), lookup
 
 
-def _live_case_worker(case_id: str, query: str, sequence: int, output: Any) -> None:
+def _cache_source_event(
+    cache: SearchCache,
+    request: Request,
+    category: str,
+    attempt: Any,
+    candidates: list[Any],
+) -> None:
+    source = str(getattr(attempt, "source", "") or "unknown")
+    query = str(getattr(attempt, "query", "") or request.clean_search_query or request.original_query)
+    status = str(getattr(attempt, "status", "ERROR") or "ERROR")
+    error_text = str(getattr(attempt, "error_text", "") or "")
+    key = cache.make_cache_key(
+        stage="source",
+        source=source,
+        query=query,
+        category=category,
+        city=request.city,
+        budget=request.budget,
+        use_case=request.use_case or request.purpose,
+        is_used_allowed=request.is_used_allowed,
+    )
+    payload = {
+        "candidates": [_candidate_snapshot(item) for item in candidates],
+        "attempt": {
+            "source": source,
+            "query": query,
+            "status": status,
+            "found_count": getattr(attempt, "found_count", 0),
+            "kept_count": getattr(attempt, "kept_count", 0),
+            "error_text": error_text,
+        },
+        "source_data_timestamp": int(time.time()),
+    }
+    cache.put(
+        cache_key=key,
+        stage="source",
+        query=query,
+        source=source,
+        payload=payload,
+        status=status,
+        error_text=error_text,
+    )
+    duration = getattr(attempt, "duration_ms", None)
+    if status.upper() in {"OK", "EMPTY"}:
+        print(f"SOURCE DONE {source} {duration or 0}ms rows={len(candidates)}", flush=True)
+    else:
+        print(f"SOURCE ERROR {source} {duration or 0}ms {error_text or status}", flush=True)
+    print(f"SOURCE CACHED {source} {key}", flush=True)
+
+
+def _write_partial_snapshot(
+    cache: SearchCache,
+    request: Request,
+    parsed: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> None:
+    if not snapshot.get("raw_candidates"):
+        return
+    key = _snapshot_key(cache, request, parsed, "PARTIAL_SUCCESS")
+    cache.put(
+        cache_key=key,
+        stage=CACHE_STAGE,
+        query=request.clean_search_query or request.original_query,
+        source=f"{CACHE_SOURCE}:partial_success",
+        payload=snapshot,
+        status="PARTIAL_SUCCESS",
+    )
+
+
+def _live_case_worker(
+    case_id: str,
+    query: str,
+    sequence: int,
+    cache_path: str,
+    verification_mode: str,
+    source_timeout_seconds: int,
+    write_cache: bool,
+    output: Any,
+) -> None:
     try:
+        cache = SearchCache(cache_path)
         request, parsed = _make_request(query, sequence)
         category = detect_product_category(request)
-        collection = collect_product_candidates(request, max_results=15)
-        output.put({"ok": True, "case_id": case_id, "snapshot": _snapshot_collection(collection, parsed, category)})
+        stage_records: list[dict[str, Any]] = []
+
+        def source_observer(attempt: Any, candidates: list[Any]) -> None:
+            if write_cache:
+                _cache_source_event(cache, request, category, attempt, candidates)
+
+        def stage_observer(stage: str, collection: Any, details: dict[str, Any]) -> None:
+            now = int(time.time())
+            stage_records.append({
+                "stage": stage,
+                "status": str(details.get("status") or "DONE"),
+                "started_at": now,
+                "finished_at": now,
+                "duration_ms": int(details.get("duration_ms") or 0),
+                "details": details,
+                "error_text": str(details.get("error_text") or ""),
+            })
+            if stage == "source_start":
+                print(f"SOURCE START {details.get('source', '')} {details.get('query', '')}", flush=True)
+                return
+            snapshot = _snapshot_collection(
+                collection,
+                parsed,
+                category,
+                stages=stage_records,
+                snapshot_status="PARTIAL_SUCCESS",
+            )
+            if write_cache:
+                _write_partial_snapshot(cache, request, parsed, snapshot)
+
+        collection = collect_product_candidates(
+            request,
+            max_results=15,
+            verification_mode=verification_mode,
+            source_timeout_seconds=source_timeout_seconds,
+            source_observer=source_observer,
+            stage_observer=stage_observer,
+        )
+        final_status = "SUCCESS" if collection.raw_candidates else "EMPTY"
+        snapshot = _snapshot_collection(
+            collection,
+            parsed,
+            category,
+            stages=stage_records,
+            snapshot_status=final_status,
+        )
+        if write_cache:
+            cache.put(
+                cache_key=_snapshot_key(cache, request, parsed, final_status),
+                stage=CACHE_STAGE,
+                query=request.clean_search_query or query,
+                source=f"{CACHE_SOURCE}:{final_status.lower()}",
+                payload=snapshot,
+                status=final_status,
+            )
+        # The snapshot is already durable in SQLite. Sending it through a
+        # multiprocessing queue can fill the pipe and prevent process exit.
+        output.put({"ok": True, "case_id": case_id, "status": final_status})
     except Exception as exc:  # pragma: no cover - exercised through parent orchestration
         output.put({"ok": False, "case_id": case_id, "error": f"{type(exc).__name__}: {exc}"})
 
 
-def _run_live_case(case: BenchmarkCase, sequence: int, timeout_seconds: int) -> tuple[str, dict[str, Any] | None, str]:
+def _run_live_case(
+    case: BenchmarkCase,
+    sequence: int,
+    timeout_seconds: int,
+    *,
+    cache_path: str,
+    verification_mode: str,
+    source_timeout_seconds: int,
+    write_cache: bool,
+) -> tuple[str, dict[str, Any] | None, str]:
     context = mp.get_context("spawn")
     output = context.Queue(maxsize=1)
-    process = context.Process(target=_live_case_worker, args=(case.case_id, case.query, sequence, output))
+    process = context.Process(
+        target=_live_case_worker,
+        args=(
+            case.case_id,
+            case.query,
+            sequence,
+            cache_path,
+            verification_mode,
+            source_timeout_seconds,
+            write_cache,
+            output,
+        ),
+    )
     process.start()
-    process.join(max(1, timeout_seconds))
+    try:
+        process.join(max(1, timeout_seconds))
+    except KeyboardInterrupt:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        raise
     if process.is_alive():
         process.terminate()
         process.join(5)
@@ -556,7 +797,7 @@ def _run_live_case(case: BenchmarkCase, sequence: int, timeout_seconds: int) -> 
         output.join_thread()
     if not message.get("ok"):
         return "ERROR", None, str(message.get("error") or "live worker failed")
-    return "DONE", message["snapshot"], ""
+    return str(message.get("status") or "SUCCESS"), None, ""
 
 
 def _store_source_entries(cache: SearchCache, snapshot: dict[str, Any], request: Request) -> None:
@@ -634,6 +875,11 @@ def _result_from_snapshot(case: BenchmarkCase, snapshot: dict[str, Any], cache_i
         "cache_age_seconds": cache_info.get("cache_age_seconds", 0),
         "is_stale": bool(cache_info.get("is_stale", False)),
         "source_data_timestamp": snapshot.get("source_data_timestamp"),
+        "snapshot_status": snapshot.get("snapshot_status") or cache_info.get("snapshot_status") or "",
+        "completed_sources": list(snapshot.get("completed_sources") or []),
+        "failed_sources": list(snapshot.get("failed_sources") or []),
+        "candidate_count": len(snapshot.get("raw_candidates") or []),
+        "is_partial": (snapshot.get("snapshot_status") or cache_info.get("snapshot_status")) == "PARTIAL_SUCCESS",
         "top": top,
     }
 
@@ -652,6 +898,14 @@ def _print_case_result(index: int, total: int, state: str, duration_ms: int, res
         f"GOOD={result['VERIFIED_GOOD']}; OK={result['VERIFIED_OK']}; "
         f"MANUAL={result['NEED_MANUAL_CHECK']}; BLOCKED={result['VERIFY_BLOCKED']}; "
         f"PRICE_MISSING={result['PRICE_MISSING saved']}",
+        flush=True,
+    )
+    print(
+        f"  snapshot_status={result.get('snapshot_status') or '-'}; "
+        f"snapshot_age_seconds={result.get('cache_age_seconds', 0)}; "
+        f"completed_sources={result.get('completed_sources', [])}; "
+        f"failed_sources={result.get('failed_sources', [])}; "
+        f"candidate_count={result.get('candidate_count', 0)}; is_partial={result.get('is_partial', False)}",
         flush=True,
     )
     for rank, item in enumerate(result["top"], 1):
@@ -673,11 +927,13 @@ def _parse_args() -> argparse.Namespace:
     modes.add_argument("--refresh", action="store_const", const="refresh", dest="mode")
     modes.add_argument("--no-cache", action="store_const", const="no-cache", dest="mode")
     parser.set_defaults(mode="auto")
-    parser.add_argument("--suite", choices=("smoke", "core", "extended"), default="extended")
+    parser.add_argument("--suite", choices=("smoke", "core", "extended", "quality_v3"), default="extended")
     parser.add_argument("--case", dest="case_id")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--resume")
     parser.add_argument("--case-timeout", type=int, default=90)
+    parser.add_argument("--source-timeout", type=int, default=45)
+    parser.add_argument("--verification", choices=("full", "fast", "none"), default="")
     parser.add_argument("--cache-stats", action="store_true")
     parser.add_argument("--purge-expired", action="store_true")
     parser.add_argument("--cache-path", default="")
@@ -694,6 +950,8 @@ def _select_cases(args: argparse.Namespace) -> list[BenchmarkCase]:
         cases = list(SMOKE_CASES)
     elif args.suite == "core":
         cases = [case for case in EXTENDED_CASES if case.case_id in CORE_CASE_IDS]
+    elif args.suite == "quality_v3":
+        cases = list(QUALITY_V3_CASES)
     else:
         cases = list(EXTENDED_CASES)
     return cases[:args.limit] if args.limit > 0 else cases
@@ -715,6 +973,9 @@ def main() -> int:
     except ValueError as exc:
         print(f"ERROR: {exc}", flush=True)
         return 2
+    verification_mode = args.verification or (
+        "fast" if args.suite == "smoke" or any(case.case_id.startswith("smoke_") for case in cases) else "full"
+    )
 
     use_store = args.mode != "no-cache"
     if args.resume and not use_store:
@@ -733,7 +994,11 @@ def main() -> int:
         run_id = "no-cache"
         completed = set()
 
-    print(f"BENCHMARK run_id={run_id} mode={args.mode} suite={args.suite} cases={len(cases)}", flush=True)
+    print(
+        f"BENCHMARK run_id={run_id} mode={args.mode} suite={args.suite} "
+        f"verification={verification_mode} cases={len(cases)}",
+        flush=True,
+    )
     results: list[dict[str, Any]] = []
     network_calls = 0
     started_total = time.monotonic()
@@ -750,8 +1015,11 @@ def main() -> int:
             case_started_at = int(time.time())
             started = time.monotonic()
             request, parsed = _make_request(case.query, index)
-            cache_key = _snapshot_key(cache, request, parsed)
-            lookup = cached_snapshot_only(cache, cache_key) if use_store and args.mode not in {"live", "refresh"} else CacheLookup("CACHE_MISS")
+            selected_snapshot_status = ""
+            if use_store and args.mode not in {"live", "refresh"}:
+                selected_snapshot_status, lookup, _ = preferred_snapshot(cache, request, parsed)
+            else:
+                lookup = CacheLookup("CACHE_MISS")
             state = ""
             snapshot: dict[str, Any] | None = None
             error = ""
@@ -759,27 +1027,62 @@ def main() -> int:
             if lookup.state == "HIT":
                 state = "CACHE_HIT"
                 snapshot = lookup.payload
-                cache_info = {"cached_at": lookup.created_at, "cache_age_seconds": lookup.cache_age_seconds, "is_stale": lookup.is_stale}
+                cache_info = {
+                    "cached_at": lookup.created_at,
+                    "cache_age_seconds": lookup.cache_age_seconds,
+                    "is_stale": lookup.is_stale,
+                    "snapshot_status": selected_snapshot_status,
+                }
             elif args.mode == "cached":
                 state = lookup.state
                 error = "cached mode does not call sources"
             else:
-                state, snapshot, error = _run_live_case(case, index, args.case_timeout)
+                state, snapshot, error = _run_live_case(
+                    case,
+                    index,
+                    args.case_timeout,
+                    cache_path=str(cache.path),
+                    verification_mode=verification_mode,
+                    source_timeout_seconds=args.source_timeout,
+                    write_cache=use_store,
+                )
                 network_calls += 1
-                if state == "DONE" and snapshot is not None and use_store:
-                    cache.put(
-                        cache_key=cache_key,
-                        stage=CACHE_STAGE,
-                        query=request.clean_search_query or case.query,
-                        source=CACHE_SOURCE,
-                        payload=snapshot,
-                        status="OK",
-                        duration_ms=int((time.monotonic() - started) * 1000),
-                    )
-                    _store_source_entries(cache, snapshot, request)
-                    cache_info = {"cached_at": int(time.time()), "cache_age_seconds": 0, "is_stale": False}
+                if snapshot is None and use_store and state in {"SUCCESS", "EMPTY"}:
+                    final_lookup = cache.get(_snapshot_key(cache, request, parsed, state))
+                    if final_lookup.state == "HIT":
+                        snapshot = final_lookup.payload
+                        cache_info = {
+                            "cached_at": final_lookup.created_at,
+                            "cache_age_seconds": final_lookup.cache_age_seconds,
+                            "is_stale": final_lookup.is_stale,
+                            "snapshot_status": state,
+                        }
+                if snapshot is not None:
+                    if not cache_info:
+                        cache_info = {
+                            "cached_at": int(time.time()),
+                            "cache_age_seconds": 0,
+                            "is_stale": False,
+                            "snapshot_status": state,
+                        }
                 elif use_store:
-                    snapshot = {
+                    partial_lookup = cache.get(_snapshot_key(cache, request, parsed, "PARTIAL_SUCCESS"))
+                    if (
+                        partial_lookup.state == "HIT"
+                        and partial_lookup.created_at >= case_started_at
+                        and partial_lookup.payload
+                        and partial_lookup.payload.get("raw_candidates")
+                    ):
+                        state = status_after_case_timeout(partial_lookup.payload)
+                        snapshot = partial_lookup.payload
+                        cache_info = {
+                            "cached_at": partial_lookup.created_at,
+                            "cache_age_seconds": partial_lookup.cache_age_seconds,
+                            "is_stale": partial_lookup.is_stale,
+                            "snapshot_status": "PARTIAL_SUCCESS",
+                        }
+                    else:
+                        snapshot = {
                         "parsed": parsed,
                         "category": detect_product_category(request),
                         "candidates": [],
@@ -788,20 +1091,25 @@ def main() -> int:
                         "quality_stats": {},
                         "attempts": [],
                         "source_data_timestamp": int(time.time()),
-                        "case_status": state,
+                        "snapshot_status": state,
                         "error": error,
-                    }
-                    cache.put(
-                        cache_key=cache_key,
-                        stage=CACHE_STAGE,
-                        query=request.clean_search_query or case.query,
-                        source=CACHE_SOURCE,
-                        payload=snapshot,
-                        status=state,
-                        duration_ms=int((time.monotonic() - started) * 1000),
-                        error_text=error,
-                    )
-                    cache_info = {"cached_at": int(time.time()), "cache_age_seconds": 0, "is_stale": False}
+                        }
+                        cache.put(
+                            cache_key=_snapshot_key(cache, request, parsed, state),
+                            stage=CACHE_STAGE,
+                            query=request.clean_search_query or case.query,
+                            source=f"{CACHE_SOURCE}:{state.lower()}",
+                            payload=snapshot,
+                            status=state,
+                            duration_ms=int((time.monotonic() - started) * 1000),
+                            error_text=error,
+                        )
+                        cache_info = {
+                            "cached_at": int(time.time()),
+                            "cache_age_seconds": 0,
+                            "is_stale": False,
+                            "snapshot_status": state,
+                        }
             duration_ms = int((time.monotonic() - started) * 1000)
             result = _result_from_snapshot(case, snapshot, cache_info) if snapshot is not None else {
                 "case_id": case.case_id,

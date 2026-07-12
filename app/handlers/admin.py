@@ -151,7 +151,8 @@ def format_search_result_card(sr: SearchResult, idx: int) -> str:
         risk_flags = json.loads(sr.risk_flags) if sr.risk_flags else []
     except json.JSONDecodeError:
         risk_flags = []
-    line += f"\n⚠️ Риски: {html.escape(', '.join(risk_flags) if risk_flags else 'нет')}"
+    main_risks = [str(item) for item in risk_flags if str(item).strip()][:3]
+    line += f"\n⚠️ Риски: {html.escape(_clip_text('; '.join(main_risks) if main_risks else 'нет', 360))}"
     if sr.admin_note:
         line += f"\n📝 {html.escape(sr.admin_note)}"
     return line
@@ -281,6 +282,48 @@ def _facts_compact_line(facts: dict) -> str:
             parts.append("подголовник")
         if facts.get("load_capacity"):
             parts.append(str(facts["load_capacity"]))
+    elif category == "robot_vacuum":
+        for key in ("brand", "model", "navigation", "suction"):
+            if facts.get(key):
+                parts.append(str(facts[key]))
+        if facts.get("wet_cleaning"):
+            parts.append("влажная уборка")
+        if facts.get("self_empty_station"):
+            parts.append("станция самоочистки")
+    elif category == "vacuum":
+        for key in ("brand", "model", "type", "power", "suction", "battery"):
+            if facts.get(key):
+                parts.append(str(facts[key]))
+        if facts.get("wet_cleaning"):
+            parts.append("влажная уборка")
+    elif category == "microwave":
+        for key in ("brand", "model", "volume", "power", "controls"):
+            if facts.get(key):
+                parts.append(str(facts[key]))
+        if facts.get("grill"):
+            parts.append("гриль")
+        if facts.get("inverter"):
+            parts.append("инвертор")
+    elif category == "coffee_machine":
+        for key in ("brand", "model", "machine_type", "pressure"):
+            if facts.get(key):
+                parts.append(str(facts[key]))
+        if facts.get("cappuccinator"):
+            parts.append("капучинатор")
+        if facts.get("grinder"):
+            parts.append("кофемолка")
+    elif category == "mattress":
+        for key in ("brand", "model", "size", "firmness", "spring_type", "height", "load_per_bed"):
+            if facts.get(key):
+                parts.append(str(facts[key]))
+    elif category == "bed":
+        for key in ("brand", "model", "size", "material", "base"):
+            if facts.get(key):
+                parts.append(str(facts[key]))
+        if facts.get("lift_mechanism"):
+            parts.append("подъёмный механизм")
+        if facts.get("storage"):
+            parts.append("хранение")
     elif facts.get("diagonal"):
         parts.append(f'{facts["diagonal"]}"')
         for key in ("resolution", "refresh_rate", "matrix_type"):
@@ -290,7 +333,7 @@ def _facts_compact_line(facts: dict) -> str:
         parts.append("факты не подтверждены")
     if facts.get("budget_status"):
         parts.append(_budget_status_label(str(facts["budget_status"])))
-    return ", ".join(parts)
+    return _clip_text(", ".join(parts), 420)
 
 
 def _facts_ps5_line(facts: dict) -> str:
@@ -347,6 +390,66 @@ def _facts_detail_lines(sr: SearchResult) -> list[str]:
             ("HDMI", facts.get("hdmi")),
             ("Матрица", facts.get("matrix_type")),
         )
+    elif category == "monitor":
+        diagonal = f'{facts.get("diagonal")}"' if facts.get("diagonal") else ""
+        items = (
+            ("Бренд", facts.get("brand")), ("Модель", facts.get("model")),
+            ("Диагональ", diagonal), ("Разрешение", facts.get("resolution")),
+            ("Частота", facts.get("refresh_rate")), ("Матрица", facts.get("panel")),
+            ("Отклик", facts.get("response_time")), ("Adaptive Sync", facts.get("adaptive_sync")),
+        )
+    elif category == "robot_vacuum":
+        items = (
+            ("Бренд", facts.get("brand")), ("Модель", facts.get("model")),
+            ("Влажная уборка", "есть" if facts.get("wet_cleaning") else ""),
+            ("Навигация", facts.get("navigation")), ("Лидар", "есть" if facts.get("lidar") else ""),
+            ("Всасывание", facts.get("suction")),
+            ("Станция", "есть" if facts.get("self_empty_station") else ""),
+            ("Карта", "есть" if facts.get("mapping") else ""),
+        )
+    elif category == "vacuum":
+        attachments = ", ".join(str(item) for item in facts.get("attachments") or [])
+        items = (
+            ("Бренд", facts.get("brand")), ("Модель", facts.get("model")),
+            ("Тип", facts.get("type")), ("Мощность", facts.get("power")),
+            ("Всасывание", facts.get("suction")), ("Батарея", facts.get("battery")),
+            ("Влажная уборка", "есть" if facts.get("wet_cleaning") else ""),
+            ("Насадки", attachments),
+        )
+    elif category == "microwave":
+        items = (
+            ("Бренд", facts.get("brand")), ("Модель", facts.get("model")),
+            ("Объём", facts.get("volume")), ("Мощность", facts.get("power")),
+            ("Гриль", "есть" if facts.get("grill") else ""),
+            ("Инвертор", "есть" if facts.get("inverter") else ""),
+            ("Управление", facts.get("controls")),
+        )
+    elif category == "coffee_machine":
+        items = (
+            ("Бренд", facts.get("brand")), ("Модель", facts.get("model")),
+            ("Тип", facts.get("machine_type")),
+            ("Капучинатор", "есть" if facts.get("cappuccinator") else ""),
+            ("Давление", facts.get("pressure")),
+            ("Кофемолка", "есть" if facts.get("grinder") else ""),
+            ("Молочная система", "есть" if facts.get("milk_system") else ""),
+        )
+    elif category == "mattress":
+        materials = ", ".join(str(item) for item in facts.get("materials") or [])
+        items = (
+            ("Бренд", facts.get("brand")), ("Модель", facts.get("model")),
+            ("Размер", facts.get("size")), ("Жёсткость", facts.get("firmness")),
+            ("Пружины", facts.get("spring_type")), ("Высота", facts.get("height")),
+            ("Нагрузка", facts.get("load_per_bed")), ("Материалы", materials),
+        )
+    elif category == "bed":
+        items = (
+            ("Бренд", facts.get("brand")), ("Модель", facts.get("model")),
+            ("Размер", facts.get("size")), ("Материал", facts.get("material")),
+            ("Подъёмный механизм", "есть" if facts.get("lift_mechanism") else ""),
+            ("Основание", facts.get("base")),
+            ("Матрас в комплекте", "да" if facts.get("mattress_included") else ""),
+            ("Хранение", "есть" if facts.get("storage") else ""),
+        )
     else:
         items = ()
     confirmed = False
@@ -364,6 +467,36 @@ def _facts_detail_lines(sr: SearchResult) -> list[str]:
     ps5_line = _facts_ps5_line(facts)
     if category == "tv" and ps5_line:
         lines.append(f"- PS5: {html.escape(ps5_line)}")
+    diagnostics = (
+        ("Exact match", facts.get("exact_match")),
+        ("Причина exact", facts.get("exact_match_reason")),
+        ("Цена confidence/evidence", " / ".join(str(item) for item in (facts.get("price_confidence"), facts.get("price_evidence")) if item)),
+        ("Карточка", " / ".join(str(item) for item in (facts.get("product_card_confidence"), facts.get("product_card_reason")) if item)),
+        ("Источник", facts.get("source_confidence")),
+        ("Verification", facts.get("verification_confidence")),
+        ("Category quality", facts.get("category_quality_score")),
+    )
+    for label, value in diagnostics:
+        text = str(value or "").strip()
+        if text:
+            lines.append(f"- {label}: {html.escape(_clip_text(text, 500))}")
+    breakdown = facts.get("score_breakdown")
+    if isinstance(breakdown, dict) and breakdown:
+        rendered = ", ".join(f"{key}={value:+g}" for key, value in breakdown.items() if isinstance(value, (int, float)))
+        lines.append(f"- Score breakdown: {html.escape(_clip_text(rendered, 700))}")
+    cap_reasons = [str(item) for item in facts.get("score_cap_reasons") or [] if str(item).strip()]
+    if cap_reasons:
+        lines.append(f"- Caps: {html.escape(', '.join(cap_reasons[:6]))}")
+    if facts.get("cache_age_seconds") is not None:
+        lines.append(f"- Cache age: {html.escape(str(facts.get('cache_age_seconds')))} сек.")
+    fact_evidence = facts.get("fact_evidence")
+    if isinstance(fact_evidence, dict) and fact_evidence:
+        evidence_parts = []
+        for key, value in list(fact_evidence.items())[:12]:
+            if isinstance(value, dict):
+                evidence_parts.append(f"{key}:{value.get('confidence', '-')}/{value.get('evidence', '-')}")
+        if evidence_parts:
+            lines.append(f"- Facts evidence: {html.escape(_clip_text(', '.join(evidence_parts), 800))}")
     return lines
 
 
@@ -658,6 +791,15 @@ def _telegram_chunks(text: str, limit: int = 3900) -> list[str]:
     chunks: list[str] = []
     current = ""
     for line in text.splitlines(keepends=True):
+        while len(line) > limit:
+            if current:
+                chunks.append(current.rstrip())
+                current = ""
+            split_at = line.rfind(" ", 0, limit + 1)
+            if split_at <= 0:
+                split_at = limit
+            chunks.append(line[:split_at].rstrip())
+            line = line[split_at:].lstrip()
         if current and len(current) + len(line) > limit:
             chunks.append(current.rstrip())
             current = ""

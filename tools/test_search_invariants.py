@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,7 +11,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.candidate_verifier import PRICE_MISSING, VerifiedCandidate, _extract_laptop_facts
-from app.db import Request
+from app.db import Request, SearchResult
+from app.handlers.admin import _facts_detail_lines, _telegram_chunks, format_search_result_card
 from app.price_extractor import extract_price
 from app.product_quality import final_product_quality_level, has_model_mismatch
 from app.product_search import ProductCandidate, _apply_final_search_policy, _verification_rank
@@ -18,6 +20,7 @@ from app.search_policy import (
     is_normal_candidate,
     normalize_for_admin_save,
     should_save_for_admin,
+    summarize_saved_statuses,
 )
 
 
@@ -193,6 +196,49 @@ class SearchInvariantTests(unittest.TestCase):
             product_quality_level="bad",
         )
         self.assertFalse(should_save_for_admin(candidate))
+
+    def test_telegram_normal_counter_only_good_ok(self) -> None:
+        summary = summarize_saved_statuses([
+            policy_candidate(verify_status="VERIFIED_GOOD"),
+            policy_candidate(verify_status="VERIFIED_OK"),
+            policy_candidate(verify_status="NEED_MANUAL_CHECK"),
+            policy_candidate(verify_status="PRICE_MISSING", price=None),
+        ])
+        self.assertEqual(summary["VERIFIED_GOOD"] + summary["VERIFIED_OK"], 2)
+        self.assertEqual(summary["NEED_MANUAL_CHECK"], 1)
+        self.assertEqual(summary["PRICE_MISSING"], 1)
+
+    def test_telegram_chunks_split_unbroken_text(self) -> None:
+        chunks = _telegram_chunks("A" * 9000)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= 3900 for chunk in chunks))
+
+    def test_admin_card_is_compact_and_html_safe(self) -> None:
+        result = SearchResult(
+            id=1, request_id=1, title="AOC <Q27> & test", price=34_990,
+            source="direct_retail", score=91, status="CANDIDATE",
+            risk_flags=json.dumps(["один", "два", "три", "четыре"], ensure_ascii=False),
+            facts_json=json.dumps({"verify_status": "VERIFIED_GOOD"}, ensure_ascii=False),
+        )
+        card = format_search_result_card(result, 1)
+        self.assertIn("&lt;Q27&gt;", card)
+        self.assertNotIn("четыре", card)
+        self.assertLess(len(card), 1000)
+
+    def test_admin_detail_has_quality_diagnostics(self) -> None:
+        facts = {
+            "verify_status": "VERIFIED_GOOD", "category": "monitor", "diagonal": "27",
+            "score_breakdown": {"relevance": 15, "model_match": 10},
+            "exact_match": "GENERIC_MATCH", "price_confidence": "high",
+            "price_evidence": "structured_page", "source_confidence": "medium",
+            "verification_confidence": "high", "score_cap_reasons": ["manual_check"],
+            "fact_evidence": {"diagonal": {"confidence": "high", "evidence": "title"}},
+        }
+        result = SearchResult(id=1, request_id=1, facts_json=json.dumps(facts, ensure_ascii=False))
+        detail = "\n".join(_facts_detail_lines(result))
+        self.assertIn("Score breakdown", detail)
+        self.assertIn("Exact match", detail)
+        self.assertIn("Facts evidence", detail)
 
 
 if __name__ == "__main__":
