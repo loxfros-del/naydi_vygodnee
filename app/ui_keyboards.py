@@ -73,35 +73,26 @@ def _inline_button(text: str, callback_data: str) -> InlineKeyboardButton:
 
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Compact persistent client menu."""
+    """Compact persistent client menu with only working actions."""
 
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_SELECT_PRODUCT), KeyboardButton(text=BTN_COMPARE_LINKS)],
-            [KeyboardButton(text=BTN_MY_REQUESTS), KeyboardButton(text=BTN_HOW_IT_WORKS)],
-            [KeyboardButton(text=BTN_PRICING), KeyboardButton(text=BTN_SUPPORT)],
+            [KeyboardButton(text=BTN_SELECT_PRODUCT)],
+            [KeyboardButton(text=BTN_HOW_IT_WORKS), KeyboardButton(text=BTN_SUPPORT)],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Выберите действие",
+        input_field_placeholder="Выбери действие",
     )
 
 
 def main_menu_inline_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [_inline_button(BTN_SELECT_PRODUCT, CB_SELECT_PRODUCT)],
             [
-                _inline_button(BTN_SELECT_PRODUCT, CB_SELECT_PRODUCT),
-                _inline_button(BTN_COMPARE_LINKS, CB_COMPARE_LINKS),
-            ],
-            [
-                _inline_button(BTN_MY_REQUESTS, CB_MY_REQUESTS),
                 _inline_button(BTN_HOW_IT_WORKS, CB_HOW_IT_WORKS),
-            ],
-            [
-                _inline_button(BTN_PRICING, CB_PRICING),
                 _inline_button(BTN_SUPPORT, CB_SUPPORT),
             ],
-            [_inline_button(BTN_FAQ, CB_FAQ)],
         ]
     )
 
