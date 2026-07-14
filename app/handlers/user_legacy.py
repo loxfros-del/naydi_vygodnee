@@ -1,6 +1,7 @@
 """Обработчики пользователя — приём и парсинг заявок."""
 import re
 import json
+import html
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery
@@ -13,6 +14,9 @@ from app.db import (
 from app.keyboards import kb_start, kb_confirm_cancel
 from app.search_links import build_search_query, generate_search_links
 from app.states import UserStates
+from app.product_config import QUICK_SELECTION, SearchMode, classify_request
+from app.services.analytics import track_event
+from app.ui_formatters import format_progress, format_request_summary
 
 router = Router()
 
@@ -395,30 +399,14 @@ async def process_answer(message: Message, state: FSMContext):
 
 async def _show_confirm(message: Message, state: FSMContext, parsed: dict):
     """Показывает сводку заявки и просит подтвердить."""
-    lines = ["📋 <b>Проверь заявку:</b>\n"]
-    lines.append(f"📦 Товар: <b>{parsed['product_name']}</b>")
-    if parsed["use_case"]:
-        lines.append(f"🎯 Цель: {parsed['use_case']}")
-    if parsed["budget"]:
-        budget_display = parsed["budget"]
-        if budget_display.isdigit():
-            budget_display = f"{int(budget_display):,}".replace(",", " ") + " ₽"
-        lines.append(f"💰 Бюджет: {budget_display}")
-    if parsed["city"]:
-        lines.append(f"📍 Город: {parsed['city']}")
-    if parsed["important_criteria"]:
-        lines.append(f"📌 Критерии: {parsed['important_criteria']}")
-    if parsed.get("clean_search_query"):
-        lines.append(f"🔎 Поисковый запрос: <i>{parsed['clean_search_query']}</i>")
-    if parsed["is_used_allowed"]:
-        lines.append("🔄 Можно б/у")
-    else:
-        lines.append("🆕 Только новое")
-
-    lines.append(f"\n<i>Исходный запрос: {parsed['original_query']}</i>")
-
     await message.answer(
-        "\n".join(lines),
+        format_request_summary({
+            **parsed,
+            "category_title": "Быстрый запрос",
+            "condition": "used" if parsed.get("is_used_allowed") else "new",
+            "requirements": parsed.get("important_criteria") or "Не указаны",
+            "priority": "balance",
+        }),
         reply_markup=kb_confirm_cancel(),
         parse_mode="HTML"
     )
@@ -430,6 +418,9 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
     """Подтверждение заявки — создаём в БД."""
     data = await state.get_data()
     parsed = data.get("parsed", {})
+    if not parsed:
+        await callback.answer("Заявка устарела. Начните заново.", show_alert=True)
+        return
     user_id = data.get("user_id", callback.from_user.id)
     username = data.get("username", callback.from_user.username or "")
     product_name = (
@@ -441,15 +432,19 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
     )
     parsed["product_name"] = product_name
 
-    # Генерируем поисковые ссылки
-    links = generate_search_links(
-        product_name=product_name,
-        city=parsed.get("city", ""),
-        use_case=parsed.get("use_case", ""),
-        budget=parsed.get("budget", ""),
-        important_criteria=parsed.get("important_criteria", ""),
-        clean_search_query=parsed.get("clean_search_query", ""),
-    )
+    decision = classify_request(f"{product_name} {parsed.get('original_query', '')}")
+    request_mode = decision.mode.value if decision.mode is SearchMode.AUTO else SearchMode.MANUAL.value
+    category = decision.category.code if decision.category else "manual"
+    links = []
+    if request_mode == SearchMode.AUTO.value:
+        links = generate_search_links(
+            product_name=product_name,
+            city=parsed.get("city", ""),
+            use_case=parsed.get("use_case", ""),
+            budget=parsed.get("budget", ""),
+            important_criteria=parsed.get("important_criteria", ""),
+            clean_search_query=parsed.get("clean_search_query", ""),
+        )
 
     # Создаём заявку
     req_id = create_request(
@@ -464,6 +459,13 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
         important_criteria=parsed.get("important_criteria", ""),
         clean_search_query=parsed.get("clean_search_query", ""),
         is_used_allowed=parsed.get("is_used_allowed", False),
+        category=category,
+        request_mode=request_mode,
+        requirements_json=json.dumps(parsed, ensure_ascii=False),
+        condition="used" if parsed.get("is_used_allowed") else "new",
+        priority="balance",
+        package_code=QUICK_SELECTION.code,
+        progress_message_id=callback.message.message_id,
     )
 
     # Сохраняем поисковые ссылки
@@ -471,29 +473,15 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
 
     await state.clear()
 
-    budget_disp = ""
-    if parsed.get("budget"):
-        if parsed["budget"].isdigit():
-            budget_disp = f"{int(parsed['budget']):,} ₽".replace(",", " ")
-        else:
-            budget_disp = parsed["budget"]
-
-    confirm_lines = [
-        f"✅ Заявка <b>#{req_id}</b> принята!\n",
-        f"📦 Товар: <b>{parsed['product_name']}</b>",
-    ]
-    if parsed.get("use_case"):
-        confirm_lines.append(f"🎯 Цель: {parsed['use_case']}")
-    if budget_disp:
-        confirm_lines.append(f"💰 Бюджет: {budget_disp}")
-    if parsed.get("city"):
-        confirm_lines.append(f"📍 Город: {parsed['city']}")
-    confirm_lines.append("\nСкоро пришлю результаты.")
-
     await callback.message.edit_text(
-        "\n".join(confirm_lines),
+        format_progress("accepted", req_id),
         parse_mode="HTML"
     )
+    update_request(req_id, progress_message_id=callback.message.message_id)
+    try:
+        track_event("request_completed", user_id=user_id, request_id=req_id, metadata={"mode": request_mode, "category": category})
+    except Exception:
+        pass
     await callback.answer()
 
     # Уведомляем админов
@@ -503,11 +491,11 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
         try:
             lines = [
                 f"🆕 Новая заявка <b>#{req_id}</b>",
-                f"👤 @{username or user_id}",
-                f"📦 {parsed['product_name']}",
+                f"👤 {html.escape('@' + username if username else str(user_id))}",
+                f"📦 {html.escape(parsed['product_name'])}",
             ]
             if parsed.get("use_case"):
-                lines.append(f"🎯 Цель: {parsed['use_case']}")
+                lines.append(f"🎯 Цель: {html.escape(parsed['use_case'])}")
             if parsed.get("budget"):
                 budget_disp = parsed["budget"]
                 if budget_disp.isdigit():
@@ -516,7 +504,7 @@ async def confirm_request(callback: CallbackQuery, state: FSMContext):
             else:
                 lines.append("💰 Бюджет: не указан")
             if parsed.get("city"):
-                lines.append(f"📍 Город: {parsed['city']}")
+                lines.append(f"📍 Город: {html.escape(parsed['city'])}")
             else:
                 lines.append("📍 Город: не указан")
             await callback.bot.send_message(

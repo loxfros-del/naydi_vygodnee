@@ -7,8 +7,11 @@ from collections.abc import Iterable, Mapping
 import html
 import re
 from typing import Any
+import json
+from datetime import datetime
 
 from app.product_config import ServicePackage, get_service_packages
+from app.verification_state import resolve_final_presentation
 from app.ui_texts import (
     CONDITION_LABELS,
     PRICING_INTRO,
@@ -95,6 +98,222 @@ def source_display_name(source: object) -> str:
         if key.startswith(f"{technical}_"):
             return display
     return raw.replace("_", " ").strip().title()
+
+
+CLIENT_ROLE_LABELS = {
+    "BEST": "⭐ Лучший выбор",
+    "BUDGET": "💰 Дешевле, но есть нюансы",
+    "BACKUP": "🛡 Самый надёжный",
+}
+
+_CLIENT_FACT_LABELS = {
+    "brand": "Бренд",
+    "model": "Модель",
+    "memory": "Память",
+    "ram": "RAM",
+    "ssd": "SSD",
+    "diagonal": "Диагональ",
+    "resolution": "Разрешение",
+    "refresh_rate": "Частота",
+    "panel": "Матрица",
+    "connection": "Подключение",
+    "anc": "Шумоподавление",
+    "form_factor": "Формат",
+    "lumbar_support": "Поясничная поддержка",
+    "headrest": "Подголовник",
+    "load_capacity": "Допустимая нагрузка",
+}
+
+_CLIENT_TECH_MARKERS = (
+    "weak_candidate", "verified_good", "verified_ok", "verify_blocked",
+    "exact_match", "confidence", "evidence", "score", "browser", "proxy",
+    "captcha", "403", "401", "429", "http ", "network block", "raw status",
+)
+_PROMOTIONAL_MARKERS = (
+    "успейте", "купите", "закажите", "акция", "промокод", "реклама",
+    "хит продаж", "лучшая цена только сегодня",
+)
+
+
+def _json_dict(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _json_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        raw = value
+    else:
+        try:
+            raw = json.loads(str(value or "[]"))
+        except (TypeError, json.JSONDecodeError):
+            raw = [value] if str(value or "").strip() else []
+    if not isinstance(raw, list):
+        raw = [raw]
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def _safe_client_items(values: Iterable[object], limit: int = 3) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = " ".join(str(value or "").split()).strip(" ;,.-")
+        lowered = text.casefold()
+        if not text or any(marker in lowered for marker in _CLIENT_TECH_MARKERS):
+            continue
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _seller_label(
+    facts: dict[str, Any],
+    platform_type: str,
+    platform: str,
+    seller_state: str,
+) -> str:
+    seller = str(facts.get("seller") or "").strip()
+    if seller:
+        return seller
+    if platform_type == "RETAIL":
+        return platform
+    if seller_state == "VERIFIED":
+        return "проверен"
+    return "требует проверки"
+
+
+def _resolve_client_state(
+    facts: dict[str, Any],
+    extra_warnings: Iterable[object] = (),
+) -> dict[str, Any]:
+    """Resolve client warnings after adding editorial/manual-check text."""
+    prepared = dict(facts)
+    automatic = dict(prepared.get("automatic_verification") or facts)
+    automatic["warnings"] = _json_list(automatic.get("warnings")) + [
+        str(item).strip() for item in extra_warnings if str(item).strip()
+    ]
+    prepared["automatic_verification"] = automatic
+    return resolve_final_presentation(prepared)
+
+
+def format_client_card(card: Any, role: str) -> str:
+    """Короткая клиентская карточка без score, verify/cache и evidence-полей."""
+    normalized_role = str(role or "").upper()
+    facts = _json_dict(getattr(card, "facts_json", ""))
+    meta = _json_dict(getattr(card, "admin_note", ""))
+    editorial_checks = _json_list(meta.get("manual_check"))
+    raw_risks = _json_list(getattr(card, "risk_flags", ""))
+    final = _resolve_client_state(facts, [*editorial_checks, *raw_risks])
+    display_facts = dict(facts)
+    display_facts.update(final.get("final_facts") or {})
+    platform = str(display_facts.get("platform_name") or source_display_name(getattr(card, "source", "")))
+    platform_type = str(display_facts.get("platform_type") or "").upper()
+    seller = _seller_label(display_facts, platform_type, platform, str(final.get("seller_state") or ""))
+    price_value = display_facts.get("price", getattr(card, "price", None))
+    lines = [
+        f"<b>{CLIENT_ROLE_LABELS.get(normalized_role, '📌 Рекомендация')}</b>",
+        "",
+        f"<b>{escape_html(getattr(card, 'title', '') or 'Название уточняется')}</b>",
+        f"Цена: {format_price(price_value)}",
+        f"Площадка: {escape_html(platform)}",
+        f"Продавец: {escape_html(seller)}",
+    ]
+    if final.get("specialist_verified"):
+        lines.append("Статус: ✅ Проверено специалистом")
+    elif final.get("presentation_ready"):
+        lines.append("Статус: ✅ Подтверждено по данным источника")
+
+    why_items: list[str] = []
+    why = " ".join(str(getattr(card, "snippet", "") or "").split())
+    if why and not any(marker in why.casefold() for marker in (*_CLIENT_TECH_MARKERS, *_PROMOTIONAL_MARKERS)):
+        why_items.append(why[:300])
+    exact = str(display_facts.get("exact_match") or "").upper()
+    if exact in {"EXACT", "COMPATIBLE_VARIANT"}:
+        why_items.append("точная модель и обязательные характеристики совпадают")
+    budget_status = str(display_facts.get("budget_status") or "").upper()
+    if budget_status == "IN_BUDGET":
+        why_items.append("цена укладывается в бюджет")
+    if platform_type == "RETAIL":
+        why_items.append("условия покупки и возврата у крупной сети понятнее")
+    elif platform_type == "MARKETPLACE":
+        why_items.append("предложение найдено на известной торговой площадке")
+    elif platform_type == "CLASSIFIED":
+        why_items.append("цена может быть ниже розничных магазинов")
+    why_items = _safe_client_items(why_items, 3) or ["подходит под основные требования"]
+    lines.extend(["", "<b>Почему рекомендуем:</b>"])
+    lines.extend(f"• {escape_html(item)}" for item in why_items)
+
+    confirmed: list[str] = []
+    confirmation_labels = (
+        ("link_verified", "карточка товара"),
+        ("model_verified", "модель и обязательные характеристики"),
+        ("price_verified", "цена"),
+        ("availability_verified", "наличие"),
+        ("seller_verified", "продавец"),
+    )
+    confirmed.extend(label for key, label in confirmation_labels if final.get(key))
+    if confirmed:
+        lines.extend(["", "<b>Что подтверждено:</b>"])
+        lines.extend(f"• {escape_html(item)}" for item in _safe_client_items(confirmed, 4))
+
+    manual_check = _safe_client_items(final.get("warnings") or [], 3)
+    if not manual_check:
+        manual_check = ["условия доставки и гарантии на момент заказа"]
+    manual_check = _safe_client_items(manual_check, 3)
+    lines.extend(["", "<b>Что проверить:</b>"])
+    lines.extend(f"• {escape_html(item)}" for item in manual_check)
+
+    fact_parts = []
+    for key, label in _CLIENT_FACT_LABELS.items():
+        value = display_facts.get(key)
+        if value not in (None, "", [], {}):
+            fact_parts.append(f"{label}: {value}")
+        if len(fact_parts) >= 5:
+            break
+    if fact_parts:
+        lines.extend(["", f"Характеристики: {escape_html('; '.join(fact_parts))}"])
+    return "\n".join(lines)
+
+
+def format_client_result_summary(
+    request: Any,
+    cards: Iterable[Any],
+    *,
+    found_count: int | None = None,
+    checked_at: str | None = None,
+) -> str:
+    items = list(cards)
+    prices = [int(item.price) for item in items if getattr(item, "price", None)]
+    checked = checked_at or next(
+        (str(getattr(item, "checked_at", "") or getattr(item, "updated_at", "")) for item in items if getattr(item, "checked_at", "") or getattr(item, "updated_at", "")),
+        "",
+    )
+    try:
+        checked_label = datetime.fromisoformat(checked).strftime("%d.%m.%Y") if checked else datetime.now().strftime("%d.%m.%Y")
+    except ValueError:
+        checked_label = datetime.now().strftime("%d.%m.%Y")
+    total = found_count if found_count is not None else len(items)
+    lines = [
+        "✅ <b>Подбор готов</b>",
+        "",
+        f"Товар: <b>{escape_html(getattr(request, 'product_name', '') or getattr(request, 'product', '') or 'товар')}</b>",
+        f"Найдено предложений: {max(int(total), len(items))}",
+        f"Отобрано специалистом: {len(items)}",
+    ]
+    if prices:
+        lines.append(f"Диапазон цен: {format_price(min(prices))} — {format_price(max(prices))}")
+    lines.append(f"Дата проверки: {checked_label}")
+    lines.extend(["", "Ниже — до трёх вариантов с плюсами, рисками и тем, что важно проверить."])
+    return "\n".join(lines)
 
 
 def format_progress(current_stage: str | int, request_id: int | None = None) -> str:
@@ -260,6 +479,8 @@ __all__ = [
     "chunk_html",
     "escape_html",
     "format_price",
+    "format_client_card",
+    "format_client_result_summary",
     "format_pricing",
     "format_progress",
     "format_request_summary",

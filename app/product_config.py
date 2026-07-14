@@ -16,6 +16,7 @@ from typing import Mapping
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_WELCOME_IMAGE_PATH = Path("assets") / "welcome.png"
 PRICE_UNSET_LABEL = "Стоимость уточняется"
 
 
@@ -140,6 +141,14 @@ AUTO_CATEGORIES: tuple[CategoryConfig, ...] = (
 
 SUPPORTED_AUTO_SEARCH = frozenset(category.code for category in AUTO_CATEGORIES)
 AUTO_CATEGORY_BY_CODE = {category.code: category for category in AUTO_CATEGORIES}
+LEGACY_AUTO_CATEGORY_CODES = {
+    "phone": "smartphones",
+    "laptop": "laptops",
+    "tv": "televisions",
+    "headphones": "headphones",
+    "monitor": "monitors",
+    "chair": "office_chairs",
+}
 
 _EXPLICIT_UNSUPPORTED_ALIASES = (
     "автомобиль",
@@ -260,7 +269,7 @@ def detect_auto_category(text: object) -> CategoryConfig | None:
 
 def is_supported_auto_category(value: object) -> bool:
     normalized = _normalized_text(value).replace(" ", "_")
-    if normalized in SUPPORTED_AUTO_SEARCH:
+    if normalized in SUPPORTED_AUTO_SEARCH or normalized in LEGACY_AUTO_CATEGORY_CODES:
         return True
     return detect_auto_category(value) is not None
 
@@ -333,7 +342,7 @@ def resolve_welcome_image(
     env: Mapping[str, object] | None = None,
     base_dir: str | Path | None = None,
 ) -> WelcomeImageSource | None:
-    """Prefer a Telegram ``file_id``, then a valid local image, else no image."""
+    """Prefer Telegram/configured images, then the bundled welcome asset."""
 
     values = os.environ if env is None else env
     file_id = str(values.get("WELCOME_IMAGE_FILE_ID") or "").strip()
@@ -348,6 +357,12 @@ def resolve_welcome_image(
     local_path = resolve_welcome_image_path(raw_path, base_dir=base_dir)
     if local_path:
         return WelcomeImageSource("local_path", str(local_path))
+    bundled_path = resolve_welcome_image_path(
+        DEFAULT_WELCOME_IMAGE_PATH,
+        base_dir=base_dir,
+    )
+    if bundled_path:
+        return WelcomeImageSource("local_path", str(bundled_path))
     return None
 
 
@@ -361,6 +376,7 @@ __all__ = [
     "AUTO_CATEGORY_BY_CODE",
     "CategoryConfig",
     "CategoryDecision",
+    "DEFAULT_WELCOME_IMAGE_PATH",
     "DEEP_SELECTION",
     "LINK_COMPARISON",
     "PRICE_UNSET_LABEL",

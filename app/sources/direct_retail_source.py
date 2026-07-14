@@ -19,6 +19,7 @@ from app.price_guard import normalize_price_candidate
 logger = logging.getLogger(__name__)
 
 CITILINK_DIRECT_SOURCE = "citilink_direct"
+DNS_DIRECT_SOURCE = "dns_direct"
 MVIDEO_DIRECT_SOURCE = "mvideo_direct"
 YANDEX_MARKET_DIRECT_SOURCE = "yandex_market_direct"
 DIRECT_RETAIL_SOURCE = "direct_retail"
@@ -33,6 +34,7 @@ class DirectRetailDefinition:
 
 
 SOURCES: tuple[DirectRetailDefinition, ...] = (
+    DirectRetailDefinition("dns", DNS_DIRECT_SOURCE, "DNS", "https://www.dns-shop.ru/search/?q={query}"),
     DirectRetailDefinition("citilink", CITILINK_DIRECT_SOURCE, "Citilink", "https://www.citilink.ru/search/?text={query}"),
     DirectRetailDefinition("mvideo", MVIDEO_DIRECT_SOURCE, "M.Video", "https://www.mvideo.ru/internal/search.jsp?q={query}"),
     DirectRetailDefinition("yandex_market", YANDEX_MARKET_DIRECT_SOURCE, "Yandex Market", "https://market.yandex.ru/search?text={query}"),
@@ -395,6 +397,10 @@ def _search_one(key: str, query: str, parsed: dict | None = None) -> list[dict]:
 
 def search_citilink_direct(query: str, parsed: dict | None = None) -> list[dict]:
     return _search_one("citilink", query, parsed)
+
+
+def search_dns_direct(query: str, parsed: dict | None = None) -> list[dict]:
+    return _search_one("dns", query, parsed)
 
 
 def search_mvideo_direct(query: str, parsed: dict | None = None) -> list[dict]:

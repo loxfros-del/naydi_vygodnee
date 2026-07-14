@@ -32,6 +32,7 @@ _STORE_DOMAINS = {
     "Ozon": ("ozon.ru",),
     "Яндекс Маркет": ("market.yandex.ru",),
     "М.Видео": ("mvideo.ru",),
+    "Ситилинк": ("citilink.ru",),
     "DNS": ("dns-shop.ru",),
     "Wildberries": ("wildberries.ru",),
     "Мегамаркет": ("megamarket.ru",),
@@ -57,6 +58,7 @@ def normalized_store(store: str) -> str:
         "авито": "Авито", "ozon": "Ozon", "яндексмаркет": "Яндекс Маркет",
         "market": "Яндекс Маркет", "мвидео": "М.Видео", "mvideo": "М.Видео",
         "dns": "DNS", "dns-shop": "DNS", "wildberries": "Wildberries", "wb": "Wildberries",
+        "ситилинк": "Ситилинк", "citilink": "Ситилинк",
     }
     for alias, canonical in aliases.items():
         if alias in value:

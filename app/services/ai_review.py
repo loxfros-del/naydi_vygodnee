@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from app.db import SearchResult, get_search_result, update_search_result
+from app.verification_state import resolve_final_presentation
 
 
 AI_CARD_DRAFT = "DRAFT"
@@ -167,6 +168,14 @@ class AdminReviewService:
         if current not in {AI_CARD_DRAFT, AI_CARD_GENERATED, AI_CARD_APPROVED}:
             raise AIReviewTransitionError(
                 f"Карточку в статусе {current} нельзя утвердить."
+            )
+        final = resolve_final_presentation(getattr(card, "facts_json", "") or {})
+        if not final.get("presentation_ready"):
+            fields = ", ".join(str(item) for item in final.get("unresolved_fields") or [])
+            blockers = "; ".join(str(item) for item in final.get("blocking_reasons") or [])
+            detail = blockers or fields or "не завершена проверка"
+            raise AIReviewTransitionError(
+                f"Карточку нельзя утвердить: завершите чек-лист ({detail})."
             )
         return self.transition(result_id, AI_CARD_APPROVED)
 

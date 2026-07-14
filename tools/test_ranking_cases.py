@@ -155,11 +155,11 @@ class RankingCases(unittest.TestCase):
         self.assertLessEqual(result.score, result.raw_score)
         self.assertEqual(result.score_cap, 60)
 
-    def test_26_dedupe_keeps_best_offer(self) -> None:
+    def test_26_dedupe_keeps_same_model_offers_from_different_sellers(self) -> None:
         weaker = candidate("iPhone 15 Pro 256 ГБ", source="generic_web", price=90_000, price_source="", url="https://a.example/product/1")
         better = candidate("iPhone 15 Pro 256 ГБ", source="direct_retail", price=85_000, url="https://b.example/product/2")
         rows = dedupe_candidates([weaker, better], sort_key=lambda item: (0 if item["source"] == "direct_retail" else 1, item["price"]))
-        self.assertEqual(rows, [better])
+        self.assertEqual(rows, [better, weaker])
 
     def test_27_dedupe_preserves_storage_variants(self) -> None:
         rows = dedupe_candidates([candidate("iPhone 15 Pro 128 ГБ", url="https://a.example/product/1"), candidate("iPhone 15 Pro 256 ГБ", url="https://b.example/product/2")], sort_key=lambda item: item["title"])

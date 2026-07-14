@@ -168,9 +168,13 @@ def audit_parsing(cases: list[dict[str, Any]]) -> tuple[dict[str, float], list[s
     for case in cases:
         parsed = full_parse(str(case.get("query") or ""))
         request, _ = _make_request(str(case.get("query") or ""), 0)
-        plan = plan_search_queries(request, max_queries=14, site_domains=("dns-shop.ru", "mvideo.ru"))
+        plan = plan_search_queries(request, max_queries=10, site_domains=("dns-shop.ru", "mvideo.ru"))
         unique = len({item.text.casefold() for item in plan}) == len(plan)
-        bounded = len(plan) <= 14 and sum(item.kind == "main" for item in plan) == 1
+        bounded = (
+            len(plan) <= 10
+            and sum(item.kind == "main" for item in plan) == 1
+            and sum(item.kind in {"category", "feature"} for item in plan) <= 2
+        )
         explained = all(item.reason and item.priority for item in plan)
         brand = str(parsed.get("brand") or "").casefold()
         no_aggressive_brand = not brand or not any(

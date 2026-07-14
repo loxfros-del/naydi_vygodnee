@@ -642,6 +642,11 @@ def create_search_result(
     conn = get_conn()
     now = datetime.now().isoformat()
     link_check_status = normalize_link_check_status(link_check_status)
+    # Низкоуровневые ручные/тестовые Alice-карточки исторически считались
+    # утверждёнными. Генераторы используют replace_alice_results и всегда
+    # передают явный DRAFT/GENERATED lifecycle.
+    if str(origin or "").lower() == "alice" and not ai_card_status:
+        ai_card_status = "APPROVED"
     cur = conn.execute(
         """INSERT INTO search_results
            (request_id, title, price, source, url, snippet, score, risk_flags,
@@ -779,8 +784,10 @@ def replace_alice_results(request_id: int, items: list[dict]):
             "role": role,
             "confidence": confidence,
             "manual_check": manual_check,
+            "candidate_id": item.get("candidate_id"),
         }
         admin_note = item.get("admin_note") or json.dumps(admin_meta, ensure_ascii=False)
+        facts_json = _json_text(item.get("facts_json") or item.get("facts"), "{}")
 
         # Определяем статус ссылки
         is_empty_link = (
@@ -799,8 +806,9 @@ def replace_alice_results(request_id: int, items: list[dict]):
             """INSERT INTO search_results
                (request_id, title, price, source, url, snippet, score, risk_flags,
                 status, admin_note, origin, sort_order, price_verified,
-                link_check_status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'alice', ?, 0, ?, ?, ?)""",
+                link_check_status, facts_json, ai_card_status, image_file_id, checked_at,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'alice', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (request_id,
              title,
              price,
@@ -812,7 +820,12 @@ def replace_alice_results(request_id: int, items: list[dict]):
              status,
              admin_note,
              idx,
+             int(bool(item.get("price_verified"))),
              link_check_status,
+             facts_json,
+             str(item.get("ai_card_status") or "DRAFT").strip().upper(),
+             str(item.get("image_file_id") or "").strip()[:512],
+             str(item.get("checked_at") or "").strip(),
              now, now),
         )
     conn.commit()

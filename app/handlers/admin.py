@@ -2,6 +2,7 @@
 import asyncio
 import html
 import json
+from datetime import datetime
 from aiogram.exceptions import TelegramBadRequest
 from urllib.parse import urlparse
 from aiogram import Router, F
@@ -29,106 +30,240 @@ from app.db import (
     create_market_check, get_market_checks, get_market_check,
     update_market_check, delete_market_check, has_market_check,
     MarketCheck,
+    get_comparison_links, get_comparison_link, update_comparison_link,
 )
 from app.search_links import generate_search_links, generate_product_search_links
 from app.link_checks import LinkCheckStatus, avito_warnings, store_url_warning
-from app.product_search import run_product_search
 from app.ai_cards_service import generate_ai_cards_from_candidates
 from app.report_builder import (
     build_preview, build_admin_preview, build_full_report, get_alice_report_issues,
 )
 from app.readiness import check_readiness, format_readiness, format_readiness_short
 from app.price_extractor import format_price, extract_price as _extract_price
+from app.product_config import SearchMode, classify_request, is_supported_auto_category
+from app.services.ai_review import (
+    AI_CARD_APPROVED,
+    AI_CARD_DRAFT,
+    AI_CARD_GENERATED,
+    AIReviewError,
+    AdminReviewService,
+    get_ai_card_status,
+)
+from app.services.analytics import build_product_metrics, get_low_feedback, track_event
+from app.services.progress import update_client_progress
+from app.services.product_services import DeliveryService, SearchOrchestrationService
+from app.services.search_engine_bridge import load_shadow_comparison, run_search_for_request
+from app.services.recommendations import RecommendationService
+from app.services.request_wizard import parse_budget as _parse_admin_budget
+from app.services.state_machine import (
+    ADMIN_REVIEW,
+    AI_CARDS_DRAFT,
+    DELIVERED,
+    FAILED,
+    PAID,
+    READY,
+    SEARCHING,
+    STATUS_LABELS,
+    WAITING_PAYMENT,
+    InvalidStatusTransition,
+    normalize_request_status,
+    transition_request,
+)
+from app.ui_formatters import chunk_html, escape_html, source_display_name
+from app.ui_keyboards import feedback_keyboard, result_card_keyboard
+from app.search_v2.shadow_compare import format_shadow_comparison
+from app.verification_state import (
+    SELLER_REQUIRES_CHECK,
+    SELLER_VERIFIED,
+    apply_manual_confirmation,
+    normalize_verification_facts,
+    resolve_final_presentation,
+)
 
 router = Router()
+
+
+def parse_admin_price(value: object) -> int | None:
+    """Parses deliberate admin input without weakening web price extraction."""
+    return _parse_admin_budget(value)
+
+
+def _manual_confirmation_facts(
+    item: SearchResult,
+    field: str,
+    verified: bool,
+    *,
+    admin_id: int,
+    note: str,
+    value=None,
+    seller_state: str | None = None,
+    compatibility_updates: dict | None = None,
+) -> dict:
+    facts = apply_manual_confirmation(
+        _parse_facts(getattr(item, "facts_json", "")),
+        field,
+        verified,
+        verified_by=f"telegram_admin:{admin_id}",
+        verified_at=datetime.now().astimezone(),
+        note=note,
+        value=value,
+        seller_state=seller_state,
+    )
+    if compatibility_updates:
+        facts.update(compatibility_updates)
+    return facts
+
+
+def _manual_price_facts(item: SearchResult, price: int, *, admin_id: int) -> str:
+    facts = _manual_confirmation_facts(
+        item,
+        "price",
+        True,
+        admin_id=admin_id,
+        note="Цена подтверждена администратором",
+        value=price,
+        compatibility_updates={
+        "price": price,
+        "price_verified": True,
+        "price_confidence": "high",
+        "price_evidence": "manual_admin",
+        "price_verification": "VERIFIED",
+        },
+    )
+    if str(facts.get("verify_status") or "").upper() == "PRICE_MISSING":
+        facts["verify_status"] = "NEED_MANUAL_CHECK"
+    return json.dumps(facts, ensure_ascii=False)
 
 
 def is_admin(user_id: int) -> bool:
     return user_id in settings.ADMIN_IDS
 
 
+def _track_admin_event(event_type: str, admin_id: int, request_id: int, metadata: dict | None = None) -> None:
+    try:
+        track_event(event_type, request_id=request_id, metadata={"actor": "admin", **(metadata or {})})
+    except Exception:
+        pass
+
+
+def admin_queue_counts(requests: list[Request] | None = None) -> dict[str, int]:
+    counts = {key: 0 for key in ("new", "searching", "review", "ready", "waiting", "delivered", "problem")}
+    for request in requests if requests is not None else get_all_requests():
+        try:
+            status = normalize_request_status(request.status)
+        except Exception:
+            status = FAILED
+        key = {
+            "NEW": "new",
+            "SEARCHING": "searching",
+            "ADMIN_REVIEW": "review",
+            "AI_CARDS_DRAFT": "review",
+            "READY": "ready",
+            "WAITING_PAYMENT": "waiting",
+            "DELIVERED": "delivered",
+            "FAILED": "problem",
+            "NEED_CLARIFICATION": "problem",
+        }.get(status)
+        if key:
+            counts[key] += 1
+    counts["problem"] += len(get_low_feedback(max_rating=2, limit=1000))
+    return counts
+
+
+def _filter_requests(*statuses: str) -> list[Request]:
+    wanted = set(statuses)
+    result = []
+    for request in get_all_requests():
+        try:
+            status = normalize_request_status(request.status)
+        except Exception:
+            status = FAILED
+        if not wanted or status in wanted:
+            result.append(request)
+    return result
+
+
+async def _show_admin_queue(callback: CallbackQuery, title: str, requests: list[Request]) -> None:
+    if not requests:
+        await callback.message.edit_text(f"{title}\n\nЗаявок нет.", reply_markup=kb_admin_back(), parse_mode="HTML")
+        await callback.answer()
+        return
+    text = f"{title}\n\n" + "\n\n".join(format_request_card(item) for item in requests[:20])
+    buttons = [
+        [InlineKeyboardButton(text=f"#{item.id} {(item.product_name or item.product or 'товар')[:28]}", callback_data=f"view_{item.id}")]
+        for item in requests[:20]
+    ]
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+    await callback.answer()
+
+
 def format_request_card(req: Request) -> str:
-    """Карточка заявки для списка."""
-    status_emoji = {
-        "NEW": "🆕", "QUESTIONS": "❓", "SEARCHING": "🔎",
-        "HUMAN_REVIEW": "👀", "PREVIEW_SENT": "👁",
-        "WAITING_PAYMENT": "⏳", "PAID": "💰",
-        "REPORT_SENT": "📤", "CLOSED": "🔒"
-    }
-    emoji = status_emoji.get(req.status, "❓")
+    """Компактная строка очереди без debug-полей."""
+    try:
+        status = normalize_request_status(req.status)
+    except Exception:
+        status = str(req.status or "NEW").upper()
+    emoji = {
+        "NEW": "📥", "NEED_CLARIFICATION": "❓", "SEARCHING": "🔎",
+        "ADMIN_REVIEW": "🧑‍💻", "AI_CARDS_DRAFT": "🧩",
+        "WAITING_PAYMENT": "💳", "PAID": "💰", "READY": "✅",
+        "DELIVERED": "📤", "FAILED": "⚠️", "CANCELLED": "❌",
+    }.get(status, "📋")
     username = f"@{req.username}" if req.username else str(req.user_id)
-    product_label = req.product_name or req.product or "?"
-    info = f"{emoji} <b>#{req.id}</b> | {username} | {product_label[:40]}"
-    if req.use_case:
-        info += f" | 🎯 {req.use_case[:20]}"
-    if req.budget:
-        budget_display = req.budget
-        if budget_display.isdigit():
-            budget_display = format_price(int(budget_display))
-        info += f" | 💰 {budget_display}"
-    if req.city:
-        info += f" | 📍 {req.city[:15]}"
-    return info
+    product_label = req.product_name or req.product or "товар"
+    category = getattr(req, "category", "") or "не указана"
+    budget = format_price(int(req.budget)) if req.budget and req.budget.isdigit() else (req.budget or "не указан")
+    waited = ""
+    try:
+        created = datetime.fromisoformat(req.created_at)
+        minutes = max(0, int((datetime.now() - created).total_seconds() // 60))
+        waited = f" · {minutes // 60}ч {minutes % 60}м" if minutes >= 60 else f" · {minutes}м"
+    except (TypeError, ValueError):
+        pass
+    return (
+        f"{emoji} <b>#{req.id}</b> · {escape_html(username)} · {escape_html(product_label[:45])}\n"
+        f"{escape_html(category)} · {escape_html(budget)} · {escape_html(STATUS_LABELS.get(status, status))}{waited}"
+    )
 
 
 def format_request_detail(req: Request) -> str:
-    """Детальная карточка заявки."""
+    """Детальная карточка заявки; технические данные доступны только в Debug."""
+    try:
+        status = normalize_request_status(req.status)
+    except Exception:
+        status = str(req.status or "NEW").upper()
+    username = f"@{req.username}" if req.username else str(req.user_id)
+    budget = format_price(int(req.budget)) if req.budget and req.budget.isdigit() else (req.budget or "не указан")
     lines = [
         f"📋 <b>Заявка #{req.id}</b>",
-        f"👤 Пользователь: @{req.username or req.user_id}",
+        f"Клиент: {escape_html(username)}",
+        f"Товар: <b>{escape_html(req.product_name or req.product or 'не указан')}</b>",
+        f"Категория: {escape_html(getattr(req, 'category', '') or 'не указана')}",
+        f"Режим: {escape_html(getattr(req, 'request_mode', '') or 'обычный')}",
+        f"Бюджет: {escape_html(budget)}",
+        f"Город: {escape_html(req.city or 'не указан')}",
+        f"Состояние: {escape_html(getattr(req, 'condition', '') or ('можно б/у' if req.is_used_allowed else 'новое'))}",
+        f"Приоритет: {escape_html(getattr(req, 'priority', '') or 'не указан')}",
     ]
-
-    # Новые поля
     if req.original_query:
-        lines.append(f"💬 Исходный запрос: <i>{req.original_query[:100]}</i>")
-    if req.product_name:
-        lines.append(f"📦 Товар: <b>{req.product_name}</b>")
-    elif req.product:
-        lines.append(f"📦 Товар: {req.product}")
-    if req.use_case:
-        lines.append(f"🎯 Цель: {req.use_case}")
-    if req.budget:
-        budget_display = req.budget
-        if budget_display.isdigit():
-            budget_display = format_price(int(budget_display))
-        lines.append(f"💰 Бюджет: {budget_display}")
-    if req.city:
-        lines.append(f"📍 Город: {req.city}")
+        lines.append(f"Исходный запрос: <i>{escape_html(req.original_query[:500])}</i>")
     if req.important_criteria:
-        lines.append(f"📌 Критерии: {req.important_criteria}")
-    if req.clean_search_query:
-        lines.append(f"🔎 Чистый запрос: <i>{req.clean_search_query}</i>")
-    if req.is_used_allowed:
-        lines.append("🔄 Можно б/у")
-
-    lines.append(f"📊 Статус: <b>{req.status}</b>")
-
-    # Счётчики результатов поиска
-    total = count_search_results(req.id)
-    approved = count_approved_results(req.id)
-    if total > 0:
-        lines.append(f"\n🔎 Найдено кандидатов: {total}")
-        lines.append(f"✅ Подтверждено: {approved}")
-
-    # Краткая проверка готовности (проблемы одной строкой)
-    readiness = check_readiness(req)
-    lines.append(format_readiness_short(readiness))
-
-    # Legacy found_products
-    found = json.loads(req.found_products) if req.found_products else []
-    if found:
-        lines.append(f"\n🛒 Ручные варианты: {len(found)}")
-        for i, item in enumerate(found, 1):
-            name = item.get("name", "?")
-            price = item.get("price", "")
-            source = item.get("source", "")
-            entry = f"  {i}. {name}"
-            if price:
-                entry += f" — {price}"
-            if source:
-                entry += f" ({source})"
-            lines.append(entry)
-
+        lines.append(f"Требования: {escape_html(req.important_criteria[:1000])}")
+    lines.extend([
+        "",
+        f"Статус: <b>{escape_html(STATUS_LABELS.get(status, status))}</b>",
+        f"Оплата: {'подтверждена' if status in {'PAID', 'READY', 'DELIVERED'} else 'не подтверждена'}",
+        f"Кандидатов: {count_search_results(req.id)}",
+        f"Выбрано: {count_approved_results(req.id)}",
+    ])
+    attempts = get_search_attempts(req.id)
+    blocked = sum(1 for item in attempts if item.status == "ERROR" or item.error_text)
+    if blocked:
+        lines.append(f"Проблемных источников: {blocked} — подробности в Debug")
+    if getattr(req, "admin_note", ""):
+        lines.append(f"Заметка: {escape_html(req.admin_note)}")
+    lines.append(format_readiness_short(check_readiness(req)))
     return "\n".join(lines)
 
 
@@ -144,14 +279,9 @@ def format_search_result_card(sr: SearchResult, idx: int) -> str:
         line += f"\n💰 Цена: {format_price(sr.price)}"
     else:
         line += "\n💰 Цена: <i>цена не найдена</i>"
-    line += f"\n🏪 Источник: {html.escape(sr.source or 'generic_web')}"
-    line += f"\n🔎 Проверка: {html.escape(_verify_status_label(_stored_verify_status(sr)))}"
-    line += f"\n📊 Score: {int(round(sr.score))}"
-    try:
-        risk_flags = json.loads(sr.risk_flags) if sr.risk_flags else []
-    except json.JSONDecodeError:
-        risk_flags = []
-    main_risks = [str(item) for item in risk_flags if str(item).strip()][:3]
+    line += f"\n🏪 Источник: {html.escape(source_display_name(sr.source))}"
+    line += f"\n📋 Решение: {html.escape(_result_status_label(sr.status))}"
+    main_risks = _admin_safe_items(_resolved_admin_warnings(sr), 3)
     line += f"\n⚠️ Риски: {html.escape(_clip_text('; '.join(main_risks) if main_risks else 'нет', 360))}"
     if sr.admin_note:
         line += f"\n📝 {html.escape(sr.admin_note)}"
@@ -210,6 +340,25 @@ def _parse_risk_flags(value: str) -> list[str]:
     return []
 
 
+def _admin_safe_items(values, limit: int = 3) -> list[str]:
+    technical = (
+        "weak_candidate", "verified_good", "verify_blocked", "confidence", "evidence",
+        "score", "browser", "proxy", "captcha", "403", "401", "429", "network block",
+    )
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = " ".join(str(value or "").split()).strip(" ;,.-")
+        lowered = text.casefold()
+        if not text or any(marker in lowered for marker in technical) or lowered in seen:
+            continue
+        seen.add(lowered)
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
 def _parse_facts(value: str) -> dict:
     if not value:
         return {}
@@ -218,6 +367,119 @@ def _parse_facts(value: str) -> dict:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _normalised_verification(item: SearchResult) -> dict:
+    try:
+        return normalize_verification_facts(_parse_facts(getattr(item, "facts_json", "")))
+    except (TypeError, ValueError):
+        return normalize_verification_facts({})
+
+
+def _checklist_display_state(verification: dict) -> dict:
+    """Merge automatic and manual decisions for keyboard status only."""
+    manual = dict(verification.get("manual_verification") or {})
+    final = dict(verification.get("final_presentation_state") or {})
+    for field in ("model", "link", "price", "availability"):
+        if final.get(f"{field}_verified"):
+            manual[f"manual_{field}_verified"] = True
+    final_seller = str(final.get("seller_state") or "UNSET").upper()
+    if final_seller in {SELLER_VERIFIED, SELLER_REQUIRES_CHECK}:
+        manual["manual_seller_state"] = final_seller
+    return manual
+
+
+def _optional_request(request_id: int) -> Request | None:
+    """Rendering must remain usable even when its optional DB context is absent."""
+    try:
+        return get_request(request_id)
+    except Exception:
+        return None
+
+
+async def _require_final_role_ready(callback: CallbackQuery, item: SearchResult) -> bool:
+    final = resolve_final_presentation(getattr(item, "facts_json", "") or {})
+    if final.get("presentation_ready") and not final.get("blocking_reasons"):
+        return True
+    blockers = [str(value) for value in final.get("blocking_reasons") or []]
+    unresolved = [str(value) for value in final.get("unresolved_fields") or []]
+    detail = "; ".join(blockers) or ", ".join(unresolved) or "проверка не завершена"
+    await callback.answer(
+        f"Сначала завершите финальный checklist: {detail}",
+        show_alert=True,
+    )
+    return False
+
+
+def _alice_product_keyboard(item: SearchResult) -> InlineKeyboardMarkup:
+    verification = _normalised_verification(item)
+    return kb_alice_product(
+        item.id,
+        item.status,
+        link_check_status=getattr(item, "link_check_status", LinkCheckStatus.NEEDED.value),
+        price_verified=bool(getattr(item, "price_verified", False)),
+        ai_card_status=getattr(item, "ai_card_status", ""),
+        manual_verification=_checklist_display_state(verification),
+    )
+
+
+def _admin_product_keyboard(item: SearchResult) -> InlineKeyboardMarkup:
+    verification = _normalised_verification(item)
+    return kb_admin_product(
+        item.id,
+        item.status,
+        manual_verification=_checklist_display_state(verification),
+    )
+
+
+def _manual_checklist_lines(item: SearchResult) -> list[str]:
+    verification = _normalised_verification(item)
+    manual = verification.get("manual_verification", {})
+    final = verification.get("final_presentation_state", {})
+
+    sources = final.get("verification_source") if isinstance(final.get("verification_source"), dict) else {}
+
+    def field_text(field: str, *, feminine: bool = True) -> str:
+        if not final.get(f"{field}_verified"):
+            return "⬜ не подтверждена" if feminine else "⬜ не подтверждено"
+        source = str(sources.get(field) or "").lower()
+        suffix = "автоматически" if source == "automatic" else "специалистом"
+        return f"✅ подтверждена ({suffix})" if feminine else f"✅ подтверждено ({suffix})"
+
+    model_ok = bool(final.get("model_verified"))
+    if manual.get("manual_model_verified") and not model_ok:
+        model_text = "⚠️ отмечена, но automatic hard mismatch остаётся"
+    else:
+        model_text = field_text("model")
+    link_text = field_text("link")
+    price_text = field_text("price")
+    availability_text = field_text("availability", feminine=False)
+    seller_state = str(final.get("seller_state") or manual.get("manual_seller_state") or "UNSET").upper()
+    seller_text = {
+        SELLER_VERIFIED: "✅ подтверждён",
+        SELLER_REQUIRES_CHECK: "🟡 требует дополнительной проверки",
+    }.get(seller_state, "⬜ решение не указано")
+    final_status = {
+        "VERIFIED": "✅ VERIFIED (automatic)",
+        "APPROVED": "✅ APPROVED (specialist)",
+        "BLOCKED": "⛔ BLOCKED",
+        "NEEDS_REVIEW": "⬜ не завершён",
+    }.get(str(final.get("status") or "NEEDS_REVIEW"), "⬜ не завершён")
+
+    lines = [
+        "<b>Финальный checklist:</b>",
+        f"• Модель: {model_text}",
+        f"• Ссылка: {link_text}",
+        f"• Цена: {price_text}",
+        f"• Наличие: {availability_text}",
+        f"• Продавец: {seller_text}",
+        f"<b>Итог проверки:</b> {final_status}",
+    ]
+    checked_at = str(manual.get("manual_verified_at") or "").strip()
+    checked_by = str(manual.get("manual_verified_by") or "").strip()
+    if checked_at or checked_by:
+        lines.append(f"<b>Последнее действие:</b> {html.escape(checked_at)} · {html.escape(checked_by)}")
+    return lines
 
 
 def _stored_verify_status(sr: SearchResult) -> str:
@@ -344,7 +606,7 @@ def _facts_ps5_line(facts: dict) -> str:
 
 
 def _facts_detail_lines(sr: SearchResult) -> list[str]:
-    facts = _parse_facts(getattr(sr, "facts_json", ""))
+    facts = _normalised_verification(sr)
     if not facts:
         return []
     category = str(facts.get("category") or "unknown")
@@ -474,6 +736,11 @@ def _facts_detail_lines(sr: SearchResult) -> list[str]:
         ("Карточка", " / ".join(str(item) for item in (facts.get("product_card_confidence"), facts.get("product_card_reason")) if item)),
         ("Источник", facts.get("source_confidence")),
         ("Verification", facts.get("verification_confidence")),
+        ("Platform trust", " / ".join(str(item) for item in (facts.get("platform_name"), facts.get("platform_trust")) if item)),
+        ("Seller trust", facts.get("seller_trust")),
+        ("Verification access", facts.get("verification_access")),
+        ("HTTP/blocked", " / ".join(str(item) for item in (facts.get("fetch_status_code"), facts.get("blocked_reason")) if item)),
+        ("Browser/proxy", f"browser={bool(facts.get('browser_used'))}, proxy={bool(facts.get('proxy_used'))}"),
         ("Category quality", facts.get("category_quality_score")),
     )
     for label, value in diagnostics:
@@ -497,6 +764,44 @@ def _facts_detail_lines(sr: SearchResult) -> list[str]:
                 evidence_parts.append(f"{key}:{value.get('confidence', '-')}/{value.get('evidence', '-')}")
         if evidence_parts:
             lines.append(f"- Facts evidence: {html.escape(_clip_text(', '.join(evidence_parts), 800))}")
+    automatic = facts.get("automatic_verification") if isinstance(facts.get("automatic_verification"), dict) else {}
+    manual = facts.get("manual_verification") if isinstance(facts.get("manual_verification"), dict) else {}
+    final = facts.get("final_presentation_state") if isinstance(facts.get("final_presentation_state"), dict) else {}
+    lines.extend(["", "<b>Automatic verification (immutable):</b>"])
+    lines.append(
+        "- status/exact/access: "
+        + html.escape(" / ".join(str(value or "-") for value in (
+            automatic.get("verify_status"),
+            automatic.get("exact_match") or automatic.get("exact_match_status"),
+            automatic.get("verification_access"),
+        )))
+    )
+    auto_warnings = [str(value) for value in automatic.get("warnings") or [] if str(value).strip()]
+    lines.append(f"- warnings: {html.escape(_clip_text('; '.join(auto_warnings) or 'нет', 1000))}")
+    lines.extend(["", "<b>Manual verification (audit):</b>"])
+    decisions = manual.get("decisions") if isinstance(manual.get("decisions"), dict) else {}
+    decisions_text = ", ".join(f"{key}={value}" for key, value in decisions.items()) or "нет решений"
+    lines.append(f"- decisions: {html.escape(_clip_text(decisions_text, 800))}")
+    lines.append(
+        f"- actor/time: {html.escape(str(manual.get('manual_verified_by') or '-'))} / "
+        f"{html.escape(str(manual.get('manual_verified_at') or '-'))}"
+    )
+    lines.append(f"- note: {html.escape(_clip_text(str(manual.get('manual_note') or 'нет'), 800))}")
+    history = manual.get("history") if isinstance(manual.get("history"), list) else []
+    lines.append(f"- history events: {len(history)}")
+    lines.extend(["", "<b>Final presentation state:</b>"])
+    lines.append(
+        f"- status/ready/specialist: {html.escape(str(final.get('status') or '-'))} / "
+        f"{bool(final.get('presentation_ready'))} / {bool(final.get('specialist_verified'))}"
+    )
+    lines.append(f"- confirmed: {html.escape(', '.join(final.get('confirmed_fields') or []) or 'нет')}")
+    lines.append(f"- unresolved: {html.escape(', '.join(final.get('unresolved_fields') or []) or 'нет')}")
+    lines.append(f"- blockers: {html.escape('; '.join(final.get('blocking_reasons') or []) or 'нет')}")
+    lines.append(f"- client warnings: {html.escape(_clip_text('; '.join(final.get('warnings') or []) or 'нет', 1000))}")
+    lines.append(
+        f"- suppressed automatic: "
+        f"{html.escape(_clip_text('; '.join(final.get('suppressed_automatic_warnings') or []) or 'нет', 1000))}"
+    )
     return lines
 
 
@@ -504,16 +809,16 @@ def format_search_result_summary(sr: SearchResult, idx: int) -> str:
     """Короткая строка результата для общего списка без URL и длинных полей."""
     title = html.escape(_clip_text(sr.title or "без названия", 95))
     price = format_price(sr.price) if sr.price else "цена не найдена"
-    source = html.escape(_clip_text(sr.source or "generic_web", 45))
-    status = html.escape(_verify_status_label(_stored_verify_status(sr)))
+    source = html.escape(_clip_text(source_display_name(sr.source), 45))
+    status = html.escape(_result_status_label(sr.status))
     facts = _parse_facts(getattr(sr, "facts_json", ""))
     facts_line = _facts_compact_line(facts)
     ps5_line = _facts_ps5_line(facts)
-    risks = _parse_risk_flags(sr.risk_flags)[:3]
+    risks = _admin_safe_items(_resolved_admin_warnings(sr), 3)
     risk_text = _clip_text("; ".join(risks) if risks else "нет", 180)
     lines = [
         f"{idx}. <b>{title}</b>\n"
-        f"   {html.escape(price)} | {source} | {status} | score {int(round(sr.score))}"
+        f"   {html.escape(price)} | {source} | {status}"
     ]
     if facts_line:
         lines.append(f"   {html.escape(facts_line)}")
@@ -612,7 +917,7 @@ def build_results_page(req_id: int, results: list[SearchResult], rejected_auto_c
         buttons.append(nav)
 
     buttons.append([InlineKeyboardButton(text="🔎 Запустить автопоиск", callback_data=f"autosearch_{req_id}")])
-    buttons.append([InlineKeyboardButton(text="🤖 Сделать ИИ-карточки из автопоиска", callback_data=f"aicards_{req_id}")])
+    buttons.append([InlineKeyboardButton(text="🤖 Сделать карточки рекомендаций", callback_data=f"aicards_{req_id}")])
     buttons.append([InlineKeyboardButton(text="🧪 Debug поиска", callback_data=f"debugsearch_{req_id}")])
     buttons.append([InlineKeyboardButton(text="➕ Добавить вручную", callback_data=f"addprod_{req_id}")])
     buttons.append([InlineKeyboardButton(text="👁 Полный предпросмотр для админа", callback_data=f"adminpreview_{req_id}")])
@@ -648,7 +953,7 @@ def _price_check_status(item: SearchResult) -> str:
 
 
 def _card_link_warnings(item: SearchResult) -> list[str]:
-    req = get_request(item.request_id)
+    req = _optional_request(item.request_id)
     if not req:
         return []
     warnings: list[str] = []
@@ -678,14 +983,33 @@ def _alice_card_meta(item: SearchResult) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _resolved_admin_warnings(item: SearchResult) -> list[str]:
+    facts = _parse_facts(getattr(item, "facts_json", ""))
+    prepared = dict(facts)
+    automatic = dict(prepared.get("automatic_verification") or facts)
+    raw = automatic.get("warnings")
+    existing = raw if isinstance(raw, list) else ([raw] if raw else [])
+    meta = _alice_card_meta(item)
+    manual_check = meta.get("manual_check") or meta.get("notes") or []
+    if isinstance(manual_check, str):
+        manual_check = [manual_check]
+    if not isinstance(manual_check, list):
+        manual_check = []
+    automatic["warnings"] = [*existing, *_parse_risk_flags(item.risk_flags), *manual_check]
+    prepared["automatic_verification"] = automatic
+    final = resolve_final_presentation(prepared)
+    return [str(value) for value in final.get("warnings") or [] if str(value).strip()]
+
+
 def format_alice_card(sr: SearchResult, idx: int) -> str:
-    """Карточка одного товара, полученного из ответа Алисы."""
-    try:
-        risks = json.loads(sr.risk_flags) if sr.risk_flags else []
-    except json.JSONDecodeError:
-        risks = []
-    req = get_request(sr.request_id)
+    """Карточка рекомендации для админа; raw diagnostics остаются в Debug."""
+    risks = _admin_safe_items(_resolved_admin_warnings(sr), 3)
+    req = _optional_request(sr.request_id)
     meta = _alice_card_meta(sr)
+    verification = _normalised_verification(sr)
+    facts = dict(verification)
+    final = verification.get("final_presentation_state") if isinstance(verification.get("final_presentation_state"), dict) else {}
+    facts.update(final.get("final_facts") or {})
     state = {
         "BEST": "🏆 ТОП-1",
         "TOP": "🏆 ТОП-1",
@@ -700,36 +1024,47 @@ def format_alice_card(sr: SearchResult, idx: int) -> str:
         "REJECTED": "❌ убран",
         "REJECTED_AUTO": "❌ авто-отклонён",
     }.get(sr.status, "🟡 на проверке")
-    lines = [f"🧩 <b>Карточка {idx}</b> — {state}"]
-    if meta.get("role"):
-        lines.append(f"<b>Роль ИИ:</b> {html.escape(str(meta.get('role')))}")
-    if meta.get("confidence"):
-        lines.append(f"<b>Confidence:</b> {html.escape(str(meta.get('confidence')))}")
+    lifecycle = {
+        "DRAFT": "черновик", "GENERATED": "готова к проверке",
+        "APPROVED": "утверждена", "REJECTED": "отклонена", "ERROR": "нужна ручная правка",
+    }.get(get_ai_card_status(sr), "черновик")
+    platform = str(facts.get("platform_name") or source_display_name(sr.source))
+    platform_type = str(facts.get("platform_type") or "").upper()
+    seller_state = str(final.get("seller_state") or "UNSET").upper()
+    seller = str(facts.get("seller") or (platform if platform_type == "RETAIL" else "проверен" if seller_state == SELLER_VERIFIED else "требует проверки"))
+    exact_label = "совпадает" if final.get("model_verified") else "требует проверки"
+    lines = [f"🧩 <b>Карточка рекомендации {idx}</b> — {state}", f"<b>Подготовка:</b> {html.escape(lifecycle)}"]
     lines.append(f"<b>Название:</b> {html.escape(sr.title or 'не указано')}")
     lines.append(f"<b>Цена:</b> {format_price(sr.price) if sr.price else 'уточнить'}")
-    lines.append(f"<b>Магазин:</b> {html.escape(sr.source or 'не указан')}")
-    facts = _parse_facts(getattr(sr, "facts_json", ""))
-    lines.append(f"<b>Проверка:</b> {html.escape(_verify_status_label(_stored_verify_status(sr)))}")
-    why_not_good = str(facts.get("why_not_verified_good") or "").strip()
-    if why_not_good:
-        lines.append(f"<b>Почему не GOOD:</b> {html.escape(_clip_text(why_not_good, 180))}")
+    lines.append(f"<b>Площадка:</b> {html.escape(platform)}")
+    lines.append(f"<b>Продавец:</b> {html.escape(seller)}")
+    lines.append(f"<b>Соответствие товару:</b> {html.escape(exact_label)}")
     if _link_status(sr.url) == "✅ есть":
         safe_url = html.escape(sr.url, quote=True)
         lines.append(f'<b>Ссылка:</b> <a href="{safe_url}">открыть</a>')
     else:
         lines.append("<b>Ссылка:</b> ⚠️ ссылку нужно искать вручную")
-    lines.append(f"<b>Почему:</b> {html.escape(sr.snippet or 'не указано')}")
-    lines.append(f"<b>Риск:</b> {html.escape('; '.join(risks) if risks else 'не указан')}")
-    manual_check = meta.get("manual_check") or meta.get("notes") or []
-    if isinstance(manual_check, str):
-        manual_check = [manual_check] if manual_check.strip() else []
-    if manual_check:
-        lines.append(f"<b>Проверить вручную:</b> {html.escape('; '.join(str(item) for item in manual_check))}")
-    elif meta.get("note"):
+    why = _admin_safe_items([sr.snippet], 1)
+    if why and any(marker in why[0].casefold() for marker in ("успейте", "купите", "акция", "промокод")):
+        why = []
+    lines.append(f"<b>Почему:</b> {html.escape(why[0] if why else 'соответствует сохранённым фактам; проверьте пункты ниже')}")
+    lines.append(f"<b>Главные риски:</b> {html.escape('; '.join(risks) if risks else 'явные риски не выявлены')}")
+    confirmed = [
+        label for key, label in (
+            ("link_verified", "карточка товара"),
+            ("model_verified", "модель и обязательные характеристики"),
+            ("price_verified", "цена"),
+            ("availability_verified", "наличие"),
+            ("seller_verified", "продавец"),
+        ) if final.get(key)
+    ]
+    lines.append(f"<b>Подтверждено:</b> {html.escape('; '.join(confirmed) if confirmed else 'пока ничего')}")
+    if meta.get("note"):
         lines.append(f"<b>Заметка:</b> {html.escape(str(meta.get('note')))}")
     lines.append(f"<b>Статус ссылки:</b> {_link_status(sr.url)}")
-    lines.append(f"<b>Статус проверки:</b> {_link_check_status(sr)}")
-    lines.append(f"<b>Статус цены:</b> {_price_check_status(sr)}")
+    lines.append(f"<b>Статус проверки:</b> {'✅ ссылка подтверждена' if final.get('link_verified') else '⚠️ ссылку нужно подтвердить'}")
+    lines.append(f"<b>Статус цены:</b> {'✅ цена подтверждена' if final.get('price_verified') else '⚠️ цену нужно подтвердить'}")
+    lines.extend(_manual_checklist_lines(sr))
     if req and req.budget and req.budget.isdigit() and sr.price and sr.price > int(req.budget):
         lines.append("⚠️ Цена выше бюджета клиента.")
     if _link_status(sr.url) != "✅ есть":
@@ -747,13 +1082,11 @@ def _alice_card_index(result_id: int, request_id: int) -> int:
 
 async def _refresh_alice_card(message: Message, sr: SearchResult) -> None:
     index = _alice_card_index(sr.id, sr.request_id)
-    link_status = getattr(sr, "link_check_status", "NEEDED") or "NEEDED"
-    price_ok = bool(getattr(sr, "price_verified", False))
 
     try:
         await message.edit_text(
             format_alice_card(sr, index),
-            reply_markup=kb_alice_product(sr.id, sr.status, link_check_status=link_status, price_verified=price_ok),
+            reply_markup=_alice_product_keyboard(sr),
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
@@ -768,45 +1101,25 @@ async def send_alice_cards(message: Message, req_id: int, include_header: bool =
     cards = get_alice_results(req_id)
     if include_header:
         await message.answer(
-            f"🧩 <b>Карточки ИИ для заявки #{req_id}</b>\n"
+            f"🧩 <b>Карточки рекомендаций для заявки #{req_id}</b>\n"
             f"Найдено товаров: {len(cards)}",
             parse_mode="HTML",
         )
     if not cards:
-        await message.answer("Карточек ИИ пока нет. Нажми «🟡 Проверить через Алису» и вставь ответ Алисы или GigaChat.")
+        await message.answer("Карточек рекомендаций пока нет. Запустите генерацию или добавьте варианты вручную.")
         return
     for index, card in enumerate(cards[:20], 1):
-        link_status = getattr(card, "link_check_status", LinkCheckStatus.NEEDED.value) or LinkCheckStatus.NEEDED.value
-        price_ok = bool(getattr(card, "price_verified", False))
         await message.answer(
             format_alice_card(card, index),
-            reply_markup=kb_alice_product(card.id, card.status, link_check_status=link_status, price_verified=price_ok),
+            reply_markup=_alice_product_keyboard(card),
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
 
 
 def _telegram_chunks(text: str, limit: int = 3900) -> list[str]:
-    """Разбивает длинный админский предпросмотр по строкам для Telegram."""
-    chunks: list[str] = []
-    current = ""
-    for line in text.splitlines(keepends=True):
-        while len(line) > limit:
-            if current:
-                chunks.append(current.rstrip())
-                current = ""
-            split_at = line.rfind(" ", 0, limit + 1)
-            if split_at <= 0:
-                split_at = limit
-            chunks.append(line[:split_at].rstrip())
-            line = line[split_at:].lstrip()
-        if current and len(current) + len(line) > limit:
-            chunks.append(current.rstrip())
-            current = ""
-        current += line
-    if current:
-        chunks.append(current.rstrip())
-    return chunks or [text]
+    """Совместимый HTML-aware splitter с безопасным лимитом Telegram."""
+    return chunk_html(text, limit=limit)
 
 
 def format_search_debug(req_id: int) -> str:
@@ -841,7 +1154,7 @@ async def cmd_admin(message: Message):
         return
     await message.answer(
         "🔧 <b>Панель админа</b>\n\nВыбери раздел:",
-        reply_markup=kb_admin_menu(),
+        reply_markup=kb_admin_menu(admin_queue_counts()),
         parse_mode="HTML"
     )
 
@@ -853,17 +1166,7 @@ async def admin_all(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    reqs = get_all_requests()
-    if not reqs:
-        await callback.message.edit_text("Заявок пока нет.", reply_markup=kb_admin_back())
-        return
-    text = "📋 <b>Все заявки:</b>\n\n"
-    text += "\n".join(format_request_card(r) for r in reqs[:20])
-    buttons = [[InlineKeyboardButton(text=f"#{r.id} {r.product[:25]}", callback_data=f"view_{r.id}")]
-               for r in reqs[:20]]
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
-    await callback.answer()
+    await _show_admin_queue(callback, "📋 <b>Все заявки</b>", get_all_requests())
 
 
 @router.callback_query(F.data == "admin_new")
@@ -871,17 +1174,7 @@ async def admin_new(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    reqs = get_all_requests(status="NEW")
-    if not reqs:
-        await callback.message.edit_text("Новых заявок нет.", reply_markup=kb_admin_back())
-        return
-    text = "🆕 <b>Новые заявки:</b>\n\n"
-    text += "\n".join(format_request_card(r) for r in reqs[:20])
-    buttons = [[InlineKeyboardButton(text=f"#{r.id} {r.product[:25]}", callback_data=f"view_{r.id}")]
-               for r in reqs[:20]]
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
-    await callback.answer()
+    await _show_admin_queue(callback, "📥 <b>Новые заявки</b>", _filter_requests("NEW"))
 
 
 @router.callback_query(F.data == "admin_searching")
@@ -889,17 +1182,7 @@ async def admin_searching(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    reqs = get_all_requests(status="SEARCHING")
-    if not reqs:
-        await callback.message.edit_text("Заявок в поиске нет.", reply_markup=kb_admin_back())
-        return
-    text = "🔎 <b>В поиске:</b>\n\n"
-    text += "\n".join(format_request_card(r) for r in reqs[:20])
-    buttons = [[InlineKeyboardButton(text=f"#{r.id} {r.product[:25]}", callback_data=f"view_{r.id}")]
-               for r in reqs[:20]]
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
-    await callback.answer()
+    await _show_admin_queue(callback, "🔎 <b>В поиске</b>", _filter_requests("SEARCHING"))
 
 
 @router.callback_query(F.data == "admin_waiting")
@@ -907,16 +1190,86 @@ async def admin_waiting(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    reqs = get_all_requests(status="PREVIEW_SENT")
-    if not reqs:
-        await callback.message.edit_text("Ожидающих оплаты заявок нет.", reply_markup=kb_admin_back())
+    await _show_admin_queue(callback, "💳 <b>Ожидают оплаты</b>", _filter_requests("WAITING_PAYMENT"))
+
+
+@router.callback_query(F.data == "admin_review")
+async def admin_review_queue(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
         return
-    text = "⏳ <b>Ожидают оплаты:</b>\n\n"
-    text += "\n".join(format_request_card(r) for r in reqs[:20])
-    buttons = [[InlineKeyboardButton(text=f"#{r.id} {r.product[:25]}", callback_data=f"view_{r.id}")]
-               for r in reqs[:20]]
+    await _show_admin_queue(callback, "🧑‍💻 <b>Требуют проверки</b>", _filter_requests("ADMIN_REVIEW", "AI_CARDS_DRAFT"))
+
+
+@router.callback_query(F.data == "admin_ready")
+async def admin_ready_queue(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await _show_admin_queue(callback, "✅ <b>Готовые</b>", _filter_requests("READY"))
+
+
+@router.callback_query(F.data == "admin_delivered")
+async def admin_delivered_queue(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await _show_admin_queue(callback, "📤 <b>Отправленные</b>", _filter_requests("DELIVERED"))
+
+
+@router.callback_query(F.data == "admin_problem")
+async def admin_problem_queue(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    requests = _filter_requests("FAILED", "NEED_CLARIFICATION")
+    low_feedback = get_low_feedback(max_rating=2, limit=20)
+    if not low_feedback:
+        await _show_admin_queue(callback, "⚠️ <b>Проблемные</b>", requests)
+        return
+    lines = ["⚠️ <b>Проблемные заявки и низкие оценки</b>", ""]
+    lines.extend(format_request_card(item) for item in requests[:10])
+    lines.append("\n<b>Низкие оценки:</b>")
+    for item in low_feedback[:10]:
+        lines.append(
+            f"• Заявка #{item.request_id or '—'} · {item.rating}/5"
+            + (f" · {escape_html(item.comment[:200])}" if item.comment else "")
+        )
+    buttons = [
+        [InlineKeyboardButton(text=f"Открыть #{item.id}", callback_data=f"view_{item.id}")]
+        for item in requests[:10]
+    ]
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    metrics = build_product_metrics()
+    low = len(get_low_feedback(max_rating=2, limit=1000))
+    average = metrics.get("average_delivery_seconds")
+    average_text = "нет данных" if average is None else f"{round(average / 60)} мин"
+    text = (
+        "📊 <b>Статистика</b>\n\n"
+        f"Заявки начаты: {metrics['requests_started']}\n"
+        f"Заявки завершены: {metrics['requests_completed']}\n"
+        f"Оплаты: {metrics['payments']}\n"
+        f"Готовые подборы: {metrics['ready_recommendations']}\n"
+        f"Отправлено: {metrics['delivered']}\n"
+        f"Среднее время: {average_text}\n"
+        f"Ручная проверка: {metrics['manual_review_percent']}%\n"
+        f"Низкие оценки: {low}\n"
+        f"Неподдерживаемые категории: {metrics['unsupported_categories']}"
+    )
+    await callback.message.edit_text(text, reply_markup=kb_admin_back(), parse_mode="HTML")
     await callback.answer()
 
 
@@ -927,7 +1280,7 @@ async def admin_back(callback: CallbackQuery):
         return
     await callback.message.edit_text(
         "🔧 <b>Панель админа</b>\n\nВыбери раздел:",
-        reply_markup=kb_admin_menu(),
+        reply_markup=kb_admin_menu(admin_queue_counts()),
         parse_mode="HTML"
     )
     await callback.answer()
@@ -953,7 +1306,7 @@ async def view_request(callback: CallbackQuery):
     if links:
         text += "\n\n🔗 <b>Поисковые ссылки:</b>\n"
         for link in links:
-            text += f'• <a href="{link["url"]}">{link["site"]}</a>\n'
+            text += f'• <a href="{html.escape(link["url"], quote=True)}">{html.escape(link["site"])}</a>\n'
 
     await callback.message.edit_text(
         text,
@@ -971,20 +1324,18 @@ async def take_request(callback: CallbackQuery):
         await callback.answer("Нет доступа", show_alert=True)
         return
     req_id = int(callback.data.split("_")[1])
-    update_request(req_id, status="SEARCHING")
+    try:
+        transition_request(req_id, SEARCHING, actor=f"admin:{callback.from_user.id}", reason="Заявка взята в работу")
+    except InvalidStatusTransition as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
     await callback.answer("Заявка взята в работу")
 
     # Уведомляем пользователя
     req = get_request(req_id)
     if req:
         try:
-            await callback.bot.send_message(
-                req.user_id,
-                f"🔎 Твоя заявка <b>#{req_id}</b> взята в работу!\n"
-                f"Ищем: <b>{req.product_name or req.product}</b>\n\n"
-                f"Скоро пришлю результаты.",
-                parse_mode="HTML"
-            )
+            await update_client_progress(callback.bot, req_id, "analysis")
         except Exception:
             pass
 
@@ -995,7 +1346,7 @@ async def take_request(callback: CallbackQuery):
     if links:
         text += "\n\n🔗 <b>Поисковые ссылки:</b>\n"
         for link in links:
-            text += f'• <a href="{link["url"]}">{link["site"]}</a>\n'
+            text += f'• <a href="{html.escape(link["url"], quote=True)}">{html.escape(link["site"])}</a>\n'
     await callback.message.edit_text(
         text,
         reply_markup=kb_admin_request(req_id, req.status),
@@ -1016,25 +1367,51 @@ async def auto_search(callback: CallbackQuery):
         await callback.answer("Заявка не найдена", show_alert=True)
         return
 
-    # Убедимся что статус SEARCHING
-    if req.status == "NEW":
-        update_request(req_id, status="SEARCHING")
+    try:
+        current_status = normalize_request_status(req.status)
+    except Exception:
+        current_status = FAILED
+    if current_status != SEARCHING:
+        try:
+            req = transition_request(req_id, SEARCHING, actor=f"admin:{callback.from_user.id}", reason="Запуск поиска")
+        except InvalidStatusTransition as exc:
+            await callback.answer(str(exc), show_alert=True)
+            return
+
+    route = SearchOrchestrationService.route(req)
+    if route is not SearchMode.AUTO:
+        transition_request(req_id, ADMIN_REVIEW, actor=f"admin:{callback.from_user.id}", reason="Категория требует ручной проверки")
+        _track_admin_event("unsupported_category", callback.from_user.id, req_id, {"category": req.category or "unknown"})
+        await update_client_progress(callback.bot, req_id, "admin_review")
+        await callback.message.answer(
+            "Автоматический поиск для этой заявки отключён. Используйте ручной вариант, сравнение ссылок или заметку специалиста.",
+            reply_markup=kb_admin_request(req_id, ADMIN_REVIEW),
+        )
+        await callback.answer("Передано на ручную проверку")
+        return
 
     await callback.answer("Запускаю автопоиск...")
+    _track_admin_event("search_started", callback.from_user.id, req_id)
+    await update_client_progress(callback.bot, req_id, "search")
 
-    # Запускаем поиск вне event loop, потому что внутри есть сетевые/блокирующие операции.
-    result = await asyncio.to_thread(run_product_search, req)
+    # Feature-flag bridge: default legacy; shadow не меняет заявку результатами V2.
+    result = await run_search_for_request(req)
 
     if result["success"]:
+        transition_request(req_id, ADMIN_REVIEW, actor=f"admin:{callback.from_user.id}", reason="Предложения собраны")
+        _track_admin_event("admin_review_started", callback.from_user.id, req_id)
+        await update_client_progress(callback.bot, req_id, "admin_review")
         await callback.message.answer(
             f"✅ {result['message']}\n\n"
             f"Теперь нажми «📦 Показать найденные варианты» для проверки.",
-            reply_markup=kb_admin_request(req_id, "SEARCHING")
+            reply_markup=kb_admin_request(req_id, ADMIN_REVIEW)
         )
     else:
+        transition_request(req_id, FAILED, actor=f"admin:{callback.from_user.id}", reason="Автопоиск не дал результата")
+        await update_client_progress(callback.bot, req_id, "admin_review")
         await callback.message.answer(
-            f"⚠️ {result['message']}",
-            reply_markup=kb_admin_request(req_id, "SEARCHING")
+            f"⚠️ {html.escape(result['message'])}",
+            reply_markup=kb_admin_request(req_id, FAILED)
         )
 
 
@@ -1049,17 +1426,28 @@ async def make_ai_cards(callback: CallbackQuery):
         await callback.answer("Заявка не найдена", show_alert=True)
         return
 
-    candidates = [item for item in get_all_search_results(req_id) if item.status != "REJECTED_AUTO"]
-    if len(candidates) < 3:
-        await callback.answer("Мало результатов. Сначала запустите автопоиск.", show_alert=True)
+    selected_statuses = {"BEST", "CHEAP", "RELIABLE", "APPROVED"}
+    candidates = [
+        item for item in get_all_search_results(req_id)
+        if item.origin != "alice" and item.status in selected_statuses
+    ][:3]
+    if not candidates:
+        await callback.answer("Сначала выберите 1–3 кандидата: лучший, дешёвый или надёжный.", show_alert=True)
         return
 
-    await callback.answer("Делаю ИИ-карточки...")
+    try:
+        transition_request(req_id, AI_CARDS_DRAFT, actor=f"admin:{callback.from_user.id}", reason="Запущено создание карточек")
+    except InvalidStatusTransition as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("Создаю карточки...")
+    await callback.message.answer("🧩 Статус: GENERATING. Готовим 1–3 карточки для проверки.")
+    await update_client_progress(callback.bot, req_id, "verification")
     result = await asyncio.to_thread(generate_ai_cards_from_candidates, req, candidates)
     if not result.get("success"):
         await callback.message.answer(
-            f"⚠️ {html.escape(result.get('message') or 'Не удалось сделать ИИ-карточки.')}\n\n"
-            "Можно нажать «🟡 Проверить через Алису» и вставить ответ вручную.",
+            f"⚠️ {html.escape(result.get('message') or 'Не удалось сделать карточки.')}\n\n"
+            "Можно добавить текстовый вариант вручную.",
             parse_mode="HTML",
             reply_markup=kb_admin_request(req_id, req.status),
         )
@@ -1075,15 +1463,330 @@ async def make_ai_cards(callback: CallbackQuery):
             "parsed_items": cards,
         }, ensure_ascii=False),
     )
-    if req.status == "NEW":
-        update_request(req_id, status="SEARCHING")
-
     await callback.message.answer(
-        f"✅ ИИ-карточки готовы. Найдено: {len(cards)}.\n"
-        "Проверь ТОП-3–5, подтверди цену и ссылку.",
+        f"✅ Карточки созданы: {len(cards)}. Статус: "
+        f"{'DRAFT (текстовый fallback)' if result.get('fallback') else 'GENERATED'}.\n"
+        "Проверь текст, цену и ссылку, затем утверди каждую карточку.",
         parse_mode="HTML",
     )
     await send_alice_cards(callback.message, req_id, include_header=False)
+
+
+@router.callback_query(F.data.startswith("aiapprove_"))
+async def approve_ai_card(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    result_id = int(callback.data.split("_")[1])
+    try:
+        card = AdminReviewService().approve(result_id)
+    except AIReviewError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    update_search_result(result_id, checked_at=datetime.now().isoformat())
+    card = get_search_result(result_id)
+    await _refresh_alice_card(callback.message, card)
+    await callback.answer("Карточка утверждена")
+
+
+@router.callback_query(F.data.startswith("aiedit_"))
+async def edit_ai_card_prompt(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    result_id = int(callback.data.split("_")[1])
+    card = get_search_result(result_id)
+    if not card or card.origin != "alice":
+        await callback.answer("Карточка не найдена", show_alert=True)
+        return
+    await state.update_data(ai_edit_result_id=result_id)
+    await state.set_state(AdminStates.editing_ai_text)
+    await callback.message.answer(
+        f"Отправьте новый текст «Почему рекомендуем» для:\n<b>{escape_html(card.title)}</b>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("complinks_"))
+async def comparison_links_view(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    req_id = int(callback.data.split("_")[1])
+    items = get_comparison_links(req_id)
+    if not items:
+        await callback.answer("У заявки нет ссылок для сравнения", show_alert=True)
+        return
+    lines = [f"⚖️ <b>Ссылки заявки #{req_id}</b>", ""]
+    buttons = []
+    for index, item in enumerate(items, 1):
+        lines.append(
+            f"{index}. <b>{escape_html(item.title or 'Факты не заполнены')}</b>\n"
+            f"{escape_html(source_display_name(item.source))} · {format_price(item.price) if item.price else 'цена не указана'}\n"
+            f"Статус: {escape_html(item.status)}"
+        )
+        buttons.append([InlineKeyboardButton(text=f"✏️ Исправить ссылку #{index}", callback_data=f"compedit_{item.id}")])
+    buttons.append([InlineKeyboardButton(text="🔙 К заявке", callback_data=f"view_{req_id}")])
+    await callback.message.answer(
+        "\n\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("compedit_"))
+async def comparison_link_edit_prompt(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    link_id = int(callback.data.split("_")[1])
+    item = get_comparison_link(link_id)
+    if not item:
+        await callback.answer("Ссылка не найдена", show_alert=True)
+        return
+    await state.update_data(comparison_link_id=link_id)
+    await state.set_state(AdminStates.editing_comparison)
+    await callback.message.answer(
+        "Отправьте исправленные факты одной строкой:\n"
+        "<code>Название | Цена | Модель | Продавец | Наличие</code>\n\n"
+        "Цена может быть пустой, остальные поля не выдумывайте.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.editing_comparison, F.text)
+async def comparison_link_edit_save(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    link_id = int(data.get("comparison_link_id") or 0)
+    item = get_comparison_link(link_id)
+    parts = [part.strip() for part in message.text.split("|")]
+    if not item or len(parts) != 5:
+        await message.answer("Нужны ровно 5 полей, разделённых символом |.")
+        return
+    title, price_text, model, seller, availability = parts
+    price = _extract_price(price_text) if price_text else None
+    if price_text and price is None:
+        await message.answer("Не удалось распознать цену.")
+        return
+    facts = {"model": model} if model else {}
+    updated = update_comparison_link(
+        link_id,
+        title=title[:500],
+        price=price,
+        model=model[:300],
+        seller=seller[:300],
+        availability=availability[:200],
+        facts_json=json.dumps(facts, ensure_ascii=False),
+        status="MANUAL_CHECKED",
+        manual_check_required=0,
+        manual_note=f"Исправлено администратором {message.from_user.id}",
+    )
+    for result in get_all_search_results(item.request_id or 0):
+        if result.url == item.url:
+            update_search_result(
+                result.id,
+                title=title or result.title,
+                price=price,
+                source=item.source,
+                facts_json=json.dumps(facts, ensure_ascii=False),
+                admin_note="Факты ссылки исправлены администратором",
+            )
+    await state.clear()
+    await message.answer(f"Факты сохранены для {escape_html(updated.source if updated else item.source)}.", parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("reqnote_"))
+async def request_note_prompt(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    req_id = int(callback.data.split("_")[1])
+    req = get_request(req_id)
+    if not req:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    await state.update_data(request_note_id=req_id)
+    await state.set_state(AdminStates.editing_request_note)
+    await callback.message.answer(
+        f"Внутренняя заметка по заявке #{req_id}. Отправьте текст или «-» для удаления.\n"
+        f"Текущая: {escape_html(req.admin_note or 'нет')}",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.editing_request_note, F.text)
+async def request_note_save(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    req_id = int(data.get("request_note_id") or 0)
+    note = "" if message.text.strip() == "-" else " ".join(message.text.split())[:2000]
+    update_request(req_id, admin_note=note)
+    await state.clear()
+    await message.answer("Заметка сохранена." if note else "Заметка удалена.")
+
+
+@router.callback_query(F.data.startswith("admincancel_"))
+async def admin_cancel_request(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    req_id = int(callback.data.split("_")[1])
+    try:
+        transition_request(req_id, "CANCELLED", actor=f"admin:{callback.from_user.id}", reason="Отменено администратором")
+    except Exception as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.message.edit_text(f"❌ Заявка #{req_id} отменена.", reply_markup=kb_admin_back())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("markready_"))
+async def mark_request_ready(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    req_id = int(callback.data.split("_")[1])
+    req = get_request(req_id)
+    if not req:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    issue, _excluded = get_alice_report_issues(req)
+    if issue:
+        await callback.answer(issue, show_alert=True)
+        return
+    if not get_alice_results(req_id) and count_approved_results(req_id) < 1:
+        await callback.answer("Нет выбранных вариантов.", show_alert=True)
+        return
+    try:
+        transition_request(req_id, READY, actor=f"admin:{callback.from_user.id}", reason="Результат утверждён")
+    except InvalidStatusTransition as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    _track_admin_event("recommendation_ready", callback.from_user.id, req_id)
+    await update_client_progress(callback.bot, req_id, "ready")
+    await callback.message.edit_text(
+        f"✅ Результат по заявке #{req_id} утверждён и готов к отправке.",
+        reply_markup=kb_admin_request(req_id, READY),
+        parse_mode="HTML",
+    )
+    await callback.answer("Результат утверждён")
+
+
+@router.message(AdminStates.editing_ai_text, F.text)
+async def edit_ai_card_text(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    result_id = int(data.get("ai_edit_result_id") or 0)
+    try:
+        card = AdminReviewService().edit(result_id, why=message.text)
+    except AIReviewError as exc:
+        await message.answer(str(exc))
+        return
+    await state.clear()
+    await message.answer("Текст сохранён как DRAFT. Проверьте и утвердите карточку.")
+    await message.answer(
+        format_alice_card(card, _alice_card_index(card.id, card.request_id)),
+        reply_markup=_alice_product_keyboard(card),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+@router.callback_query(F.data.startswith("aiimage_"))
+async def edit_ai_image_prompt(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    result_id = int(callback.data.split("_")[1])
+    if not get_search_result(result_id):
+        await callback.answer("Карточка не найдена", show_alert=True)
+        return
+    await state.update_data(ai_image_result_id=result_id)
+    await state.set_state(AdminStates.editing_ai_image)
+    await callback.message.answer("Пришлите изображение или Telegram file_id. Без изображения карточка останется текстовой.")
+    await callback.answer()
+
+
+@router.message(AdminStates.editing_ai_image)
+async def edit_ai_image(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    result_id = int(data.get("ai_image_result_id") or 0)
+    file_id = ""
+    if message.photo:
+        file_id = message.photo[-1].file_id
+    elif message.text:
+        file_id = message.text.strip()
+    if not file_id:
+        await message.answer("Нужно прислать изображение или file_id.")
+        return
+    try:
+        service = AdminReviewService()
+        card = get_search_result(result_id)
+        if card and get_ai_card_status(card) == AI_CARD_APPROVED:
+            service.reject(result_id)
+            service.transition(result_id, AI_CARD_DRAFT)
+        service.edit(result_id, image_file_id=file_id)
+    except AIReviewError as exc:
+        await message.answer(str(exc))
+        return
+    await state.clear()
+    await message.answer("Изображение сохранено. Карточка снова в DRAFT и требует утверждения.")
+
+
+@router.callback_query(F.data.startswith("airegen_"))
+async def regenerate_ai_card(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    result_id = int(callback.data.split("_")[1])
+    card = get_search_result(result_id)
+    if not card or card.origin != "alice":
+        await callback.answer("Карточка не найдена", show_alert=True)
+        return
+    meta = _alice_card_meta(card)
+    candidate = get_search_result(int(meta.get("candidate_id") or 0))
+    if not candidate:
+        await callback.answer("Исходный кандидат не найден. Создайте карточки заново из заявки.", show_alert=True)
+        return
+    req = get_request(card.request_id)
+    result = await asyncio.to_thread(generate_ai_cards_from_candidates, req, [candidate])
+    generated = (result.get("cards") or [None])[0]
+    if not generated:
+        await callback.answer("Не удалось обновить карточку", show_alert=True)
+        return
+    service = AdminReviewService()
+    current = get_ai_card_status(card)
+    try:
+        if current == AI_CARD_APPROVED:
+            service.reject(result_id)
+            service.transition(result_id, AI_CARD_DRAFT)
+        elif current != AI_CARD_DRAFT:
+            service.transition(result_id, AI_CARD_DRAFT)
+        service.edit(
+            result_id,
+            why=generated.get("why") or "; ".join(generated.get("pluses") or []),
+            risks=generated.get("risks") or [],
+            manual_check=generated.get("manual_check") or [],
+        )
+        if not result.get("fallback"):
+            service.transition(result_id, AI_CARD_GENERATED)
+    except AIReviewError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    refreshed = get_search_result(result_id)
+    await _refresh_alice_card(callback.message, refreshed)
+    await callback.answer("Карточка перегенерирована")
 
 
 @router.callback_query(F.data.startswith("debugsearch_"))
@@ -1171,10 +1874,31 @@ async def show_results(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("v2compare_"))
+async def compare_legacy_v2(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    req_id = int(callback.data.split("_")[1])
+    if not get_request(req_id):
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    snapshot = load_shadow_comparison(req_id)
+    if not snapshot:
+        await callback.answer("Shadow snapshot ещё не создан", show_alert=True)
+        return
+    await callback.message.answer(
+        f"<pre>{html.escape(format_shadow_comparison(snapshot))}</pre>",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    await callback.answer()
+
+
 # ---------- Просмотр конкретного найденного товара ----------
 
 @router.callback_query(F.data.startswith("viewresult_"))
-async def view_result(callback: CallbackQuery):
+async def view_result(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -1192,28 +1916,23 @@ async def view_result(callback: CallbackQuery):
         lines.append(f"💰 Цена: {format_price(sr.price)}")
     else:
         lines.append("💰 Цена: <i>цена не найдена</i>")
-    lines.append(f"🏪 Источник: {html.escape(sr.source or 'generic_web')}")
+    lines.append(f"🏪 Источник: {html.escape(source_display_name(sr.source))}")
     if sr.url:
         lines.append(f"🔗 <a href=\"{html.escape(sr.url, quote=True)}\">Ссылка</a>")
     if sr.snippet:
         lines.append(f"\n<i>{html.escape(sr.snippet[:200])}</i>")
-    lines.append(f"\n📊 Score: {int(round(sr.score))}")
-    lines.append(f"📋 Статус: {sr.status}")
-    lines.extend(_facts_detail_lines(sr))
+    lines.append(f"\n📋 Решение: {_result_status_label(sr.status)}")
 
-    try:
-        risk_flags = json.loads(sr.risk_flags) if sr.risk_flags else []
-    except json.JSONDecodeError:
-        risk_flags = []
+    risk_flags = _admin_safe_items(_resolved_admin_warnings(sr), 3)
     if risk_flags:
-        lines.append(f"⚠️ Флаги: {', '.join(risk_flags)}")
+        lines.append(f"⚠️ Риски: {html.escape('; '.join(str(item) for item in risk_flags[:3]))}")
 
     if sr.admin_note:
-        lines.append(f"\n📝 Заметка: {sr.admin_note}")
+        lines.append(f"\n📝 Заметка: {html.escape(sr.admin_note)}")
 
     await callback.message.edit_text(
         "\n".join(lines),
-        reply_markup=kb_admin_product(result_id, sr.status),
+        reply_markup=_admin_product_keyboard(sr),
         parse_mode="HTML"
     )
     await callback.answer()
@@ -1237,16 +1956,14 @@ async def next_result(callback: CallbackQuery):
     next_item = results[(index + 1) % len(results)]
     lines = ["📦 <b>Вариант</b>\n", f"<b>{html.escape(next_item.title)}</b>\n"]
     lines.append(f"💰 Цена: {format_price(next_item.price)}" if next_item.price else "💰 Цена: <i>цена не найдена</i>")
-    lines.append(f"🏪 Источник: {html.escape(next_item.source or 'generic_web')}")
+    lines.append(f"🏪 Источник: {html.escape(source_display_name(next_item.source))}")
     if next_item.url:
         lines.append(f"🔗 <a href=\"{html.escape(next_item.url, quote=True)}\">Ссылка</a>")
     if next_item.snippet:
         lines.append(f"\n<i>{html.escape(next_item.snippet[:200])}</i>")
-    lines.append(f"\n📊 Score: {int(round(next_item.score))}")
-    lines.append(f"📋 Статус: {next_item.status}")
-    lines.extend(_facts_detail_lines(next_item))
+    lines.append(f"\n📋 Решение: {_result_status_label(next_item.status)}")
     await callback.message.edit_text(
-        "\n".join(lines), reply_markup=kb_admin_product(next_item.id, next_item.status), parse_mode="HTML"
+        "\n".join(lines), reply_markup=_admin_product_keyboard(next_item), parse_mode="HTML"
     )
     await callback.answer()
 
@@ -1270,24 +1987,27 @@ async def _mark_result(callback: CallbackQuery, new_status: str, label: str):
         return
 
     sr = SearchResult(**dict(row))
-    update_search_result(result_id, status=new_status)
+    if new_status != "DO_NOT_BUY" and not await _require_final_role_ready(callback, sr):
+        return
+    updates = {"status": new_status, "checked_at": datetime.now().isoformat()}
+    update_search_result(result_id, **updates)
     await callback.answer(f"Отмечено: {label}")
 
     # Обновляем карточку товара
     sr.status = new_status
     lines = [f"📦 <b>Вариант</b>\n"]
-    lines.append(f"<b>{sr.title}</b>\n")
+    lines.append(f"<b>{escape_html(sr.title)}</b>\n")
     if sr.price:
         lines.append(f"💰 Цена: {format_price(sr.price)}")
     if sr.source:
-        lines.append(f"🏪 Источник: {sr.source}")
+        lines.append(f"🏪 Источник: {escape_html(source_display_name(sr.source))}")
     if sr.url:
-        lines.append(f"🔗 <a href=\"{sr.url}\">Ссылка</a>")
+        lines.append(f"🔗 <a href=\"{html.escape(sr.url, quote=True)}\">Ссылка</a>")
     lines.append(f"\n📋 Статус: {new_status}")
 
     await callback.message.edit_text(
         "\n".join(lines),
-        reply_markup=kb_admin_product(result_id, new_status),
+        reply_markup=_admin_product_keyboard(sr),
         parse_mode="HTML"
     )
 
@@ -1429,6 +2149,9 @@ async def cmd_add_result(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("Нет доступа.")
         return
+    if await state.get_state() == AdminStates.editing_price.state:
+        await state.set_state(None)
+        await state.update_data(editprice_result_id=None)
     raw = (message.text or "").partition(" ")[2].strip()
     request_part, separator, payload = raw.partition(" ")
     if not separator or not request_part.strip().isdigit():
@@ -1561,7 +2284,14 @@ async def send_preview(callback: CallbackQuery):
 
     try:
         await callback.bot.send_message(req.user_id, preview, parse_mode="HTML")
-        update_request(req_id, status="PREVIEW_SENT", preview_text=preview)
+        transition_request(
+            req_id,
+            WAITING_PAYMENT,
+            actor=f"admin:{callback.from_user.id}",
+            reason="Клиенту отправлен предпросмотр",
+            extra_fields={"preview_text": preview},
+        )
+        _track_admin_event("payment_started", callback.from_user.id, req_id)
         await callback.answer("Клиентский предпросмотр отправлен")
     except Exception as e:
         await callback.answer(f"Ошибка отправки: {e}", show_alert=True)
@@ -1574,7 +2304,7 @@ async def send_preview(callback: CallbackQuery):
     if links:
         text += "\n\n🔗 <b>Поисковые ссылки:</b>\n"
         for link in links:
-            text += f'• <a href="{link["url"]}">{link["site"]}</a>\n'
+            text += f'• <a href="{html.escape(link["url"], quote=True)}">{html.escape(link["site"])}</a>\n'
     await callback.message.edit_text(
         text,
         reply_markup=kb_admin_request(req_id, req.status),
@@ -1594,17 +2324,22 @@ async def mark_paid(callback: CallbackQuery):
     if not req:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
-    if req.status != "PREVIEW_SENT":
+    try:
+        current_status = normalize_request_status(req.status)
+    except Exception:
+        current_status = FAILED
+    if current_status != WAITING_PAYMENT:
         await callback.answer("Сначала отправьте клиентский предпросмотр до оплаты.", show_alert=True)
         return
     issue, _missing_links = get_alice_report_issues(req)
     if issue:
         await callback.answer(issue, show_alert=True)
         return
-    if count_approved_results(req_id) < 1:
+    if not get_alice_results(req_id) and count_approved_results(req_id) < 1:
         await callback.answer("Нельзя открыть полный отчёт: нет подтверждённых вариантов.", show_alert=True)
         return
-    update_request(req_id, status="PAID")
+    transition_request(req_id, PAID, actor=f"admin:{callback.from_user.id}", reason="Оплата подтверждена вручную")
+    _track_admin_event("payment_succeeded", callback.from_user.id, req_id)
     await callback.answer("Оплата подтверждена")
 
     req = get_request(req_id)
@@ -1626,7 +2361,7 @@ async def mark_paid(callback: CallbackQuery):
     if links:
         text += "\n\n🔗 <b>Поисковые ссылки:</b>\n"
         for link in links:
-            text += f'• <a href="{link["url"]}">{link["site"]}</a>\n'
+            text += f'• <a href="{html.escape(link["url"], quote=True)}">{html.escape(link["site"])}</a>\n'
     await callback.message.edit_text(
         text,
         reply_markup=kb_admin_request(req_id, req.status),
@@ -1644,8 +2379,12 @@ async def _send_report(callback: CallbackQuery, req_id: int, force_without_links
     if not req:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
-    if req.status != "PAID":
-        await callback.answer("Сначала подтвердите оплату вручную.", show_alert=True)
+    try:
+        current_status = normalize_request_status(req.status)
+    except Exception:
+        current_status = FAILED
+    if current_status != READY:
+        await callback.answer("Сначала подтвердите оплату и утвердите результат.", show_alert=True)
         return
 
     issue, excluded_cards = get_alice_report_issues(req)
@@ -1659,12 +2398,11 @@ async def _send_report(callback: CallbackQuery, req_id: int, force_without_links
             "ссылка или цена не подтверждены админом.",
         )
 
-    report = build_full_report(req)
-
-    # Проверяем, можно ли отправить
-    if report.startswith("Нельзя"):
-        await callback.answer(report, show_alert=True)
+    delivery = DeliveryService.prepare(req)
+    if not delivery.allowed:
+        await callback.answer(delivery.reason, show_alert=True)
         return
+    report = delivery.report
 
     try:
         # Разбиваем на чанки по 3900 символов (ограничение Telegram)
@@ -1674,7 +2412,45 @@ async def _send_report(callback: CallbackQuery, req_id: int, force_without_links
                 req.user_id, chunk, parse_mode="HTML",
                 disable_web_page_preview=True,
             )
-        update_request(req_id, status="REPORT_SENT", report_text=report)
+        action_cards = [item.card for item in RecommendationService().for_request(req_id)]
+        if not action_cards:
+            action_cards = [
+                item for item in get_search_results(req_id)
+                if item.status in {"BEST", "CHEAP", "RELIABLE", "APPROVED"}
+            ][:3]
+        for card in action_cards[:3]:
+            caption = f"Действия для <b>{escape_html(card.title)}</b>"
+            if getattr(card, "image_file_id", ""):
+                try:
+                    await callback.bot.send_photo(
+                        req.user_id,
+                        card.image_file_id,
+                        caption=caption,
+                        reply_markup=result_card_keyboard(card.id, card.url),
+                        parse_mode="HTML",
+                    )
+                    continue
+                except Exception:
+                    pass
+            await callback.bot.send_message(
+                req.user_id, caption,
+                reply_markup=result_card_keyboard(card.id, card.url),
+                parse_mode="HTML", disable_web_page_preview=True,
+            )
+        transition_request(
+            req_id,
+            DELIVERED,
+            actor=f"admin:{callback.from_user.id}",
+            reason="Полный отчёт отправлен клиенту",
+            extra_fields={"report_text": report},
+        )
+        _track_admin_event("delivered", callback.from_user.id, req_id)
+        await callback.bot.send_message(
+            req.user_id,
+            "<b>Насколько полезным был подбор?</b>",
+            reply_markup=feedback_keyboard(req_id),
+            parse_mode="HTML",
+        )
         await callback.answer("Отчёт отправлен клиенту")
     except Exception as e:
         await callback.answer(f"Ошибка отправки: {e}", show_alert=True)
@@ -1683,7 +2459,7 @@ async def _send_report(callback: CallbackQuery, req_id: int, force_without_links
     # Обновляем сообщение админа
     req = get_request(req_id)
     text = format_request_detail(req)
-    text += f"\n\n✅ Отчёт отправлен. Статус: REPORT_SENT"
+    text += "\n\n✅ Отчёт отправлен клиенту."
     await callback.message.edit_text(
         text,
         reply_markup=kb_admin_request(req_id, req.status),
@@ -1729,16 +2505,29 @@ async def edit_price_process(message: Message, state: FSMContext):
         return
     fsm_data = await state.get_data()
     result_id = fsm_data.get("editprice_result_id")
-    await state.clear()
     if not result_id:
         return
 
-    new_price = _extract_price(message.text.strip())
+    new_price = parse_admin_price(message.text or "")
     if new_price is None:
-        await message.answer("❌ Не удалось определить цену. Введи число, например: <code>45000</code>", parse_mode="HTML")
+        await message.answer(
+            "❌ Не удалось определить цену. Введи, например: <code>45000</code>, <code>45к</code> или <code>45 000 ₽</code>.",
+            parse_mode="HTML",
+        )
         return
 
-    update_search_result(result_id, price=new_price, price_verified=True)
+    sr = get_search_result(result_id)
+    if not sr:
+        await message.answer("Вариант не найден.")
+        return
+    update_search_result(
+        result_id,
+        price=new_price,
+        price_verified=True,
+        facts_json=_manual_price_facts(sr, new_price, admin_id=message.from_user.id),
+    )
+    await state.set_state(None)
+    await state.update_data(editprice_result_id=None)
     await message.answer(
         f"✅ Цена обновлена и подтверждена: <b>{format_price(new_price)}</b>",
         parse_mode="HTML",
@@ -1750,7 +2539,7 @@ async def edit_price_process(message: Message, state: FSMContext):
         if sr.origin == "alice":
             await message.answer(
                 format_alice_card(sr, _alice_card_index(sr.id, sr.request_id)),
-                reply_markup=kb_alice_product(sr.id, sr.status),
+                reply_markup=_alice_product_keyboard(sr),
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
@@ -1761,7 +2550,7 @@ async def edit_price_process(message: Message, state: FSMContext):
         if sr.url:
             lines.append(f"🔗 <a href=\"{html.escape(sr.url, quote=True)}\">Ссылка</a>")
         await message.answer("\n".join(lines), parse_mode="HTML",
-                             reply_markup=kb_admin_product(result_id, sr.status))
+                             reply_markup=_admin_product_keyboard(sr))
 
 
 # ──────────────────────────────────────────────
@@ -1802,7 +2591,14 @@ async def ready_for_payment(callback: CallbackQuery):
 
     try:
         await callback.bot.send_message(req.user_id, preview, parse_mode="HTML")
-        update_request(req_id, status="PREVIEW_SENT", preview_text=preview)
+        transition_request(
+            req_id,
+            WAITING_PAYMENT,
+            actor=f"admin:{callback.from_user.id}",
+            reason="Предпросмотр отправлен, ожидается оплата",
+            extra_fields={"preview_text": preview},
+        )
+        _track_admin_event("payment_started", callback.from_user.id, req_id)
         await callback.answer("Клиентский предпросмотр отправлен")
     except Exception as e:
         await callback.answer(f"Ошибка отправки: {e}", show_alert=True)
@@ -1837,7 +2633,14 @@ async def force_preview(callback: CallbackQuery):
 
     try:
         await callback.bot.send_message(req.user_id, preview, parse_mode="HTML")
-        update_request(req_id, status="PREVIEW_SENT", preview_text=preview)
+        transition_request(
+            req_id,
+            WAITING_PAYMENT,
+            actor=f"admin:{callback.from_user.id}",
+            reason="Legacy forcepreview адаптирован к безопасному предпросмотру",
+            extra_fields={"preview_text": preview},
+        )
+        _track_admin_event("payment_started", callback.from_user.id, req_id)
         await callback.answer("Клиентский предпросмотр отправлен принудительно")
     except Exception as e:
         await callback.answer(f"Ошибка отправки: {e}", show_alert=True)
@@ -1872,7 +2675,12 @@ async def mark_paid_new(callback: CallbackQuery):
         await callback.answer("Нельзя открыть полный отчёт: нет подтверждённых вариантов.", show_alert=True)
         return
 
-    update_request(req_id, status="PAID")
+    try:
+        transition_request(req_id, PAID, actor=f"admin:{callback.from_user.id}", reason="Оплата подтверждена вручную")
+    except InvalidStatusTransition as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    _track_admin_event("payment_succeeded", callback.from_user.id, req_id)
     await callback.answer("Оплата подтверждена ✅")
 
     # Уведомление клиенту
@@ -1930,7 +2738,7 @@ async def send_report_blocked(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("sos_sendreport_"))
 async def sos_send_without_payment(callback: CallbackQuery):
-    """Диалог: точно отправить без оплаты?"""
+    """Legacy callback: совместимо объясняет новый безопасный порядок."""
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -1940,23 +2748,15 @@ async def sos_send_without_payment(callback: CallbackQuery):
         await callback.answer("Заявка не найдена", show_alert=True)
         return
 
-    readiness = check_readiness(req)
-    issue, _missing_links = get_alice_report_issues(req)
-
-    await callback.message.edit_text(
-        f"⚠️ <b>Заявка #{req_id}</b> — отправить полный отчёт без оплаты?\n\n"
-        f"Готовность: {readiness.percent}%\n"
-        + (f"Блокирующая проблема: {issue}\n\n" if issue else "\n")
-        + "Этот вариант только для теста или когда клиент не может оплатить.",
-        reply_markup=kb_send_without_payment_confirm(req_id),
-        parse_mode="HTML",
+    await callback.answer(
+        "Отправка без оплаты отключена. Подтвердите оплату и утвердите результат.",
+        show_alert=True,
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("sendwithoutpay_"))
 async def send_without_payment(callback: CallbackQuery):
-    """Отправить полный отчёт без подтверждения оплаты."""
+    """Legacy callback сохранён, но больше не обходит оплату и READY-gate."""
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -1966,39 +2766,9 @@ async def send_without_payment(callback: CallbackQuery):
         await callback.answer("Заявка не найдена", show_alert=True)
         return
 
-    issue, excluded_cards = get_alice_report_issues(req)
-    if issue:
-        await callback.answer(issue, show_alert=True)
-        return
-
-    report = build_full_report(req)
-    if report.startswith("Нельзя"):
-        await callback.answer(report, show_alert=True)
-        return
-
-    try:
-        await callback.bot.send_message(req.user_id, report, parse_mode="HTML",
-                                        disable_web_page_preview=True)
-        update_request(req_id, status="REPORT_SENT", report_text=report)
-        await callback.answer("Отчёт отправлен клиенту (без оплаты) ⚠️")
-    except Exception as e:
-        await callback.answer(f"Ошибка отправки: {e}", show_alert=True)
-        return
-
-    # Обновляем сообщение
-    req = get_request(req_id)
-    readiness = check_readiness(req)
-    await callback.message.edit_text(
-        f"📤 <b>Заявка #{req_id}</b> — отчёт отправлен.\n\n"
-        "⚠️ Без оплаты. Статус: REPORT_SENT",
-        reply_markup=kb_admin_detail_bottom(
-            req_id,
-            readiness.percent,
-            is_paid=False,
-            report_sent=True,
-            can_send_report=True,
-        ),
-        parse_mode="HTML",
+    await callback.answer(
+        "Отправка без оплаты отключена. Подтвердите оплату, утвердите результат и отправьте из READY.",
+        show_alert=True,
     )
 
 
@@ -2159,7 +2929,7 @@ async def market_check_verdict(callback: CallbackQuery):
     await callback.answer(f"Вердикт: {verdict_label}")
 
 
-@router.callback_query(F.data.startswith("mcreason_"))
+@router.callback_query(F.data.regexp(r"^mcreason_\d+$"))
 async def market_check_reason_prompt(callback: CallbackQuery, state: FSMContext):
     """Запрос причины для проверки рынка."""
     if not is_admin(callback.from_user.id):
@@ -2189,7 +2959,19 @@ async def market_check_reason_set(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    reason = callback.data[len("mcreason_set_"):]
+    reasons = (
+        "слабый рейтинг магазина", "мало отзывов", "не тот город",
+        "б/у вместо нового", "другая память/цвет/модель",
+        "серый товар/сомнительная гарантия",
+        "цена ниже рынка и выглядит подозрительно",
+        "нет нормальной доставки/возврата",
+    )
+    raw_reason = callback.data[len("mcreason_set_"):]
+    if raw_reason.isdigit() and int(raw_reason) < len(reasons):
+        reason = reasons[int(raw_reason)]
+    else:
+        # Legacy adapter для старых коротких callback_data.
+        reason = raw_reason
     fsm_data = await state.get_data()
     check_id = fsm_data.get("market_check_id")
     await state.clear()
@@ -2564,8 +3346,13 @@ async def alice_receive_response(message: Message, state: FSMContext):
     }, ensure_ascii=False)
     update_request(req_id, alice_response=alice_data)
     replace_alice_results(req_id, parsed_items)
-    if req.status == "NEW":
-        update_request(req_id, status="SEARCHING")
+    try:
+        current = normalize_request_status(req.status)
+        if current == "NEW":
+            transition_request(req_id, SEARCHING, actor=f"admin:{message.from_user.id}", reason="Начата ручная подготовка карточек")
+        transition_request(req_id, AI_CARDS_DRAFT, actor=f"admin:{message.from_user.id}", reason="Ручные карточки сохранены")
+    except InvalidStatusTransition:
+        pass
 
     await state.clear()
 
@@ -2599,7 +3386,7 @@ async def show_alice_cards(callback: CallbackQuery):
         return
     cards = get_alice_results(req_id)
     await callback.message.edit_text(
-        f"🧩 <b>Карточки ИИ — заявка #{req_id}</b>\n"
+        f"🧩 <b>Карточки рекомендаций — заявка #{req_id}</b>\n"
         f"Найдено товаров: {len(cards)}\n\n"
         "Карточки отправлены ниже. Убраные варианты не попадут в предпросмотр.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -2623,6 +3410,8 @@ async def alice_top(callback: CallbackQuery):
     req = get_request(candidate.request_id) if candidate else None
     if not candidate or candidate.origin != "alice" or not req:
         await callback.answer("Карточка не найдена", show_alert=True)
+        return
+    if not await _require_final_role_ready(callback, candidate):
         return
     if req.budget.isdigit() and candidate.price and candidate.price > int(req.budget):
         await callback.answer(
@@ -2648,6 +3437,8 @@ async def alice_keep(callback: CallbackQuery):
     if not item or item.origin != "alice":
         await callback.answer("Карточка не найдена", show_alert=True)
         return
+    if not await _require_final_role_ready(callback, item):
+        return
     update_search_result(result_id, status="APPROVED")
     item = get_search_result(result_id)
     await _refresh_alice_card(callback.message, item)
@@ -2663,6 +3454,11 @@ async def alice_remove(callback: CallbackQuery):
     item = get_search_result(result_id)
     if not item or item.origin != "alice":
         await callback.answer("Карточка не найдена", show_alert=True)
+        return
+    try:
+        AdminReviewService().reject(result_id)
+    except AIReviewError as exc:
+        await callback.answer(str(exc), show_alert=True)
         return
     update_search_result(result_id, status="REJECTED")
     item = get_search_result(result_id)
@@ -2680,6 +3476,8 @@ async def alice_reserve(callback: CallbackQuery):
     item = get_search_result(result_id)
     if not item or item.origin != "alice":
         await callback.answer("Карточка не найдена", show_alert=True)
+        return
+    if not await _require_final_role_ready(callback, item):
         return
     # Toggle: если уже BACKUP → APPROVED_BACKUP, иначе BACKUP
     if item.status in ("BACKUP", "APPROVED_BACKUP"):
@@ -2706,6 +3504,8 @@ async def alice_budget(callback: CallbackQuery):
     item = get_search_result(result_id)
     if not item or item.origin != "alice":
         await callback.answer("Карточка не найдена", show_alert=True)
+        return
+    if not await _require_final_role_ready(callback, item):
         return
     new_status = "BUDGET" if item.status == "BUDGET" else "BUDGET"
     update_search_result(result_id, status=new_status)
@@ -2738,6 +3538,187 @@ async def alice_caution(callback: CallbackQuery):
     await callback.answer("Карточка помечена как осторожно / не брать")
 
 
+async def _refresh_manual_checklist_card(message: Message, item: SearchResult) -> None:
+    if item.origin == "alice":
+        await _refresh_alice_card(message, item)
+        return
+    try:
+        await message.edit_reply_markup(reply_markup=_admin_product_keyboard(item))
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            raise
+
+
+async def _save_manual_checklist_confirmation(
+    callback: CallbackQuery,
+    field: str,
+    verified: bool,
+    *,
+    note: str,
+    value=None,
+    seller_state: str | None = None,
+    compatibility_updates: dict | None = None,
+    result_updates: dict | None = None,
+) -> tuple[SearchResult, dict] | None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return None
+    result_id = int(callback.data.split("_")[1])
+    item = get_search_result(result_id)
+    if not item:
+        await callback.answer("Вариант не найден", show_alert=True)
+        return None
+    facts = _manual_confirmation_facts(
+        item,
+        field,
+        verified,
+        admin_id=callback.from_user.id,
+        note=note,
+        value=value,
+        seller_state=seller_state,
+        compatibility_updates=compatibility_updates,
+    )
+    updates = dict(result_updates or {})
+    updates["facts_json"] = json.dumps(facts, ensure_ascii=False)
+    update_search_result(result_id, **updates)
+    refreshed = get_search_result(result_id)
+    if not refreshed:
+        await callback.answer("Карточка не найдена", show_alert=True)
+        return None
+    await _refresh_manual_checklist_card(callback.message, refreshed)
+    return refreshed, resolve_final_presentation(facts)
+
+
+@router.callback_query(F.data.startswith("manualmodel_"))
+async def manual_confirm_model(callback: CallbackQuery):
+    result = await _save_manual_checklist_confirmation(
+        callback,
+        "model",
+        True,
+        note="Модель и обязательная комплектация сверены администратором",
+    )
+    if not result:
+        return
+    _item, final = result
+    hard_mismatch = any(
+        reason in {"MODEL_MISMATCH", "REQUIRED_SPEC_MISMATCH", "ACCESSORY", "WRONG_PRODUCT"}
+        for reason in final.get("blocking_reasons", [])
+    )
+    if hard_mismatch:
+        await callback.answer(
+            "Подтверждение записано, но hard mismatch не снят. Обычная отметка модель не переопределяет.",
+            show_alert=True,
+        )
+        return
+    await callback.answer("Модель и комплектация подтверждены")
+
+
+@router.callback_query(F.data.startswith("manuallink_"))
+async def manual_confirm_link(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    result_id = int(callback.data.split("_")[1])
+    item = get_search_result(result_id)
+    if not item:
+        await callback.answer("Вариант не найден", show_alert=True)
+        return
+    if _link_status(item.url) != "✅ есть":
+        await callback.answer("Сначала укажите корректную прямую ссылку.", show_alert=True)
+        return
+    warning = store_url_warning(item.source, item.url)
+    if warning:
+        await callback.answer(f"{warning}. Исправьте ссылку перед подтверждением.", show_alert=True)
+        return
+    result = await _save_manual_checklist_confirmation(
+        callback,
+        "link",
+        True,
+        note="Прямая ссылка открыта и подтверждена администратором",
+        value=item.url,
+        compatibility_updates={"product_page_verified": True},
+        result_updates={"link_check_status": LinkCheckStatus.VERIFIED.value},
+    )
+    if result:
+        await callback.answer("Ссылка подтверждена")
+
+
+@router.callback_query(F.data.startswith("manualavailable_"))
+async def manual_confirm_availability(callback: CallbackQuery):
+    result = await _save_manual_checklist_confirmation(
+        callback,
+        "availability",
+        True,
+        note="Наличие подтверждено администратором",
+        value="in_stock",
+        compatibility_updates={
+            "availability_verified": True,
+            "available": True,
+            "availability": "in_stock",
+        },
+    )
+    if result:
+        await callback.answer("Наличие подтверждено")
+
+
+@router.callback_query(F.data.startswith("manualprice_"))
+async def manual_confirm_current_price(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    result_id = int(callback.data.split("_")[1])
+    item = get_search_result(result_id)
+    if not item:
+        await callback.answer("Вариант не найден", show_alert=True)
+        return
+    if not item.price:
+        await callback.answer("Сначала укажите актуальную цену.", show_alert=True)
+        return
+    update_search_result(
+        result_id,
+        price_verified=True,
+        facts_json=_manual_price_facts(item, int(item.price), admin_id=callback.from_user.id),
+    )
+    refreshed = get_search_result(result_id)
+    if refreshed:
+        await _refresh_manual_checklist_card(callback.message, refreshed)
+    await callback.answer("Текущая цена подтверждена")
+
+
+@router.callback_query(F.data.startswith("manualsellerok_"))
+async def manual_confirm_seller(callback: CallbackQuery):
+    result = await _save_manual_checklist_confirmation(
+        callback,
+        "seller",
+        True,
+        note="Продавец подтверждён администратором",
+        seller_state=SELLER_VERIFIED,
+        compatibility_updates={
+            "seller_verified": True,
+            "seller_verification": SELLER_VERIFIED,
+        },
+    )
+    if result:
+        await callback.answer("Продавец подтверждён")
+
+
+@router.callback_query(F.data.startswith("manualsellercheck_"))
+async def manual_mark_seller_requires_check(callback: CallbackQuery):
+    result = await _save_manual_checklist_confirmation(
+        callback,
+        "seller",
+        False,
+        note="Администратор отметил необходимость дополнительной проверки продавца",
+        seller_state=SELLER_REQUIRES_CHECK,
+        compatibility_updates={
+            "seller_verified": False,
+            "seller_verification": SELLER_REQUIRES_CHECK,
+        },
+    )
+    if result:
+        await callback.answer("Продавец оставлен с явным требованием проверки")
+
+
 async def _navigate_alice_card(callback: CallbackQuery, direction: int) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
@@ -2762,6 +3743,27 @@ async def _navigate_alice_card(callback: CallbackQuery, direction: int) -> None:
         await callback.answer("Это последняя карточка")
         return
     await _refresh_alice_card(callback.message, cards[target_index])
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("debugresult_"))
+async def debug_result(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    result_id = int(callback.data.split("_")[1])
+    item = get_search_result(result_id)
+    if not item:
+        await callback.answer("Вариант не найден", show_alert=True)
+        return
+    lines = [
+        f"🛠 <b>Debug варианта #{item.id}</b>",
+        f"Score: {int(round(item.score))}",
+        f"Raw status: {escape_html(item.status)}",
+        f"Raw risks: {escape_html('; '.join(_parse_risk_flags(item.risk_flags)) or 'нет')}",
+        *_facts_detail_lines(item),
+    ]
+    await callback.message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
     await callback.answer()
 
 
@@ -2840,15 +3842,27 @@ async def alice_edit_link_process(message: Message, state: FSMContext):
         result_id,
         url=new_url[:500],
         link_check_status=LinkCheckStatus.FOUND_UNVERIFIED.value,
+        facts_json=json.dumps(
+            _manual_confirmation_facts(
+                item,
+                "link",
+                False,
+                admin_id=message.from_user.id,
+                note="Ссылка изменена и требует повторного подтверждения",
+                value=new_url[:500],
+                compatibility_updates={"product_page_verified": False},
+            ),
+            ensure_ascii=False,
+        ),
     )
     await state.clear()
     item = get_search_result(result_id)
     await message.answer(
         "✅ Ссылка сохранена.",
-        reply_markup=kb_alice_product(item.id, item.status),
+        reply_markup=_alice_product_keyboard(item),
     )
     await message.answer(format_alice_card(item, _alice_card_index(item.id, item.request_id)),
-                         reply_markup=kb_alice_product(item.id, item.status),
+                         reply_markup=_alice_product_keyboard(item),
                          parse_mode="HTML", disable_web_page_preview=True)
 
 
@@ -2869,7 +3883,22 @@ async def alice_check_link(callback: CallbackQuery):
     if warning:
         await callback.answer(f"{warning}. Исправьте ссылку или отметьте её неподходящей.", show_alert=True)
         return
-    update_search_result(result_id, link_check_status=LinkCheckStatus.VERIFIED.value)
+    update_search_result(
+        result_id,
+        link_check_status=LinkCheckStatus.VERIFIED.value,
+        facts_json=json.dumps(
+            _manual_confirmation_facts(
+                item,
+                "link",
+                True,
+                admin_id=callback.from_user.id,
+                note="Прямая ссылка открыта и подтверждена администратором",
+                value=item.url,
+                compatibility_updates={"product_page_verified": True},
+            ),
+            ensure_ascii=False,
+        ),
+    )
     item = get_search_result(result_id)
     await _refresh_alice_card(callback.message, item)
     await callback.answer("Ссылка подтверждена админом")
@@ -2885,7 +3914,22 @@ async def alice_bad_link(callback: CallbackQuery):
     if not item or item.origin != "alice":
         await callback.answer("Карточка не найдена", show_alert=True)
         return
-    update_search_result(result_id, link_check_status=LinkCheckStatus.UNSUITABLE.value)
+    update_search_result(
+        result_id,
+        link_check_status=LinkCheckStatus.UNSUITABLE.value,
+        facts_json=json.dumps(
+            _manual_confirmation_facts(
+                item,
+                "link",
+                False,
+                admin_id=callback.from_user.id,
+                note="Ссылка вручную признана неподходящей",
+                value=item.url,
+                compatibility_updates={"product_page_verified": False},
+            ),
+            ensure_ascii=False,
+        ),
+    )
     item = get_search_result(result_id)
     await _refresh_alice_card(callback.message, item)
     await callback.answer("Ссылка помечена как неподходящая")
@@ -2955,14 +3999,35 @@ async def alice_edit_store_process(message: Message, state: FSMContext):
         await message.answer("Название магазина не может быть пустым.")
         return
 
-    update_search_result(result_id, source=new_store)
+    item = get_search_result(result_id)
+    if not item:
+        await message.answer("Карточка не найдена.")
+        return
+    seller_facts = _manual_confirmation_facts(
+        item,
+        "seller",
+        False,
+        admin_id=message.from_user.id,
+        note="Магазин изменён; продавца нужно проверить повторно",
+        value=new_store,
+        seller_state=SELLER_REQUIRES_CHECK,
+        compatibility_updates={
+            "seller_verified": False,
+            "seller_verification": SELLER_REQUIRES_CHECK,
+        },
+    )
+    update_search_result(
+        result_id,
+        source=new_store,
+        facts_json=json.dumps(seller_facts, ensure_ascii=False),
+    )
     await message.answer("✅ Магазин обновлён")
 
     item = get_search_result(result_id)
     if item and item.origin == "alice":
         await message.answer(
             format_alice_card(item, _alice_card_index(item.id, item.request_id)),
-            reply_markup=kb_alice_product(item.id, item.status),
+            reply_markup=_alice_product_keyboard(item),
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
@@ -2985,6 +4050,22 @@ async def alice_out_of_stock(callback: CallbackQuery):
         result_id,
         status="REJECTED",
         admin_note="Нет в наличии на момент проверки",
+        facts_json=json.dumps(
+            _manual_confirmation_facts(
+                item,
+                "availability",
+                False,
+                admin_id=callback.from_user.id,
+                note="Администратор подтвердил отсутствие товара в наличии",
+                value="unavailable",
+                compatibility_updates={
+                    "availability_verified": True,
+                    "available": False,
+                    "availability": "unavailable",
+                },
+            ),
+            ensure_ascii=False,
+        ),
     )
     item = get_search_result(result_id)
     await _refresh_alice_card(callback.message, item)
@@ -3050,4 +4131,4 @@ async def edit_note_process(message: Message, state: FSMContext):
         if sr.url:
             lines.append(f"🔗 <a href=\"{html.escape(sr.url, quote=True)}\">Ссылка</a>")
         await message.answer("\n".join(lines), parse_mode="HTML",
-                             reply_markup=kb_admin_product(result_id, sr.status))
+                             reply_markup=_admin_product_keyboard(sr))

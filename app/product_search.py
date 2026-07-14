@@ -7,6 +7,7 @@
    
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from app.search_policy import (
     is_normal_candidate,
     normalize_for_admin_save,
@@ -15,7 +16,7 @@ from app.search_policy import (
 )
 from app.query_planner import plan_search_queries
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import json
 import logging
@@ -120,15 +121,34 @@ from app.product_quality import (
 from app.category_quality import evaluate_category_quality
 from app.search_evidence import assess_product_card, assess_source_trust
 from app.ranking import rank_candidate
-from app.candidate_dedupe import dedupe_candidates, diversify_top_sources
+from app.candidate_dedupe import canonical_identity, dedupe_candidates, diversify_top_sources
 from app.price_extractor import extract_price, extract_price_evidence
+from app.request_parser import build_request_search_query, normalize_request_data
 from app.search_links import build_search_query, generate_search_links
 from app.sources.direct_retail_source import (
     CITILINK_DIRECT_SOURCE,
+    DNS_DIRECT_SOURCE,
     MVIDEO_DIRECT_SOURCE,
     YANDEX_MARKET_DIRECT_SOURCE,
     debug_search_direct_retail_sources,
 )
+from app.sources.offer import SourceStatus, normalize_legacy_offer
+from app.source_strategy import (
+    CandidatePoolQuota,
+    DISCOVERY_CORE,
+    RELIABLE_ANCHORS,
+    SourceGroup,
+    build_source_plan,
+    normalize_source_name,
+    select_with_source_quotas,
+    source_group,
+)
+from app.market_analysis import (
+    OfferPriceClass,
+    ProductGroupKey,
+    analyze_market,
+)
+from app.verification_state import normalize_verification_facts
 from app.sources.searchapi_source import SEARCHAPI_SOURCE, debug_searchapi_google_shopping
 from app.sources.serpapi_source import SERPAPI_SOURCE, debug_serpapi_google_shopping
 
@@ -152,7 +172,11 @@ class ProductCandidate:
     title: str = ""
     url: str = ""
     source: str = "generic_web"
+    platform: str = ""
+    product_id: str = ""
     price: Optional[int] = None
+    old_price: Optional[int] = None
+    currency: str = "RUB"
     snippet: str = ""
     score: float = 0.0
     risk_flags: list[str] = field(default_factory=list)
@@ -163,8 +187,15 @@ class ProductCandidate:
     rating: Optional[float] = None
     reviews_count: Optional[int] = None
     seller: str = ""
+    seller_type: str = ""
     city: str = ""
     availability: str = ""
+    condition: str = "unknown"
+    delivery: str = ""
+    image_url: str = ""
+    retrieved_at: str = ""
+    source_status: str = SourceStatus.SUCCESS.value
+    source_error: str = ""
     description: str = ""
     product_facts: dict[str, object] = field(default_factory=dict)
     facts_json: str = ""
@@ -186,6 +217,7 @@ class ProductCandidate:
     source_confidence: str = "low"
     verification_confidence: str = "none"
     category_quality_score: float = 0.0
+    category_quality_level: str = ""
     category_quality_reasons: list[str] = field(default_factory=list)
     score_breakdown: dict[str, float] = field(default_factory=dict)
     score_raw: float = 0.0
@@ -312,12 +344,14 @@ SOURCE_TYPE_BY_SOURCE[SEARCHAPI_SOURCE] = "shopping_api"
 SOURCE_TYPE_BY_SOURCE[SERPAPI_SOURCE] = "shopping_api"
 DIRECT_RETAIL_SOURCES = {
     CITILINK_DIRECT_SOURCE,
+    DNS_DIRECT_SOURCE,
     MVIDEO_DIRECT_SOURCE,
-    YANDEX_MARKET_DIRECT_SOURCE,
 }
 TRUSTED_PRODUCT_SOURCES.update(DIRECT_RETAIL_SOURCES)
 for direct_source in DIRECT_RETAIL_SOURCES:
     SOURCE_TYPE_BY_SOURCE[direct_source] = "retail"
+TRUSTED_PRODUCT_SOURCES.add(YANDEX_MARKET_DIRECT_SOURCE)
+SOURCE_TYPE_BY_SOURCE[YANDEX_MARKET_DIRECT_SOURCE] = "marketplace"
 RANK_TRUSTED_SOURCES = {
     "yandex_market_search",
     "mvideo_search",
@@ -488,7 +522,7 @@ def _headphone_brand_queries(budget: str = "") -> list[str]:
 def generate_search_queries(req: Request) -> list[str]:
     """Совместимая строковая оболочка над typed query planner."""
     domains = [source.domains[0] for source in _enabled_site_sources() if source.domains]
-    return [item.text for item in plan_search_queries(req, max_queries=14, site_domains=domains)]
+    return [item.text for item in plan_search_queries(req, max_queries=10, site_domains=domains)]
 
 
 def _source_from_url(url: str, default: str = "generic_web") -> str:
@@ -1296,13 +1330,14 @@ class SearchBySiteAdapter(GenericSearchAdapter):
 
 
 def _candidate_from_row(row: dict, req: Request, default_source: str) -> Optional[ProductCandidate]:
-    title = clean_candidate_title(str(row.get("title") or row.get("name") or ""))
-    url = str(row.get("href") or row.get("url") or "").strip()
-    snippet = str(row.get("body") or row.get("snippet") or "").strip()
+    offer = normalize_legacy_offer(row, default_source=default_source)
+    title = clean_candidate_title(offer.title)
+    url = offer.url
+    snippet = offer.snippet
     if not _looks_like_real_candidate(title, url):
         return None
-    raw_price = row.get("price")
-    source = str(row.get("source") or _source_from_url(url, default_source) or default_source)
+    raw_price = offer.price if offer.price is not None else row.get("price")
+    source = offer.source or _source_from_url(url, default_source) or default_source
     price = raw_price
     price_source = str(row.get("price_source") or "")
     explicit_reliability = str(row.get("price_reliability") or "")
@@ -1337,21 +1372,39 @@ def _candidate_from_row(row: dict, req: Request, default_source: str) -> Optiona
     city = str(row.get("city") or "").strip()
     if source == "avito_search" and not city:
         city = _extract_avito_city(url, snippet)
+    raw_data = dict(row.get("raw")) if isinstance(row.get("raw"), dict) else {}
+    for key in (
+        "seller_type", "condition", "delivery", "listing_status", "activation",
+        "warranty", "completeness",
+    ):
+        if row.get(key) not in (None, ""):
+            raw_data[key] = row.get(key)
     candidate = ProductCandidate(
         request_id=req.id,
         title=title[:300],
         url=url[:500],
         source=source,
+        platform=offer.platform,
+        product_id=offer.product_id,
         source_type=SOURCE_TYPE_BY_SOURCE.get(source, "web"),
         price=price,
+        old_price=offer.old_price,
+        currency=offer.currency,
         snippet=snippet[:500],
         rating=rating_value,
         reviews_count=reviews_count,
-        seller=str(row.get("seller") or "").strip()[:200],
+        seller=offer.seller[:200],
+        seller_type=str(row.get("seller_type") or offer.structured_facts.get("seller_type") or "")[:40],
         external_source=str(row.get("external_source") or "").strip()[:80],
-        raw=row.get("raw") if isinstance(row.get("raw"), dict) else {},
-        city=city[:120],
-        availability=str(row.get("availability") or "").strip()[:120],
+        raw=raw_data,
+        city=(offer.city or city)[:120],
+        availability=offer.availability[:120],
+        condition=offer.condition[:40],
+        delivery=offer.delivery[:200],
+        image_url=offer.image_url[:500],
+        retrieved_at=offer.retrieved_at,
+        source_status=offer.source_status.value,
+        source_error=offer.source_error[:300],
         description=str(row.get("description") or snippet or "").strip()[:500],
         price_source=price_source,
         price_reliability=explicit_reliability or "none",
@@ -1359,6 +1412,13 @@ def _candidate_from_row(row: dict, req: Request, default_source: str) -> Optiona
         price_evidence=price_result.evidence,
         created_at=datetime.now().isoformat(),
     )
+    candidate.raw.setdefault("product_id", offer.product_id)
+    candidate.raw.setdefault("old_price", offer.old_price)
+    candidate.raw.setdefault("platform", offer.platform)
+    candidate.raw.setdefault("structured_facts", dict(offer.structured_facts))
+    candidate.raw.setdefault("retrieved_at", offer.retrieved_at)
+    candidate.raw.setdefault("source_status", offer.source_status.value)
+    candidate.raw.setdefault("source_error", offer.source_error)
     normalize_price_candidate(candidate, req, raw_price=raw_price, price_source=price_source, text=f"{title} {snippet}")
     if explicit_reliability:
         candidate.price_reliability = explicit_reliability if candidate.price is not None else "none"
@@ -1531,14 +1591,12 @@ def _existing_searchapi_dedupe_keys(collection: SearchCollection) -> set[str]:
 
 
 def _request_as_searchapi_parsed(req: Request) -> dict[str, object]:
-    return {
-        "original_query": req.original_query,
-        "product_name": req.product_name or req.product,
-        "product": req.product,
-        "budget": req.budget,
-        "city": req.city,
-        "important_criteria": req.important_criteria or req.criteria,
-    }
+    return normalize_request_data(req)
+
+
+def _candidate_price_verified(candidate: ProductCandidate) -> bool:
+    facts = getattr(candidate, "product_facts", {}) or {}
+    return bool(isinstance(facts, dict) and facts.get("price_verified"))
 
 
 def _collect_from_searchapi(
@@ -1847,11 +1905,49 @@ def _dedupe_verified_candidates(req: Request, candidates: list[ProductCandidate]
         PRICE_MISSING: 3,
         OVER_BUDGET_SOFT: 4,
     }
-    return diversify_top_sources(
+    diversified = diversify_top_sources(
         result,
         tier=lambda item: status_tier.get(_verified_status(item), 9),
         limit=3,
     )
+    quota_selected = select_with_source_quotas(
+        diversified,
+        source_getter=lambda item: item.source,
+        identity_getter=lambda item: _normalise_url(item.url) or f"{item.source}:{item.product_id}:{item.title}",
+        quota=CandidatePoolQuota(total_limit=10, discovery_reserved=1, reliable_reserved=1, per_source_limit=3),
+    )
+    selected_objects = {id(item) for item in quota_selected}
+    return [item for item in diversified if id(item) in selected_objects]
+
+
+def _apply_market_analysis(candidates: list[ProductCandidate]) -> None:
+    """Annotate comparable offers with per-configuration market statistics."""
+    if not candidates:
+        return
+    stats_by_group = analyze_market(candidates)
+    for candidate in candidates:
+        group_key = ProductGroupKey.from_offer(candidate)
+        stats = stats_by_group.get(group_key)
+        facts = dict(candidate.product_facts or {})
+        facts["product_group"] = asdict(group_key)
+        if stats is not None:
+            price_class = stats.classify(candidate.price)
+            facts["market_price"] = {
+                "minimum": int(stats.minimum),
+                "median": int(stats.median),
+                "trimmed_mean": round(stats.trimmed_mean, 2),
+                "maximum": int(stats.maximum),
+                "verified_count": stats.verified_count,
+                "market_range": [int(stats.market_range[0]), int(stats.market_range[1])],
+                "deviation_percent": stats.deviation_percent(candidate.price),
+                "offer_class": price_class.value,
+            }
+            if price_class == OfferPriceClass.VERY_CHEAP:
+                candidate.low_price_suspect = True
+                _add_risk_flag(candidate, "цена сильно ниже рынка")
+        normalized_facts = normalize_verification_facts(facts)
+        candidate.product_facts = normalized_facts
+        candidate.facts_json = json.dumps(normalized_facts, ensure_ascii=False)
 
 
 def _apply_direct_retail_verified_sanity(req: Request, verified_items: list[object]) -> None:
@@ -1913,6 +2009,7 @@ def _apply_category_product_quality(req: Request, verified_items: list[object]) 
 
         category_quality = evaluate_category_quality(req, candidate)
         candidate.category_quality_score = category_quality.score
+        candidate.category_quality_level = category_quality.level
         candidate.category_quality_reasons = list(category_quality.reasons) + list(category_quality.missing_required)
         level_order = {"": 0, "good": 1, "ok": 2, "weak": 3, "bad": 4}
         current_level = str(getattr(candidate, "product_quality_level", "") or "")
@@ -1931,6 +2028,10 @@ def _apply_category_product_quality(req: Request, verified_items: list[object]) 
 def _apply_final_search_policy(req: Request, verified_items: list[object]) -> None:
     for item in verified_items:
         candidate = item.candidate
+        initial_facts = dict(candidate.product_facts or {})
+        initial_facts["exact_match"] = getattr(candidate, "exact_match_status", "")
+        initial_facts["exact_match_reason"] = getattr(candidate, "exact_match_reason", "")
+        candidate.product_facts = initial_facts
         trust = assess_source_trust(candidate, item.verify_status)
         candidate.source_confidence = trust.source_confidence
         candidate.verification_confidence = trust.verification_confidence
@@ -1947,6 +2048,7 @@ def _apply_final_search_policy(req: Request, verified_items: list[object]) -> No
             "status": item.verify_status,
             "verify_status": item.verify_status,
             "product_quality_level": getattr(candidate, "product_quality_level", ""),
+            "category_quality_level": getattr(candidate, "category_quality_level", ""),
             "budget_status": budget_status,
             "risk_flags": list(getattr(item, "risk_flags", []) or []) + list(candidate.risk_flags or []),
             "reasons": [
@@ -1956,6 +2058,10 @@ def _apply_final_search_policy(req: Request, verified_items: list[object]) -> No
             ],
             "why_not_verified_good": getattr(candidate, "why_not_verified_good", ""),
             "product_card_confidence": getattr(candidate, "product_card_confidence", "none"),
+            "price_confidence": getattr(candidate, "price_confidence", "none"),
+            "available": (candidate.product_facts or {}).get("available"),
+            "exact_match_status": getattr(candidate, "exact_match_status", ""),
+            "exact_match_reason": getattr(candidate, "exact_match_reason", ""),
             "source_confidence": trust.source_confidence,
             "verification_confidence": trust.verification_confidence,
         })
@@ -1967,9 +2073,15 @@ def _apply_final_search_policy(req: Request, verified_items: list[object]) -> No
         candidate.why_not_verified_good = policy_candidate.get(
             "why_not_verified_good", candidate.why_not_verified_good,
         )
-        candidate.risk_flags = list(dict.fromkeys(
-            list(candidate.risk_flags or []) + list(policy_candidate.get("reasons") or [])
-        ))
+        candidate.risk_flags = list(policy_candidate.get("reasons") or [])
+        if (
+            status in {VERIFIED_GOOD, VERIFIED_OK}
+            and getattr(candidate, "exact_match_status", "") in {"EXACT", "COMPATIBLE_VARIANT"}
+            and getattr(candidate, "category_quality_level", "") in {"good", "ok"}
+        ):
+            candidate.product_quality_level = candidate.category_quality_level
+            candidate.final_quality_score_cap = None
+            candidate.final_quality_score_cap_reason = ""
         if policy_candidate.get("score_cap_applied"):
             candidate.score_cap_applied = policy_candidate["score_cap_applied"]
 
@@ -1996,7 +2108,37 @@ def _apply_final_search_policy(req: Request, verified_items: list[object]) -> No
         facts["source_confidence"] = getattr(candidate, "source_confidence", "low")
         facts["verification_confidence"] = getattr(candidate, "verification_confidence", "none")
         facts["category_quality_score"] = getattr(candidate, "category_quality_score", 0.0)
+        facts["category_quality_level"] = getattr(candidate, "category_quality_level", "")
         facts["category_quality_reasons"] = list(getattr(candidate, "category_quality_reasons", []) or [])
+        facts["product_quality_level"] = getattr(candidate, "product_quality_level", "")
+        facts["platform_name"] = trust.platform_name
+        facts["platform_type"] = trust.platform_type
+        facts["platform_trust"] = trust.platform_trust
+        facts["seller_trust"] = trust.seller_trust
+        facts["seller_trust_reason"] = trust.seller_reason
+        facts["product_page_verified"] = trust.product_page_verified
+        facts["exact_product_verified"] = trust.exact_product_verified
+        facts["price_verified"] = trust.price_verified
+        facts["availability_verified"] = trust.availability_verified
+        facts["seller_verified"] = trust.seller_verified
+        facts["verification_access"] = trust.verification_access
+        facts["product_verification"] = (
+            "VERIFIED" if trust.product_page_verified and trust.exact_product_verified
+            else "MISMATCH" if getattr(candidate, "exact_match_status", "") in {"MODEL_MISMATCH", "REQUIRED_SPEC_MISMATCH", "ACCESSORY"}
+            else "NEEDS_MANUAL"
+        )
+        facts["price_verification"] = "VERIFIED" if trust.price_verified else "NEEDS_MANUAL"
+        facts["availability_verification"] = (
+            "UNAVAILABLE" if facts.get("available") is False
+            else "VERIFIED" if trust.availability_verified
+            else "NEEDS_MANUAL"
+        )
+        facts["fetch_status_code"] = getattr(candidate, "fetch_status_code", None)
+        facts["blocked_reason"] = getattr(candidate, "blocked_reason", "")
+        facts["browser_used"] = bool(getattr(candidate, "used_browser", False))
+        facts["proxy_used"] = bool(getattr(candidate, "used_proxy", False))
+        facts["fetch_provider"] = getattr(candidate, "fetch_provider", "")
+        facts["final_reasons"] = list(candidate.risk_flags)
         candidate.product_facts = facts
         candidate.facts_json = json.dumps(facts, ensure_ascii=False)
 
@@ -2089,6 +2231,7 @@ def _apply_verification(
         if candidate.price is None and _verified_status(candidate) in {NEED_MANUAL_CHECK, VERIFY_BLOCKED, PRICE_MISSING}
     )
 
+    _apply_market_analysis(kept)
     for candidate in kept:
         _apply_ranking_sanity(req, candidate)
     kept = _dedupe_verified_candidates(req, kept)
@@ -2220,65 +2363,169 @@ def collect_product_candidates(
         )
 
     emit_stage("parse", request_product=req.product_name or req.product)
-    site_domains = [source.domains[0] for source in _enabled_site_sources() if source.domains]
-    query_plan = plan_search_queries(req, max_queries=14, site_domains=site_domains)
+    priority_sources = {*DISCOVERY_CORE, *RELIABLE_ANCHORS}
+    site_domains = [
+        source.domains[0]
+        for source in _enabled_site_sources()
+        if source.domains and normalize_source_name(source.source) in priority_sources
+    ]
+    query_plan = plan_search_queries(req, max_queries=10, site_domains=site_domains)
     queries = [item.text for item in query_plan]
+    source_plan = build_source_plan(
+        build_request_search_query(req),
+        [item.text for item in query_plan if item.kind in {"category", "feature"}],
+        enabled_sources=[source.source for source in _enabled_site_sources()] + ["wildberries"],
+    )
     emit_stage(
         "generate_queries",
         queries=queries,
         query_plan=[{"query": item.text, "priority": item.priority, "reason": item.reason, "kind": item.kind} for item in query_plan],
+        source_plan=[{"source": item.source, "group": item.group.value, "query": item.query} for item in source_plan.source_requests],
     )
     seen_urls: set[str] = set()
     generic = GenericSearchAdapter()
+    source_jobs: list[tuple[str, str, Callable[[SearchCollection, set[str]], None]]] = []
 
-    # Веб-поиск и site-поиск не зависят от Wildberries и друг от друга.
+    def add_source_job(
+        source: str,
+        query: str,
+        loader: Callable[[SearchCollection, set[str]], None],
+    ) -> None:
+        source_jobs.append((source, query, loader))
+
     if _is_generic_enabled():
         generic_queries = [query for query in queries if not query.startswith("site:")]
         for query in generic_queries[:3]:
-            run_source_step(
+            add_source_job(
                 "generic_web", query,
-                lambda query=query: _collect_from_adapter(generic, req, "generic_web", query, 5, collection, seen_urls),
+                lambda local, local_seen, query=query: _collect_from_adapter(
+                    generic, req, "generic_web", query, 5, local, local_seen,
+                ),
             )
 
-    wb_query = (req.clean_search_query or "").strip() or build_search_query(
-        _request_product(req), req.use_case or req.purpose, req.budget, "", req.important_criteria or req.criteria,
-    )
+    wb_query = build_request_search_query(req)
     wb_source = next((source for source in SEARCH_SOURCES if source.key == "wildberries"), None)
     if wb_source and _is_source_enabled(wb_source):
-        run_source_step(
+        add_source_job(
             "wildberries", wb_query,
-            lambda: _collect_from_adapter(WildberriesAdapter(), req, "wildberries", wb_query, 10, collection, seen_urls),
+            lambda local, local_seen: _collect_from_adapter(
+                WildberriesAdapter(), req, "wildberries", wb_query, 10, local, local_seen,
+            ),
         )
 
     site_adapter = SearchBySiteAdapter()
     for query in (query for query in queries if query.startswith("site:")):
         domain_match = re.match(r"site:([^\s]+)", query)
         source = MARKETPLACE_SOURCES.get(domain_match.group(1), "generic_web") if domain_match else "generic_web"
-        run_source_step(
+        add_source_job(
             source, query,
-            lambda source=source, query=query: _collect_from_adapter(site_adapter, req, source, query, 6, collection, seen_urls),
+            lambda local, local_seen, source=source, query=query: _collect_from_adapter(
+                site_adapter, req, source, query, 6, local, local_seen,
+            ),
         )
 
     if settings.DIRECT_RETAIL_ENABLED:
-        direct_queries = [item.text for item in query_plan if item.direct_eligible and item.kind != "site"][:2]
-        for direct_query in direct_queries or [(req.clean_search_query or "").strip() or wb_query]:
-            run_source_step(
-                "direct_retail", direct_query,
-                lambda direct_query=direct_query: _collect_from_direct_retail(req, direct_query, collection, seen_urls),
-            )
+        direct_query = wb_query
+        add_source_job(
+            "direct_retail", direct_query,
+            lambda local, local_seen: _collect_from_direct_retail(req, direct_query, local, local_seen),
+        )
 
     if settings.SEARCHAPI_ENABLED:
-        searchapi_query = (req.clean_search_query or "").strip() or wb_query
-        run_source_step(
+        searchapi_query = wb_query
+        add_source_job(
             SEARCHAPI_SOURCE, searchapi_query,
-            lambda: _collect_from_searchapi(req, searchapi_query, collection, seen_urls),
+            lambda local, local_seen: _collect_from_searchapi(req, searchapi_query, local, local_seen),
         )
 
     if settings.SERPAPI_ENABLED:
-        serpapi_query = (req.clean_search_query or "").strip() or wb_query
-        run_source_step(
+        serpapi_query = wb_query
+        add_source_job(
             SERPAPI_SOURCE, serpapi_query,
-            lambda: _collect_from_serpapi(req, serpapi_query, collection, seen_urls),
+            lambda local, local_seen: _collect_from_serpapi(req, serpapi_query, local, local_seen),
+        )
+
+    def source_job_order(job: tuple[str, str, Callable]) -> int:
+        source = job[0]
+        group = source_group(source)
+        if group == SourceGroup.DISCOVERY:
+            return 0
+        if group == SourceGroup.RELIABLE or source == "direct_retail":
+            return 1
+        return 2
+
+    source_jobs.sort(key=source_job_order)
+    for source, query, _loader in source_jobs:
+        emit_stage("source_start", source=source, query=query)
+
+    def execute_source_job(
+        job: tuple[str, str, Callable[[SearchCollection, set[str]], None]],
+    ) -> tuple[SearchCollection, int]:
+        source, query, loader = job
+        local = SearchCollection()
+        started = time.monotonic()
+        if source_deadline is not None and started >= source_deadline:
+            local.attempts.append(SearchAttemptData(
+                source, query, SourceStatus.TIMEOUT.value,
+                error_text="source collection budget exhausted",
+            ))
+        else:
+            try:
+                loader(local, set())
+            except Exception as exc:
+                logger.warning("Автопоиск: source job %s failed: %s", source, exc)
+                local.attempts.append(SearchAttemptData(
+                    source, query, SourceStatus.ERROR.value, error_text=str(exc)[:300],
+                ))
+        duration_ms = int((time.monotonic() - started) * 1000)
+        if not local.attempts:
+            local.attempts.append(SearchAttemptData(
+                source, query, SourceStatus.ERROR.value,
+                error_text="source returned no diagnostic",
+            ))
+        for attempt in local.attempts:
+            attempt.duration_ms = duration_ms
+        return local, duration_ms
+
+    if source_jobs:
+        with ThreadPoolExecutor(
+            max_workers=min(3, len(source_jobs)),
+            thread_name_prefix="source",
+        ) as pool:
+            job_results = list(pool.map(execute_source_job, source_jobs))
+    else:
+        job_results = []
+
+    for (source, query, _loader), (local, duration_ms) in zip(source_jobs, job_results):
+        accepted_objects: set[int] = set()
+        for candidate in local.raw_candidates:
+            normalized_url = _normalise_url(candidate.url)
+            if normalized_url and normalized_url in seen_urls:
+                continue
+            if normalized_url:
+                seen_urls.add(normalized_url)
+            collection.raw_candidates.append(candidate)
+            accepted_objects.add(id(candidate))
+        collection.candidates.extend(
+            candidate for candidate in local.candidates if id(candidate) in accepted_objects
+        )
+        collection.attempts.extend(local.attempts)
+        for key, value in local.quality_stats.items():
+            if isinstance(value, int):
+                collection.quality_stats[key] = collection.quality_stats.get(key, 0) + value
+        for attempt in local.attempts:
+            source_candidates = [
+                item for item in local.raw_candidates
+                if item.source == attempt.source and id(item) in accepted_objects
+            ]
+            emit_source(attempt, source_candidates)
+        emit_stage(
+            "collect_source_results",
+            source=source,
+            query=query,
+            duration_ms=duration_ms,
+            candidate_count=len(collection.raw_candidates),
+            attempt_count=len(collection.attempts),
         )
 
     emit_stage("normalize_dedupe", candidate_count=len(collection.raw_candidates))
@@ -2311,7 +2558,7 @@ def collect_product_candidates(
             use_case=req.use_case or req.purpose,
             budget=req.budget,
             important_criteria=req.important_criteria or req.criteria,
-            clean_search_query=req.clean_search_query or "",
+            clean_search_query=wb_query,
         )
         collection.attempts.append(SearchAttemptData("manual_fallback", wb_query, "OK", len(collection.manual_links), 0,
                                                      "Проверенных вариантов мало или нет; сохранены ручные поисковые ссылки."))
@@ -2388,6 +2635,7 @@ def _run_compare_search(req: Request, candidates: list[ProductCandidate], attemp
                     score=comp.score,
                     risk_flags=json.dumps(comp.risk_flags, ensure_ascii=False),
                     status=comp.status,
+                    price_verified=_candidate_price_verified(comp),
                     facts_json=getattr(comp, "facts_json", "") or json.dumps(getattr(comp, "product_facts", {}) or {}, ensure_ascii=False),
                 )
                 kept += 1
@@ -2429,6 +2677,7 @@ def run_product_search(req: Request, max_results: int = 15) -> dict:
             score=candidate.score,
             risk_flags=json.dumps(candidate.risk_flags, ensure_ascii=False),
             status=candidate.status,
+            price_verified=_candidate_price_verified(candidate),
             facts_json=getattr(candidate, "facts_json", "") or json.dumps(getattr(candidate, "product_facts", {}) or {}, ensure_ascii=False),
         )
         existing_urls.add(_normalise_url(candidate.url))
@@ -2437,13 +2686,23 @@ def run_product_search(req: Request, max_results: int = 15) -> dict:
 
     # Compare search: ищем ту же модель дешевле на других площадках
     normal_candidates = [c for c in collection.candidates if _verified_status(c) in {VERIFIED_GOOD, VERIFIED_OK}]
-    compare_found = _run_compare_search(req, normal_candidates, collection.attempts)
+    comparison_candidates: list[ProductCandidate] = []
+    compared_groups: set[str] = set()
+    for candidate in normal_candidates:
+        group_key = canonical_identity(candidate) or _model_dedupe_key(candidate)
+        if group_key in compared_groups:
+            continue
+        compared_groups.add(group_key)
+        comparison_candidates.append(candidate)
+        if len(comparison_candidates) >= 2:
+            break
+    compare_found = _run_compare_search(req, comparison_candidates, collection.attempts)
     stats = collection.quality_stats
     stats["compare_total"] = len([a for a in collection.attempts if a.source.startswith("compare_")])
     stats["compare_found_cheaper"] = compare_found
     collection.attempts.append(SearchAttemptData(
         "compare_summary",
-        f"compare search по {len(normal_candidates)} кандидатам",
+        f"compare search по {len(comparison_candidates)} группам товаров",
         "OK",
         stats["compare_total"],
         compare_found,

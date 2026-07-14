@@ -14,6 +14,7 @@ from app.product_config import (
     SearchMode,
     detect_auto_category,
 )
+from app.request_parser import build_request_search_query, normalize_request_data
 from app.ui_texts import CONDITION_LABELS, PRIORITY_LABELS, WIZARD_QUESTION_TEXTS
 
 
@@ -371,22 +372,20 @@ class RequestWizard:
         category_code = str(self.answers.get("category") or "manual")
         category = AUTO_CATEGORY_BY_CODE.get(category_code)
         requirements = _clean_text(self.answers.get("requirements"))
-        criteria: list[str] = [requirements] if requirements else []
         category_details: dict[str, str] = {}
         for question in CATEGORY_QUESTIONS.get(category_code, ()):
             value = _clean_text(self.answers.get(question.key))
             if value:
                 category_details[question.key] = value
-                criteria.append(f"{_DETAIL_LABELS[question.key]}: {value}")
 
         condition = str(self.answers.get("condition") or "new")
         product = _clean_text(self.answers.get("product"))
-        return {
+        payload = {
             "product": product,
             "product_name": product,
             "budget": str(int(self.answers["budget"])),
             "city": _clean_text(self.answers.get("city")),
-            "important_criteria": "; ".join(criteria),
+            "important_criteria": requirements,
             "is_used_allowed": condition in {"used", "any"},
             "original_query": product,
             "category": category_code,
@@ -397,6 +396,25 @@ class RequestWizard:
             "category_details": category_details,
             "request_mode": SearchMode.AUTO.value if category else SearchMode.MANUAL.value,
         }
+        canonical = normalize_request_data(payload)
+        payload.update({
+            "brand": canonical["brand"],
+            "model": canonical["model"],
+            "model_modifiers": canonical["model_modifiers"],
+            "storage_gb": canonical["storage_gb"],
+            "required_features": canonical["required_features"],
+            "optional_features": canonical["optional_features"],
+            "required_criteria": canonical["required_criteria"],
+            "desired_criteria": canonical["desired_criteria"],
+        })
+        payload["important_criteria"] = ", ".join(
+            [
+                f"{canonical['storage_gb']} ГБ" if canonical.get("storage_gb") else "",
+                *canonical.get("required_features", []),
+            ]
+        ).strip(" ,")
+        payload["clean_search_query"] = build_request_search_query(payload)
+        return payload
 
 
 def _normalize_url(value: str) -> str | None:

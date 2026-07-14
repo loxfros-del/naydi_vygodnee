@@ -1,6 +1,7 @@
 """Проверка товарных кандидатов перед сохранением для админа."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import json
 import re
@@ -698,6 +699,7 @@ def extract_product_facts(
     title: str = "",
     price: Optional[int] = None,
     availability: str = "",
+    verification_access: str = "AVAILABLE",
 ) -> dict[str, Any]:
     """Собирает структурированные факты товара без генерации описания."""
     soup_text = text or BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)
@@ -714,6 +716,14 @@ def extract_product_facts(
     category = detect_product_category(req, candidate, identity_text)
     facts = extract_category_facts(category, identity_text, supplemental_text)
     rating, reviews_count = _extract_rating_reviews(supplemental_text)
+    if rating is None:
+        rating = getattr(candidate, "rating", None)
+    if reviews_count is None:
+        reviews_count = getattr(candidate, "reviews_count", None)
+    raw = getattr(candidate, "raw", {}) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    seller = str(getattr(candidate, "seller", "") or raw.get("seller") or "").strip()
     facts.update({
         "model_key": facts.get("model", ""),
         "price": actual_price,
@@ -723,7 +733,23 @@ def extract_product_facts(
         "availability_text": availability or "UNKNOWN",
         "rating": rating,
         "reviews_count": reviews_count,
+        "seller": seller,
+        "seller_type": str(raw.get("seller_type") or "").strip(),
+        "seller_rating": rating,
+        "city": str(getattr(candidate, "city", "") or raw.get("city") or "").strip(),
+        "condition": raw.get("condition") or facts.get("condition") or "",
+        "delivery": raw.get("delivery") or "",
+        "listing_status": raw.get("listing_status") or ("active" if availability == "AVAILABLE" else ""),
+        "activation": raw.get("activation") or "",
+        "warranty": raw.get("warranty") or "",
+        "completeness": raw.get("completeness") or "",
         "budget_status": _budget_status(actual_price, req),
+        "product_page_verified": bool(_looks_like_product_url(url)),
+        "price_verified": bool(actual_price is not None and verification_access == "AVAILABLE"),
+        "availability_verified": availability in {"AVAILABLE", "UNAVAILABLE", REMOVED_LISTING},
+        "seller_verified": bool(seller or rating is not None or reviews_count is not None),
+        "verification_access": verification_access,
+        "verification_access_history": [verification_access] if verification_access == "BLOCKED" else [],
         "warnings": [],
     })
     if category == "tv":
@@ -932,6 +958,14 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
     try:
         response = _safe_get(url)
     except Exception as exc:    
+        fetch_result = getattr(exc, "fetch_result", None)
+        if fetch_result is not None:
+            candidate.used_proxy = fetch_result.used_proxy
+            candidate.used_browser = fetch_result.used_browser
+            candidate.fetch_status_code = fetch_result.status_code
+            candidate.blocked_reason = fetch_result.blocked_reason
+            candidate.fetch_provider = fetch_result.fetch_provider
+            candidate.retry_count = fetch_result.retry_count
         if _is_blocked_error(exc) and _looks_safe_for_manual_check(candidate, req, source, url):
             risks = [
                 "страница заблокировала проверку",
@@ -945,6 +979,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
             facts = extract_product_facts(
                 candidate, req, title=getattr(candidate, "title", ""),
                 price=getattr(candidate, "price", None), availability="UNKNOWN",
+                verification_access="BLOCKED",
             )
             verified = VerifiedCandidate(
                 candidate,
@@ -963,6 +998,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
         facts = extract_product_facts(
             candidate, req, title=getattr(candidate, "title", ""),
             price=getattr(candidate, "price", None), availability="UNKNOWN",
+            verification_access="FAILED",
         )
         verified = VerifiedCandidate(
             candidate,
@@ -1015,6 +1051,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
         )
         return _apply_verified(candidate, verified)
     if price is None:
+        facts["price_verified"] = False
         verified = VerifiedCandidate(
             candidate, PRICE_MISSING, title=page_title,
             availability=availability, reason="цена не подтверждена", facts=facts, html_loaded=True,
@@ -1079,7 +1116,9 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
 
 
 def verify_candidates(candidates: list[Any], req: Request, limit: int = 30) -> list[VerifiedCandidate]:
-    result: list[VerifiedCandidate] = []
-    for candidate in candidates[:limit]:
-        result.append(verify_candidate(candidate, req))
-    return result
+    selected = candidates[:limit]
+    if not selected:
+        return []
+    # Сохраняем исходный порядок, но не открываем больше двух страниц одновременно.
+    with ThreadPoolExecutor(max_workers=min(2, len(selected)), thread_name_prefix="verify") as pool:
+        return list(pool.map(lambda candidate: verify_candidate(candidate, req), selected))

@@ -30,3 +30,4 @@ class AdminStates(StatesGroup):
     editing_ai_text = State()           # Редактирование текста AI-карточки
     editing_ai_image = State()          # Замена изображения AI-карточки
     editing_request_note = State()       # Внутренняя заметка по заявке
+    editing_comparison = State()         # Ручная корректировка фактов ссылки

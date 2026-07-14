@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 import re
 
-from app.exact_match import ACCESSORY, GENERIC_MATCH, MODEL_MISMATCH, UNKNOWN, match_candidate
+from app.exact_match import ACCESSORY, GENERIC_MATCH, MODEL_MISMATCH, REQUIRED_SPEC_MISMATCH, UNKNOWN, match_candidate
 
 
 DIRECT_QUALITY_MANUAL_RISK = "нужна ручная проверка качества товара"
@@ -202,7 +202,7 @@ def _contains_forbidden_variant(title_text: str, requested_variant: str) -> bool
 
 def has_model_mismatch(candidate: Any, parsed: Any) -> bool:
     reusable = match_candidate(parsed, candidate)
-    if reusable.status in {MODEL_MISMATCH, ACCESSORY}:
+    if reusable.status in {MODEL_MISMATCH, REQUIRED_SPEC_MISMATCH, ACCESSORY}:
         return True
     query_text = _request_text(parsed)
     title_text = _normalize_model_text(f"{getattr(candidate, 'title', '')} {getattr(candidate, 'snippet', '')}")
@@ -409,7 +409,7 @@ def final_quality_gate(candidate: Any, parsed: Any) -> FinalQualityGateResult:
             exact_match_reason=exact.reason,
         )
 
-    if exact.status == MODEL_MISMATCH:
+    if exact.status in {MODEL_MISMATCH, REQUIRED_SPEC_MISMATCH}:
         return FinalQualityGateResult(
             reason=exact.reason or WRONG_MODEL_RISK,
             product_quality_level="bad",

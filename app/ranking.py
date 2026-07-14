@@ -12,10 +12,11 @@ from app.exact_match import (
     EXACT,
     GENERIC_MATCH,
     MODEL_MISMATCH,
+    REQUIRED_SPEC_MISMATCH,
     UNKNOWN,
     match_candidate,
 )
-from app.request_parser import full_parse
+from app.request_parser import normalize_request_data
 from app.search_evidence import assess_product_card, assess_source_trust
 
 
@@ -40,8 +41,7 @@ def _request(request: Any) -> dict[str, Any]:
     attached = getattr(request, "parsed_details", None)
     if isinstance(attached, dict):
         return dict(attached)
-    query = str(_value(request, "original_query") or _value(request, "product_name") or _value(request, "product"))
-    return full_parse(query)
+    return normalize_request_data(request)
 
 
 def _facts(candidate: Any) -> dict[str, Any]:
@@ -105,6 +105,7 @@ def rank_candidate(request: Any, candidate: Any) -> RankingResult:
         GENERIC_MATCH: 10.0,
         UNKNOWN: 2.0,
         MODEL_MISMATCH: -40.0,
+        REQUIRED_SPEC_MISMATCH: -40.0,
         ACCESSORY: -50.0,
     }.get(exact.status, 0.0)
 
@@ -172,8 +173,8 @@ def rank_candidate(request: Any, candidate: Any) -> RankingResult:
         caps.append((70, "over_budget_soft"))
     if status == "OVER_BUDGET_HARD" or (budget and price and price > budget * 1.15):
         caps.append((30, "over_budget_hard"))
-    if exact.status == MODEL_MISMATCH:
-        caps.append((25, "model_mismatch"))
+    if exact.status in {MODEL_MISMATCH, REQUIRED_SPEC_MISMATCH}:
+        caps.append((25, "model_mismatch" if exact.status == MODEL_MISMATCH else "required_spec_mismatch"))
     if exact.status == ACCESSORY:
         caps.append((15, "accessory"))
     if exact.status == UNKNOWN and parsed.get("model"):

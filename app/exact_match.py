@@ -6,13 +6,14 @@ import re
 from typing import Any
 
 from app.category_registry import contains_marker, detect_category, get_category_spec, normalize_text
-from app.request_parser import full_parse, parse_request_details
+from app.request_parser import normalize_request_data, parse_request_details
 
 
 EXACT = "EXACT"
 COMPATIBLE_VARIANT = "COMPATIBLE_VARIANT"
 GENERIC_MATCH = "GENERIC_MATCH"
 MODEL_MISMATCH = "MODEL_MISMATCH"
+REQUIRED_SPEC_MISMATCH = "REQUIRED_SPEC_MISMATCH"
 ACCESSORY = "ACCESSORY"
 UNKNOWN = "UNKNOWN"
 
@@ -46,20 +47,10 @@ def _value(value: Any, name: str, default: Any = "") -> Any:
 
 
 def _request_details(parsed_or_request: Any) -> dict[str, Any]:
-    if isinstance(parsed_or_request, dict):
-        if "required_criteria" in parsed_or_request and "category" in parsed_or_request:
-            return dict(parsed_or_request)
-        query = str(parsed_or_request.get("original_query") or parsed_or_request.get("query") or "")
-        return full_parse(query)
     attached = getattr(parsed_or_request, "parsed_details", None)
     if isinstance(attached, dict):
         return dict(attached)
-    query = str(
-        getattr(parsed_or_request, "original_query", "")
-        or getattr(parsed_or_request, "product_name", "")
-        or getattr(parsed_or_request, "product", "")
-    )
-    return full_parse(query)
+    return normalize_request_data(parsed_or_request)
 
 
 def _facts(candidate: Any) -> dict[str, Any]:
@@ -100,6 +91,26 @@ def _model_key(value: str) -> str:
     text = normalize_text(value)
     text = re.sub(r"\b(?:apple|samsung|sony)\b", "", text)
     return re.sub(r"[^a-zа-я0-9]+", " ", text).strip()
+
+
+def _requested_model_identity(request: dict[str, Any]) -> str:
+    model = str(request.get("model") or "").strip()
+    model_key = _model_key(model)
+    display = {
+        "pro max": "Pro Max", "pro": "Pro", "max": "Max", "plus": "Plus",
+        "mini": "Mini", "se": "SE", "ultra": "Ultra", "fe": "FE",
+        "lite": "Lite", "e": "e", "air": "Air",
+    }
+    modifiers = sorted(
+        (str(item).strip().lower() for item in request.get("model_modifiers") or [] if str(item).strip()),
+        key=lambda item: (-len(item), item),
+    )
+    for modifier in modifiers:
+        modifier_key = _model_key(modifier)
+        if modifier_key and modifier_key not in model_key.split() and modifier_key not in model_key:
+            model = f"{model} {display.get(modifier, modifier)}".strip()
+            model_key = _model_key(model)
+    return model
 
 
 def _number(value: Any) -> int | None:
@@ -201,6 +212,16 @@ def _required_differences(
     if request_condition in {"new", "used"} and actual_condition not in {"any", request_condition}:
         mismatches.append(f"состояние: нужно {request_condition}, найдено {actual_condition}")
 
+    for key, label in (("color", "цвет"), ("sim_variant", "SIM/регион")):
+        requested_value = normalize_text(str(required.get(key) or ""))
+        if not requested_value:
+            continue
+        actual_value = normalize_text(str(facts.get(key) or ""))
+        if not actual_value:
+            missing.append(f"{label} {requested_value} не подтверждён")
+        elif requested_value not in actual_value and actual_value not in requested_value:
+            mismatches.append(f"{label}: нужен {requested_value}, найден {actual_value}")
+
     boolean_fields = {
         "wet_cleaning": ("влажная уборка", ("влажн", "моющ")),
         "lidar": ("лидар", ("лидар", "lidar")),
@@ -244,13 +265,13 @@ def match_candidate(
 
     candidate_details = parse_request_details(identity)
     facts = _facts(candidate)
-    requested_model = str(request.get("model") or "")
+    requested_model = _requested_model_identity(request)
     candidate_model = str(candidate_details.get("model") or facts.get("model") or facts.get("model_key") or "")
 
     mismatches, missing = _required_differences(request, candidate_details, facts, title)
     if mismatches:
         return ExactMatchResult(
-            MODEL_MISMATCH,
+            REQUIRED_SPEC_MISMATCH,
             mismatches[0],
             tuple(mismatches),
             requested_model,

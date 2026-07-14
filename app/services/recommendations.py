@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from app.db import SearchResult, get_alice_results
+from app.ai_cards_service import is_ai_card_candidate_eligible
 from app.services.ai_review import is_ai_card_client_approved
 
 
@@ -30,8 +31,8 @@ ROLE_ALIASES = {
 
 CLIENT_ROLE_ORDER = {
     ROLE_BEST: 0,
-    ROLE_BACKUP: 1,
-    ROLE_BUDGET: 2,
+    ROLE_BUDGET: 1,
+    ROLE_BACKUP: 2,
 }
 
 CLIENT_EXCLUDED_STATUSES = frozenset({
@@ -82,6 +83,8 @@ class RecommendationService:
             if str(getattr(card, "origin", "") or "").strip().lower() != "alice":
                 continue
             if not is_ai_card_client_approved(card):
+                continue
+            if not is_ai_card_candidate_eligible(card):
                 continue
             raw_status = str(getattr(card, "status", "") or "").strip().upper()
             if raw_status in CLIENT_EXCLUDED_STATUSES:

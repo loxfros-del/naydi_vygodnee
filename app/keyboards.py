@@ -83,6 +83,8 @@ def kb_admin_request(req_id: int, status: str) -> InlineKeyboardMarkup:
         buttons.append([InlineKeyboardButton(text="🔍 Проверка рынка выполнена", callback_data=f"mcstart_{req_id}")])
 
     buttons.append([InlineKeyboardButton(text="📝 Заметка по заявке", callback_data=f"reqnote_{req_id}")])
+    buttons.append([InlineKeyboardButton(text="⚖️ Ссылки сравнения", callback_data=f"complinks_{req_id}")])
+    buttons.append([InlineKeyboardButton(text="🌓 Сравнить Legacy и V2", callback_data=f"v2compare_{req_id}")])
     if status not in ("DELIVERED", "REPORT_SENT", "CANCELLED"):
         buttons.append([InlineKeyboardButton(text="❌ Отменить заявку", callback_data=f"admincancel_{req_id}")])
     buttons.append([InlineKeyboardButton(text="🛠 Debug", callback_data=f"debugsearch_{req_id}")])
@@ -96,22 +98,25 @@ def kb_alice_product(
     link_check_status: str = LinkCheckStatus.NEEDED.value,
     price_verified: bool = False,
     ai_card_status: str = "",
+    manual_verification: dict | None = None,
 ) -> InlineKeyboardMarkup:
     """Действия под одной карточкой, полученной из ответа Алисы."""
+    manual = manual_verification if isinstance(manual_verification, dict) else {}
+    model_ok = bool(manual.get("manual_model_verified"))
+    link_ok = bool(manual.get("manual_link_verified"))
+    manual_price_ok = bool(manual.get("manual_price_verified"))
+    availability_ok = bool(manual.get("manual_availability_verified"))
+    seller_state = str(manual.get("manual_seller_state") or "UNSET").upper()
     top_label = "🏆 ТОП-1 выбран" if status == "BEST" else "🏆 ТОП-1"
     keep_label = "✅ Оставлен" if status in ("APPROVED", "BEST") else "✅ Оставить"
     remove_label = "❌ Убран" if status == "REJECTED" else "❌ Убрать"
 
     # Статус проверки ссылки
     link_check_status = normalize_link_check_status(link_check_status)
-    if link_check_status == LinkCheckStatus.VERIFIED.value:
+    if link_ok or link_check_status == LinkCheckStatus.VERIFIED.value:
         check_label = "✅ Ссылка проверена ✓"
-    elif link_check_status == LinkCheckStatus.FOUND_UNVERIFIED.value:
-        check_label = "✅ Проверил ссылку и цену"
-    elif link_check_status == LinkCheckStatus.UNSUITABLE.value:
-        check_label = "✅ Проверил ссылку и цену"
     else:
-        check_label = "✅ Проверил ссылку и цену"
+        check_label = "☑️ Подтвердить ссылку"
 
     # Цена
     if price_verified:
@@ -134,7 +139,36 @@ def kb_alice_product(
         InlineKeyboardButton(text="🔄 Перегенерировать", callback_data=f"airegen_{result_id}"),
     ])
 
-    return InlineKeyboardMarkup(inline_keyboard=lifecycle_buttons + [
+    checklist_buttons = [
+        [
+            InlineKeyboardButton(
+                text="✅ Модель ✓" if model_ok else "☑️ Подтвердить модель",
+                callback_data=f"manualmodel_{result_id}",
+            ),
+            InlineKeyboardButton(
+                text="✅ Наличие ✓" if availability_ok else "☑️ Подтвердить наличие",
+                callback_data=f"manualavailable_{result_id}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="✅ Цена ✓" if manual_price_ok else "☑️ Подтвердить текущую цену",
+                callback_data=f"manualprice_{result_id}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="✅ Продавец ✓" if seller_state == "VERIFIED" else "☑️ Продавец подтверждён",
+                callback_data=f"manualsellerok_{result_id}",
+            ),
+            InlineKeyboardButton(
+                text="🟡 Продавца проверить ✓" if seller_state == "REQUIRES_CHECK" else "🟡 Продавца проверить",
+                callback_data=f"manualsellercheck_{result_id}",
+            ),
+        ],
+    ]
+
+    return InlineKeyboardMarkup(inline_keyboard=lifecycle_buttons + checklist_buttons + [
         [
             InlineKeyboardButton(text=top_label, callback_data=f"alicetop_{result_id}"),
         ],
@@ -174,9 +208,46 @@ def kb_alice_search_links(links: list[dict], req_id: int) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def kb_admin_product(result_id: int, status: str) -> InlineKeyboardMarkup:
+def kb_admin_product(
+    result_id: int,
+    status: str,
+    manual_verification: dict | None = None,
+) -> InlineKeyboardMarkup:
     """Кнопки действий с найденным товаром."""
-    buttons = []
+    manual = manual_verification if isinstance(manual_verification, dict) else {}
+    seller_state = str(manual.get("manual_seller_state") or "UNSET").upper()
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="✅ Модель ✓" if manual.get("manual_model_verified") else "☑️ Подтвердить модель",
+                callback_data=f"manualmodel_{result_id}",
+            ),
+            InlineKeyboardButton(
+                text="✅ Ссылка ✓" if manual.get("manual_link_verified") else "☑️ Подтвердить ссылку",
+                callback_data=f"manuallink_{result_id}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="✅ Цена ✓" if manual.get("manual_price_verified") else "☑️ Подтвердить цену",
+                callback_data=f"manualprice_{result_id}",
+            ),
+            InlineKeyboardButton(
+                text="✅ Наличие ✓" if manual.get("manual_availability_verified") else "☑️ Подтвердить наличие",
+                callback_data=f"manualavailable_{result_id}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="✅ Продавец ✓" if seller_state == "VERIFIED" else "☑️ Продавец подтверждён",
+                callback_data=f"manualsellerok_{result_id}",
+            ),
+            InlineKeyboardButton(
+                text="🟡 Проверить ✓" if seller_state == "REQUIRES_CHECK" else "🟡 Продавца проверить",
+                callback_data=f"manualsellercheck_{result_id}",
+            ),
+        ],
+    ]
 
     row1 = []
     if status != "BEST":
@@ -205,6 +276,7 @@ def kb_admin_product(result_id: int, status: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="💰 Изменить цену", callback_data=f"editprice_{result_id}"),
         InlineKeyboardButton(text="📝 Заметка", callback_data=f"editnote_{result_id}"),
     ])
+    buttons.append([InlineKeyboardButton(text="🛠 Debug варианта", callback_data=f"debugresult_{result_id}")])
 
     buttons.append([InlineKeyboardButton(text="➡️ Следующий", callback_data=f"nextresult_{result_id}")])
     buttons.append([InlineKeyboardButton(text="🔙 Назад к вариантам", callback_data=f"showresults_back_{result_id}")])
@@ -218,7 +290,7 @@ def kb_admin_results_list(req_id: int, page: int = 0) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔎 Запустить автопоиск", callback_data=f"autosearch_{req_id}")],
         [InlineKeyboardButton(text="🧪 Debug поиска", callback_data=f"debugsearch_{req_id}")],
         [InlineKeyboardButton(text="➕ Добавить вручную", callback_data=f"addprod_{req_id}")],
-        [InlineKeyboardButton(text="🧩 Карточки ИИ", callback_data=f"alicecards_{req_id}")],
+        [InlineKeyboardButton(text="🧩 Карточки рекомендаций", callback_data=f"alicecards_{req_id}")],
         [InlineKeyboardButton(text="👁 Полный предпросмотр для админа", callback_data=f"adminpreview_{req_id}")],
         [InlineKeyboardButton(text="👀 Клиентский предпросмотр до оплаты", callback_data=f"preview_{req_id}")],
         [InlineKeyboardButton(text="🔙 К заявке", callback_data=f"view_{req_id}")],

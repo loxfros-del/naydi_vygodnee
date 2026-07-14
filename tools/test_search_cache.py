@@ -368,7 +368,7 @@ class SearchCacheTests(unittest.TestCase):
                 source_observer=lambda attempt, _: events.append(attempt.status),
             )
         self.assertGreaterEqual(len(events), 2)
-        self.assertTrue(all(status == "SOURCE_TIMEOUT" for status in events))
+        self.assertTrue(all(status == "TIMEOUT" for status in events))
 
     def test_33_negative_cache_does_not_call_auto_loader(self) -> None:
         key = self.key(query="blocked source")

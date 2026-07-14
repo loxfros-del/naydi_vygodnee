@@ -6,8 +6,8 @@ import re
 from typing import Any
 
 from app.category_registry import get_category_spec, normalize_text
-from app.exact_match import ACCESSORY, MODEL_MISMATCH, UNKNOWN, match_candidate
-from app.request_parser import full_parse
+from app.exact_match import ACCESSORY, MODEL_MISMATCH, REQUIRED_SPEC_MISMATCH, UNKNOWN, match_candidate
+from app.request_parser import normalize_request_data
 from app.search_evidence import assess_product_card
 
 
@@ -33,8 +33,7 @@ def _request(request: Any) -> dict[str, Any]:
     attached = getattr(request, "parsed_details", None)
     if isinstance(attached, dict):
         return dict(attached)
-    query = str(_value(request, "original_query") or _value(request, "product_name") or _value(request, "product"))
-    return full_parse(query)
+    return normalize_request_data(request)
 
 
 def _facts(candidate: Any) -> dict[str, Any]:
@@ -85,7 +84,7 @@ def evaluate_category_quality(request: Any, candidate: Any) -> CategoryQualityRe
     title = str(_value(candidate, "title", "") or "")
     text = normalize_text(f"{title} {_value(candidate, 'snippet', '')}")
     exact = match_candidate(parsed, candidate, category)
-    if exact.status in {ACCESSORY, MODEL_MISMATCH}:
+    if exact.status in {ACCESSORY, MODEL_MISMATCH, REQUIRED_SPEC_MISMATCH}:
         return _finish(0.0, [exact.reason], [], [], forced_level="bad", cap=30)
 
     spec = get_category_spec(category)

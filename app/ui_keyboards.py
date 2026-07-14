@@ -10,6 +10,7 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
 )
+from urllib.parse import urlsplit
 
 from app.product_config import AUTO_CATEGORIES, ServicePackage, get_service_packages
 from app.ui_texts import (
@@ -24,6 +25,7 @@ from app.ui_texts import (
     BTN_MANUAL_SELECTION,
     BTN_MY_REQUESTS,
     BTN_PRICING,
+    BTN_QUICK_REQUEST,
     BTN_SELECT_PRODUCT,
     BTN_SEND_LINKS,
     BTN_SUPPORT,
@@ -43,12 +45,17 @@ CB_PRICING = "ui:pricing"
 CB_SUPPORT = "ui:support"
 CB_FAQ = "ui:faq"
 CB_HOME = "ui:home"
+CB_QUICK_REQUEST = "ui:quick"
 
 CB_CATEGORY_PREFIX = "wiz:cat:"
 CB_CONDITION_PREFIX = "wiz:condition:"
 CB_PRIORITY_PREFIX = "wiz:priority:"
 CB_PACKAGE_PREFIX = "pkg:"
 CB_FEEDBACK_PREFIX = "fb:"
+CB_RESULT_COMPARE_PREFIX = "result:compare:"
+CB_RESULT_DETAIL_PREFIX = "result:detail:"
+CB_RESULT_SAVE_PREFIX = "result:save:"
+CB_WIZARD_EDIT_PREFIX = "wiz:edit:"
 
 CB_WIZARD_BACK = "wiz:back"
 CB_WIZARD_CANCEL = "wiz:cancel"
@@ -78,7 +85,9 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_SELECT_PRODUCT)],
-            [KeyboardButton(text=BTN_HOW_IT_WORKS), KeyboardButton(text=BTN_SUPPORT)],
+            [KeyboardButton(text=BTN_COMPARE_LINKS), KeyboardButton(text=BTN_MY_REQUESTS)],
+            [KeyboardButton(text=BTN_HOW_IT_WORKS), KeyboardButton(text=BTN_PRICING)],
+            [KeyboardButton(text=BTN_SUPPORT), KeyboardButton(text=BTN_FAQ)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выбери действие",
@@ -89,10 +98,13 @@ def main_menu_inline_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [_inline_button(BTN_SELECT_PRODUCT, CB_SELECT_PRODUCT)],
+            [_inline_button(BTN_COMPARE_LINKS, CB_COMPARE_LINKS)],
+            [_inline_button(BTN_MY_REQUESTS, CB_MY_REQUESTS)],
             [
                 _inline_button(BTN_HOW_IT_WORKS, CB_HOW_IT_WORKS),
-                _inline_button(BTN_SUPPORT, CB_SUPPORT),
+                _inline_button(BTN_PRICING, CB_PRICING),
             ],
+            [_inline_button(BTN_SUPPORT, CB_SUPPORT), _inline_button(BTN_FAQ, CB_FAQ)],
         ]
     )
 
@@ -117,6 +129,7 @@ def category_keyboard() -> InlineKeyboardMarkup:
     ]
     rows.extend(
         [
+            [_inline_button(BTN_QUICK_REQUEST, CB_QUICK_REQUEST)],
             [_inline_button(BTN_MANUAL_SELECTION, CB_WIZARD_MANUAL)],
             [
                 _inline_button(BTN_HOME, CB_HOME),
@@ -169,6 +182,35 @@ def request_confirmation_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def request_edit_keyboard() -> InlineKeyboardMarkup:
+    fields = (
+        ("Товар", "product"),
+        ("Бюджет", "budget"),
+        ("Город", "city"),
+        ("Состояние", "condition"),
+        ("Требования", "requirements"),
+        ("Приоритет", "priority"),
+    )
+    rows = [
+        [_inline_button(label, f"{CB_WIZARD_EDIT_PREFIX}{field}")]
+        for label, field in fields
+    ]
+    rows.append([
+        _inline_button(BTN_BACK, CB_WIZARD_BACK),
+        _inline_button(BTN_HOME, CB_HOME),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def unsupported_category_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_inline_button(BTN_MANUAL_SELECTION, CB_WIZARD_MANUAL)],
+        [_inline_button(BTN_COMPARE_LINKS, CB_COMPARE_LINKS)],
+        [_inline_button(BTN_SUPPORT, CB_SUPPORT)],
+        [_inline_button(BTN_HOME, CB_HOME)],
+    ])
+
+
 def link_comparison_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -195,6 +237,23 @@ def feedback_keyboard(request_id: int) -> InlineKeyboardMarkup:
         ]
         for rating, label in sorted(FEEDBACK_LABELS.items(), reverse=True)
     ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def result_card_keyboard(result_id: int, url: str = "") -> InlineKeyboardMarkup:
+    result_id = int(result_id)
+    rows: list[list[InlineKeyboardButton]] = []
+    try:
+        parsed = urlsplit(str(url or "").strip())
+    except ValueError:
+        parsed = None
+    if parsed and parsed.scheme in {"http", "https"} and parsed.netloc:
+        rows.append([InlineKeyboardButton(text="🔗 Открыть товар", url=str(url).strip())])
+    rows.append([
+        _inline_button("⚖️ Сравнить", f"{CB_RESULT_COMPARE_PREFIX}{result_id}"),
+        _inline_button("📋 Подробнее", f"{CB_RESULT_DETAIL_PREFIX}{result_id}"),
+    ])
+    rows.append([_inline_button("❤️ Сохранить", f"{CB_RESULT_SAVE_PREFIX}{result_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -226,7 +285,10 @@ __all__ = [
         "main_menu_keyboard",
         "priority_keyboard",
         "request_confirmation_keyboard",
+        "request_edit_keyboard",
+        "result_card_keyboard",
         "service_packages_keyboard",
+        "unsupported_category_keyboard",
         "wizard_navigation_keyboard",
     }
 ]

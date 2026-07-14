@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -40,6 +41,12 @@ def main() -> int:
             origin="alice",
             price_verified=True,
             link_check_status=LinkCheckStatus.VERIFIED.value,
+            facts_json=json.dumps({
+                "exact_match": "EXACT", "exact_product_verified": True,
+                "product_page_verified": True, "price_verified": True,
+                "availability_verified": True, "seller_verified": True,
+                "available": True,
+            }, ensure_ascii=False),
         )
         db.set_alice_top_result(req_id, card_id)
         db.create_market_check(

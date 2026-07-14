@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.exact_match import ACCESSORY, COMPATIBLE_VARIANT, EXACT, MODEL_MISMATCH, REQUIRED_SPEC_MISMATCH
 from app.search_evidence import assess_product_card
 
 
@@ -26,6 +27,14 @@ DROP_STATUSES = {
     "OVER_BUDGET_HARD",
     "BAD_ENCODING",
 }
+
+_STALE_MODEL_REASONS = (
+    "нет признаков конкретной модели",
+    "точная модель не указана",
+    "классификация: weak — нет признаков конкретной модели",
+    "классификация: weak - нет признаков конкретной модели",
+    "weak classification не подтверждает качество товара",
+)
 
 REAL_BLOCK_MARKERS = (
     "403",
@@ -110,6 +119,41 @@ def add_reason(candidate: dict[str, Any], reason: str) -> None:
         candidate["why_not_verified_good"] = reason
 
 
+def clean_final_reasons(candidate: dict[str, Any]) -> list[str]:
+    """Deduplicates reasons and removes claims contradicted by final evidence."""
+    exact_status = str(candidate.get("exact_match_status") or candidate.get("exact_match") or "").upper()
+    status = get_status(candidate)
+    strong_exact = exact_status in {EXACT, COMPATIBLE_VARIANT}
+    mismatch = exact_status in {MODEL_MISMATCH, REQUIRED_SPEC_MISMATCH, ACCESSORY}
+    values = [
+        *(candidate.get("reasons") or []),
+        *(candidate.get("risk_flags") or candidate.get("flags") or []),
+    ]
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = re.sub(r"\s+", " ", str(value or "")).strip(" ;,.-")
+        if not text:
+            continue
+        lowered = text.casefold()
+        if strong_exact and any(marker in lowered for marker in _STALE_MODEL_REASONS):
+            continue
+        if mismatch and ("точная модель" in lowered or "точное соответствие" in lowered):
+            continue
+        if status in NORMAL_STATUSES and lowered in {
+            "нужна ручная проверка", "нужна ручная проверка качества товара",
+        }:
+            continue
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        result.append(text)
+    candidate["reasons"] = result
+    candidate["risk_flags"] = result
+    candidate["why_not_verified_good"] = "" if status in NORMAL_STATUSES else (result[0] if result else "")
+    return result
+
+
 def cap_score(candidate: dict[str, Any], cap: int, reason: str) -> None:
     try:
         score = int(candidate.get("score") or 0)
@@ -168,23 +212,34 @@ def normalize_for_admin_save(candidate: dict[str, Any]) -> dict[str, Any]:
     card = assess_product_card(candidate)
     candidate["product_card_confidence"] = card.confidence
     candidate["product_card_reason"] = card.reason
+    exact_status = str(candidate.get("exact_match_status") or candidate.get("exact_match") or "").upper()
+
+    if exact_status in {MODEL_MISMATCH, REQUIRED_SPEC_MISMATCH, ACCESSORY}:
+        set_status(candidate, "WRONG_PRODUCT")
+        cap_score(candidate, 20, exact_status.lower())
+        add_reason(candidate, str(candidate.get("exact_match_reason") or "обязательные требования не совпадают"))
+        clean_final_reasons(candidate)
+        return candidate
 
     if quality == "bad":
         set_status(candidate, "WRONG_PRODUCT")
         cap_score(candidate, 30, "bad_product_quality")
         add_reason(candidate, "мусорный или неподходящий товар")
+        clean_final_reasons(candidate)
         return candidate
 
     if looks_like_article_or_category(candidate):
         set_status(candidate, "NOT_PRODUCT_PAGE")
         cap_score(candidate, 30, "not_product_page")
         add_reason(candidate, "не карточка товара")
+        clean_final_reasons(candidate)
         return candidate
 
     if not card.is_product_card and card.confidence == "none":
         set_status(candidate, "NOT_PRODUCT_PAGE")
         cap_score(candidate, 30, "not_product_page")
         add_reason(candidate, card.reason or "не карточка товара")
+        clean_final_reasons(candidate)
         return candidate
 
     unavailable_markers = (
@@ -199,6 +254,7 @@ def normalize_for_admin_save(candidate: dict[str, Any]) -> dict[str, Any]:
         set_status(candidate, "UNAVAILABLE")
         cap_score(candidate, 40, "unavailable")
         add_reason(candidate, "товар недоступен")
+        clean_final_reasons(candidate)
         return candidate
 
     status = get_status(candidate)
@@ -217,9 +273,18 @@ def normalize_for_admin_save(candidate: dict[str, Any]) -> dict[str, Any]:
         set_status(candidate, "OVER_BUDGET_HARD")
         cap_score(candidate, 40, "over_budget_hard")
         add_reason(candidate, "цена сильно выше бюджета")
+        clean_final_reasons(candidate)
         return candidate
 
-    if quality == "weak" and status in NORMAL_STATUSES:
+    strong_fresh_evidence = bool(
+        exact_status in {EXACT, COMPATIBLE_VARIANT}
+        and price not in (None, "", 0)
+        and candidate.get("available") is True
+        and card.confidence == "high"
+        and str(candidate.get("verification_confidence") or "").lower() == "high"
+        and str(candidate.get("price_confidence") or "").lower() == "high"
+    )
+    if quality == "weak" and status in NORMAL_STATUSES and not strong_fresh_evidence:
         set_status(candidate, "NEED_MANUAL_CHECK")
         cap_score(candidate, 80, "weak_quality")
         add_reason(candidate, "нужна ручная проверка качества товара")
@@ -239,6 +304,7 @@ def normalize_for_admin_save(candidate: dict[str, Any]) -> dict[str, Any]:
         cap_score(candidate, 60, "over_budget_soft")
         add_reason(candidate, "цена выше бюджета")
 
+    clean_final_reasons(candidate)
     return candidate
 
 

@@ -21,6 +21,17 @@ from app.db import Request, SearchResult  # noqa: E402
 
 
 def _candidate(idx: int, title: str, price: int, source: str, url: str, score: float) -> SearchResult:
+    facts = {
+        "verify_status": "VERIFIED_GOOD",
+        "exact_match": "EXACT",
+        "exact_product_verified": True,
+        "product_page_verified": True,
+        "price_verified": True,
+        "availability_verified": True,
+        "seller_verified": True,
+        "available": True,
+        "price_confidence": "high",
+    }
     return SearchResult(
         id=idx,
         request_id=1,
@@ -32,6 +43,7 @@ def _candidate(idx: int, title: str, price: int, source: str, url: str, score: f
         score=score,
         risk_flags=json.dumps(["проверить гарантию"], ensure_ascii=False),
         status="CANDIDATE",
+        facts_json=json.dumps(facts, ensure_ascii=False),
     )
 
 

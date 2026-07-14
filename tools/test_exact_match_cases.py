@@ -15,6 +15,7 @@ from app.exact_match import (
     EXACT,
     GENERIC_MATCH,
     MODEL_MISMATCH,
+    REQUIRED_SPEC_MISMATCH,
     UNKNOWN,
     match_candidate,
 )
@@ -28,14 +29,14 @@ CASES = (
     ("iphone_max", "iPhone 17 Pro", "Apple iPhone 17 Pro Max 256 ГБ", MODEL_MISMATCH),
     ("iphone_old", "iPhone 17 Pro", "Apple iPhone 16 Pro 256 ГБ", MODEL_MISMATCH),
     ("iphone_storage_exact", "iPhone 15 Pro 256 ГБ", "Apple iPhone 15 Pro 256 ГБ", EXACT),
-    ("iphone_storage_wrong", "iPhone 15 Pro 256 ГБ", "Apple iPhone 15 Pro 128 ГБ", MODEL_MISMATCH),
+    ("iphone_storage_wrong", "iPhone 15 Pro 256 ГБ", "Apple iPhone 15 Pro 128 ГБ", REQUIRED_SPEC_MISMATCH),
     ("iphone_storage_missing", "iPhone 15 Pro 256 ГБ", "Apple iPhone 15 Pro", GENERIC_MATCH),
     ("iphone_variant", "iPhone 15 Pro", "Apple iPhone 15 Pro 512 ГБ", COMPATIBLE_VARIANT),
     ("iphone_accessory", "iPhone 15 Pro", "Чехол для Apple iPhone 15 Pro", ACCESSORY),
     ("iphone_glass", "iPhone 15 Pro", "Защитное стекло для iPhone 15 Pro", ACCESSORY),
     ("galaxy_a55", "Samsung Galaxy A55 256 ГБ", "Samsung Galaxy A55 256 ГБ 5G", EXACT),
     ("galaxy_a35", "Samsung Galaxy A55 256 ГБ", "Samsung Galaxy A35 256 ГБ", MODEL_MISMATCH),
-    ("galaxy_storage", "Samsung Galaxy A55 256 ГБ", "Samsung Galaxy A55 128 ГБ", MODEL_MISMATCH),
+    ("galaxy_storage", "Samsung Galaxy A55 256 ГБ", "Samsung Galaxy A55 128 ГБ", REQUIRED_SPEC_MISMATCH),
     ("s24_ultra", "Galaxy S24 Ultra", "Samsung Galaxy S24 Ultra 512 ГБ", COMPATIBLE_VARIANT),
     ("s24_fe", "Galaxy S24 Ultra", "Samsung Galaxy S24 FE 256 ГБ", MODEL_MISMATCH),
     ("s24_plus", "Galaxy S24", "Samsung Galaxy S24 Plus", MODEL_MISMATCH),
@@ -43,17 +44,17 @@ CASES = (
     ("sony_xm4", "Sony WH-1000XM5", "Наушники Sony WH-1000XM4", MODEL_MISMATCH),
     ("sony_case", "Sony WH-1000XM5", "Кейс для наушников Sony WH-1000XM5", ACCESSORY),
     ("monitor_27", "Монитор 27 дюймов 144 Гц", "Монитор LG 27GN800 27 дюймов 144 Гц IPS", GENERIC_MATCH),
-    ("monitor_24", "Монитор 27 дюймов 144 Гц", "Монитор LG 24GN600 24 дюйма 144 Гц", MODEL_MISMATCH),
-    ("monitor_75hz", "Монитор 27 дюймов 144 Гц", "Монитор Samsung 27 дюймов 75 Гц", MODEL_MISMATCH),
+    ("monitor_24", "Монитор 27 дюймов 144 Гц", "Монитор LG 24GN600 24 дюйма 144 Гц", REQUIRED_SPEC_MISMATCH),
+    ("monitor_75hz", "Монитор 27 дюймов 144 Гц", "Монитор Samsung 27 дюймов 75 Гц", REQUIRED_SPEC_MISMATCH),
     ("monitor_arm", "Монитор 27 дюймов", "Кронштейн для монитора 27 дюймов", ACCESSORY),
     ("tv_55", "Телевизор 55 дюймов 4К", "Телевизор Hisense 55E7KQ 55 дюймов 4K", GENERIC_MATCH),
-    ("tv_43", "Телевизор 55 дюймов 4К", "Телевизор Hisense 43E7KQ 43 дюйма 4K", MODEL_MISMATCH),
+    ("tv_43", "Телевизор 55 дюймов 4К", "Телевизор Hisense 43E7KQ 43 дюйма 4K", REQUIRED_SPEC_MISMATCH),
     ("tv_remote", "Телевизор 55 дюймов", "Пульт для телевизора Samsung", ACCESSORY),
     ("mattress_exact", "Матрас 160x200", "Матрас Askona Balance 160х200", GENERIC_MATCH),
-    ("mattress_wrong", "Матрас 160x200", "Матрас Askona Balance 140х200", MODEL_MISMATCH),
+    ("mattress_wrong", "Матрас 160x200", "Матрас Askona Balance 140х200", REQUIRED_SPEC_MISMATCH),
     ("mattress_topper", "Матрас 160x200", "Наматрасник 160x200", ACCESSORY),
     ("bed_exact", "Кровать 160x200", "Кровать с основанием 160х200", GENERIC_MATCH),
-    ("bed_wrong", "Кровать 160x200", "Кровать с основанием 180х200", MODEL_MISMATCH),
+    ("bed_wrong", "Кровать 160x200", "Кровать с основанием 180х200", REQUIRED_SPEC_MISMATCH),
     ("bed_headboard", "Кровать 160x200", "Изголовье отдельно для кровати 160x200", ACCESSORY),
     ("bed_mattress", "Кровать 160x200", "Матрас 160x200 средней жёсткости", ACCESSORY),
     ("robot_exact", "Робот-пылесос с лидаром", "Робот-пылесос Dreame D10s с лидаром", GENERIC_MATCH),
@@ -68,7 +69,7 @@ CASES = (
     ("microwave_plate", "Микроволновка", "Тарелка для микроволновки Samsung", ACCESSORY),
     ("chair_exact", "Офисное кресло", "Офисное кресло Chairman с поясничной поддержкой", GENERIC_MATCH),
     ("chair_gaslift", "Офисное кресло", "Газлифт для офисного кресла", ACCESSORY),
-    ("used_conflict", "iPhone 15 Pro б/у", "Новый Apple iPhone 15 Pro", MODEL_MISMATCH),
+    ("used_conflict", "iPhone 15 Pro б/у", "Новый Apple iPhone 15 Pro", REQUIRED_SPEC_MISMATCH),
     ("used_unknown", "iPhone 15 Pro б/у", "Apple iPhone 15 Pro", EXACT),
     ("unknown", "Аккумуляторная дрель", "Дрель Bosch GSR 12V", UNKNOWN),
 )
@@ -81,14 +82,14 @@ class ExactMatchCases(unittest.TestCase):
             result = match_candidate(full_parse(query), {"title": title})
             with self.subTest(case_id=case_id, result=result):
                 self.assertEqual(result.status, expected, result)
-                if result.status in {MODEL_MISMATCH, ACCESSORY}:
+                if result.status in {MODEL_MISMATCH, REQUIRED_SPEC_MISMATCH, ACCESSORY}:
                     self.assertTrue(result.reason)
             correct += int(result.status == expected)
         self.assertGreaterEqual(correct / len(CASES), 0.95)
 
     def test_02_mismatch_reason_names_difference(self) -> None:
         result = match_candidate(full_parse("iPhone 15 Pro 256 ГБ"), {"title": "iPhone 15 Pro 128 ГБ"})
-        self.assertEqual(result.status, MODEL_MISMATCH)
+        self.assertEqual(result.status, REQUIRED_SPEC_MISMATCH)
         self.assertIn("256", result.reason)
         self.assertIn("128", result.reason)
 

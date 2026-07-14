@@ -6,7 +6,7 @@ import re
 from typing import Any, Iterable
 
 from app.category_registry import get_category_spec
-from app.request_parser import parse_request_details
+from app.request_parser import build_request_search_query, normalize_request_data
 from app.search_links import build_search_query
 
 
@@ -114,19 +114,15 @@ def plan_search_queries(
     max_queries: int = 14,
     site_domains: Iterable[str] = (),
 ) -> list[QueryPlanItem]:
-    """Возвращает один main, до трёх category и feature variants плюс site queries."""
+    """Возвращает main, максимум два дополнительных variants и site queries."""
     if max_queries < 1:
         return []
-    original = str(_value(request, "original_query") or _value(request, "clean_search_query") or "")
-    details = parse_request_details(original)
+    details = normalize_request_data(request)
     product = str(_value(request, "product_name") or _value(request, "product") or details.get("model") or "товар")
     budget = str(_value(request, "budget") or details.get("budget") or "")
     city = str(_value(request, "city") or details.get("city") or "")
     use_case = str(_value(request, "use_case") or _value(request, "purpose") or details.get("use_case") or "")
-    old_criteria = str(_value(request, "important_criteria") or _value(request, "criteria") or "")
-    main = str(_value(request, "clean_search_query") or "").strip() or build_search_query(
-        product, use_case, budget, city, old_criteria,
-    )
+    main = build_request_search_query(request)
 
     result: list[QueryPlanItem] = []
     seen: set[str] = set()
@@ -137,7 +133,7 @@ def plan_search_queries(
     values = _template_values(request, details)
     category_added = 0
     for template in spec.query_variants:
-        if category_added >= 3:
+        if category_added >= 2:
             break
         query = _normalize_query(template.format_map(values))
         if budget and f"до {budget}" not in query:
@@ -166,7 +162,7 @@ def plan_search_queries(
 
     feature_added = 0
     for query, reason in feature_candidates:
-        if feature_added >= 3:
+        if category_added + feature_added >= 2:
             break
         query = _normalize_query(query)
         if budget and f"до {budget}" not in query:

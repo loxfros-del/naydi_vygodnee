@@ -1,4 +1,4 @@
-"""Canonicalization/dedupe с сохранением size/storage/condition variants."""
+"""Offer-level dedupe plus canonical product grouping helpers."""
 from __future__ import annotations
 
 import re
@@ -34,6 +34,9 @@ def normalized_url(url: str) -> str:
 
 
 def source_product_id(candidate: Any) -> str:
+    direct = _value(candidate, "product_id", "") or _value(candidate, "offer_id", "")
+    if direct not in (None, ""):
+        return f"{_value(candidate, 'source', '')}:{direct}"
     raw = _value(candidate, "raw", {}) or {}
     if isinstance(raw, dict):
         for key in ("id", "product_id", "sku", "offer_id", "nmId"):
@@ -89,6 +92,11 @@ def title_fingerprint(candidate: Any) -> str:
 
 
 def candidate_keys(candidate: Any) -> tuple[str, ...]:
+    """Return offer identity keys, never a product-group identity.
+
+    Offers of the same model from different sellers must survive dedupe and are
+    grouped later with :func:`canonical_identity`.
+    """
     keys: list[str] = []
     url_key = normalized_url(str(_value(candidate, "url", "") or ""))
     if url_key:
@@ -96,10 +104,7 @@ def candidate_keys(candidate: Any) -> tuple[str, ...]:
     product_id = source_product_id(candidate)
     if product_id:
         keys.append(f"id:{product_id}")
-    identity = canonical_identity(candidate)
-    if identity:
-        keys.append(f"identity:{identity}")
-    else:
+    if not keys:
         fingerprint = title_fingerprint(candidate)
         if fingerprint:
             keys.append(f"title:{_value(candidate, 'source', '')}:{fingerprint}")

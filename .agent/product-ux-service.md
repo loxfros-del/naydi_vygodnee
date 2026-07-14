@@ -11,13 +11,13 @@
 - [x] (2026-07-12) Зафиксированы `git status`, `git diff --stat`, `git diff` и успешный `python -m compileall -q .`.
 - [x] (2026-07-12) Проверены существующие пользовательские и админские handlers, FSM, SQLite-модели, оплата, отчёты, AI-карточки, callbacks, лимиты Telegram и отсутствие продуктовых изображений в репозитории.
 - [x] (2026-07-12) Успешно выполнены исходные тесты `tools/test_alice_parser.py`, `tools/test_ai_cards.py`, `tools/test_report_readiness.py` и `tools/test_db_migration.py`.
-- [ ] Добавить единый продуктовый слой: конфиг пакетов и категорий, русские тексты, клавиатуры, безопасные форматтеры.
-- [ ] Реализовать onboarding, мастер заявки, свободный режим, сравнение ссылок, список заявок, поддержку и feedback.
-- [ ] Добавить совместимые расширения SQLite, журнал событий, прогресс и единственного владельца переходов статуса.
-- [ ] Обновить админскую очередь, review, AI-card approval и защищённую отправку результата.
-- [ ] Перевести клиентский результат на три понятные роли и убрать технические поля.
-- [ ] Создать `docs/product_flow.md`, детерминированные тесты и локальный smoke без сети.
-- [ ] Выполнить итоговые compileall, обязательный Alice parser и все релевантные regression tests.
+- [x] (2026-07-13) Добавлен единый продуктовый слой: конфиг пакетов и категорий, русские тексты, клавиатуры, безопасные форматтеры.
+- [x] (2026-07-13) Реализованы onboarding, мастер заявки, свободный режим, сравнение ссылок, список заявок, поддержка и feedback.
+- [x] (2026-07-13) Добавлены совместимые расширения SQLite, журнал событий, один progress message и state machine.
+- [x] (2026-07-13) Обновлены админская очередь, review, AI-card approval и защищённая отправка результата.
+- [x] (2026-07-13) Клиентский результат ограничен тремя ролями и очищен от технических полей.
+- [x] (2026-07-13) Созданы `docs/product_flow.md`, пять deterministic UX-test runners и offline smoke.
+- [x] (2026-07-13) Выполнены финальные compileall, обязательный Alice parser, offline-регрессии, smoke и `git diff --check`.
 
 ## Surprises & Discoveries
 
@@ -52,7 +52,7 @@
 
 ## Outcomes & Retrospective
 
-На момент создания плана аудит завершён, исходная компиляция и четыре ключевых regression-теста зелёные. Реализация ещё продолжается. Commit и push не выполняются по прямому запрету пользователя.
+Продуктовый UX реализован без изменения `main.py`, search engine, `.env` и действующего ручного подтверждения оплаты. `/start`, wizard, category gate, progress, link comparison, feedback, очередь администратора, canonical statuses и AI approval подключены к runtime handlers. Клиентская доставка требует `READY`, показывает максимум три рекомендации и только `APPROVED` AI-карточки. Все новые тесты, offline-регрессии, smoke, compileall, Alice parser и `git diff --check` завершились успешно. Commit и push не выполнялись по прямому запрету пользователя.
 
 ## Context and Orientation
 
@@ -127,8 +127,10 @@ Live benchmark и сетевой поиск не запускать.
 
 ## Interfaces and Dependencies
 
-Используются уже установленные aiogram, sqlite3, dataclasses и стандартная библиотека. Новые внешние зависимости не нужны. `ProductConfig` возвращает `ServicePackage` и `CategoryDefinition`. `RequestStateMachine.transition(request_id, target, actor, reason, extra_fields)` является единственным runtime-входом для смены статуса. `SearchOrchestrationService.route(request)` возвращает `AUTO`, `MANUAL` или `LINK_COMPARISON`. `RecommendationService.for_client(request_id)` возвращает максимум три `SearchResult`, исключая rejected и неутверждённые AI-карточки. `DeliveryService.prepare(request_id)` либо возвращает безопасные сообщения, либо объясняет, почему отправка заблокирована.
+Используются уже установленные aiogram, sqlite3, dataclasses и стандартная библиотека. Новые внешние зависимости не нужны. `ProductConfig` возвращает `ServicePackage` и `CategoryConfig`. `transition_request(request_id, target, actor, reason, extra_fields)` является единственным runtime-входом для смены статуса. `SearchOrchestrationService.route(request)` возвращает `AUTO`, `MANUAL` или `LINK_COMPARISON`. `RecommendationService.for_request(request_id)` возвращает максимум три карточки, исключая rejected и неутверждённые AI-карточки. `DeliveryService.prepare(request)` либо возвращает безопасный отчёт, либо объясняет, почему отправка заблокирована.
 
 ---
 
 Изменение 2026-07-12: создан исходный план после аудита и baseline-тестов; зафиксированы ограничения грязного рабочего дерева, ручной оплаты и совместимой SQLite-миграции.
+
+Изменение 2026-07-13: план завершён после runtime-интеграции и полного offline regression run; финальные compileall, Alice parser, smoke и diff-check прошли.
