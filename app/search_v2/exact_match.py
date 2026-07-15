@@ -19,12 +19,14 @@ _ACCESSORY_MARKERS = (
     "адаптер", "кронштейн", "наушники для", "клавиатура для", "запчаст",
 )
 _MODIFIERS = {"pro", "max", "ultra", "plus", "mini", "air", "se"}
-_MINIMUM_NUMERIC_KEYS = {"refresh_rate", "hz", "ram_gb", "ssd_gb"}
+_MINIMUM_NUMERIC_KEYS = {"refresh_rate", "hz", "ram_gb", "ssd_gb", "load_capacity_kg"}
+_BOOLEAN_KEYS = {"wireless", "ultrawide", "headrest", "lumbar_support"}
 _RESOLUTION_ALIASES = {
     "4k": "4k",
     "uhd": "4k",
     "3840x2160": "4k",
     "2160p": "4k",
+    "wqhd": "qhd",
     "qhd": "qhd",
     "2k": "qhd",
     "2560x1440": "qhd",
@@ -33,6 +35,23 @@ _RESOLUTION_ALIASES = {
     "fullhd": "fhd",
     "1920x1080": "fhd",
     "1080p": "fhd",
+}
+_VALUE_ALIASES = {
+    "office": "office",
+    "офисное": "office",
+    "офисный": "office",
+    "ergonomic": "ergonomic",
+    "эргономичное": "ergonomic",
+    "эргономичный": "ergonomic",
+    "gaming": "gaming",
+    "игровое": "gaming",
+    "игровой": "gaming",
+    "mesh": "mesh",
+    "сетчатое": "mesh",
+    "сетка": "mesh",
+    "usb c": "usb-c",
+    "usb type c": "usb-c",
+    "type c": "usb-c",
 }
 
 
@@ -67,6 +86,17 @@ def _candidate_spec(offer: Offer, key: str) -> Any:
         "features": configuration.get("features", ()),
         "cpu": configuration.get("cpu", configuration.get("cpu_family")),
         "cpu_family": configuration.get("cpu_family", configuration.get("cpu")),
+        "gpu": configuration.get("gpu"),
+        "matrix": configuration.get("matrix"),
+        "connector": configuration.get("connector"),
+        "wireless": configuration.get("wireless"),
+        "form_factor": configuration.get("form_factor"),
+        "ultrawide": configuration.get("ultrawide"),
+        "type": configuration.get("type"),
+        "material": configuration.get("material"),
+        "headrest": configuration.get("headrest"),
+        "lumbar_support": configuration.get("lumbar_support"),
+        "load_capacity_kg": configuration.get("load_capacity_kg"),
         "condition": identity.condition,
     }
     if key in aliases:
@@ -91,7 +121,25 @@ def _feature_tokens(value: Any) -> set[str]:
     tokens = set(_tokens(text))
     if "шумоподавление" in tokens or ("активное" in tokens and "шумоподавление" in tokens):
         tokens.add("anc")
+    if "беспроводные" in tokens or "беспроводной" in tokens:
+        tokens.add("wireless")
     return tokens
+
+
+def _bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    normalized = " ".join(_tokens(value))
+    if normalized in {"true", "yes", "1", "да", "есть"}:
+        return True
+    if normalized in {"false", "no", "0", "нет"}:
+        return False
+    return None
+
+
+def _canonical_value(value: Any) -> str:
+    normalized = " ".join(_tokens(value))
+    return _VALUE_ALIASES.get(normalized, normalized)
 
 
 def _different(required: Any, candidate: Any, key: str) -> bool:
@@ -105,12 +153,17 @@ def _different(required: Any, candidate: Any, key: str) -> bool:
         return not _feature_tokens(required).issubset(_feature_tokens(candidate))
     if key == "resolution":
         return _resolution(required) != _resolution(candidate)
+    if key in _BOOLEAN_KEYS:
+        required_bool, candidate_bool = _bool(required), _bool(candidate)
+        if required_bool is None or candidate_bool is None:
+            return _canonical_value(required) != _canonical_value(candidate)
+        return required_bool and not candidate_bool
     required_number, candidate_number = _number(required), _number(candidate)
     if required_number is not None and candidate_number is not None:
         if key in _MINIMUM_NUMERIC_KEYS:
             return candidate_number + 0.01 < required_number
         return abs(required_number - candidate_number) > 0.01
-    return " ".join(_tokens(required)) != " ".join(_tokens(candidate))
+    return _canonical_value(required) != _canonical_value(candidate)
 
 
 def evaluate_exact_match(request: SearchRequestV2, offer: Offer) -> ExactMatchResult:
