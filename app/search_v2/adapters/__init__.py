@@ -11,6 +11,7 @@ from .dns import DnsAdapter
 from .generic_search import GenericExactSearchAdapter
 from .mvideo import MVideoAdapter
 from .ozon import OzonAdapter
+from .shopping_search import ShoppingSearchAdapter
 from .wildberries import WildberriesAdapterV2
 from .yandex_market import YandexMarketAdapter
 
@@ -21,6 +22,7 @@ __all__ = [
     "GenericExactSearchAdapter",
     "MVideoAdapter",
     "OzonAdapter",
+    "ShoppingSearchAdapter",
     "SourceAdapter",
     "SourceCapabilities",
     "SourceContext",
