@@ -35,11 +35,31 @@ class SourceAdapter(ABC):
 
 ## Текущие источники
 
-- Discovery: `yandex_market`, `ozon`, `avito`; optional `wildberries`.
+- Price discovery: `shopping_search` — один настроенный Google Shopping provider: SearchApi или SerpApi.
+- Marketplace/classified discovery: `ozon`, `avito`; доступны `yandex_market` и optional `wildberries`.
 - Reliable anchors: `dns`; optional `citilink`, `mvideo`.
 - Fallback: `generic_exact`, только с exact query.
 
+`shopping_search` не вызывает сеть без включённого provider и непустого API key. В production/shadow V2 он запускается вместе с Ozon и Avito. Он нужен прежде всего для структурированной цены, продавца и прямой product link; exact match, grouping, market median и роли выполняются только после общей нормализации V2.
+
+Выбор provider:
+
+```env
+SEARCH_V2_SHOPPING_PROVIDER=auto  # auto | searchapi | serpapi
+SEARCHAPI_ENABLED=true
+SEARCHAPI_API_KEY=...
+# либо
+SERPAPI_ENABLED=true
+SERPAPI_API_KEY=...
+```
+
+В режиме `auto` используется SearchApi, затем SerpApi. Ключи не записываются в debug, snapshot или acceptance JSON.
+
 `build_default_registry(include_optional=True)` создаёт реестр. Алиасы канонизируются в `source_registry.py`. `SourcePolicy` применяет приоритет и query budget.
+
+## Page verification
+
+`app/search_v2/page_verifier.py` безопасно переиспользует существующий bounded verifier. Он открывает только exact product pages без цены, максимум четыре предложения на case и максимум две страницы одновременно. Он не добавляет обход captcha или бесконечные retry. Структурированная цена из `shopping_search` не требует повторного открытия страницы для попадания в ranking, но может быть подтверждена администратором перед отправкой клиенту.
 
 ## Как добавить источник
 
