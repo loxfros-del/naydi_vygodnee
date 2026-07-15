@@ -19,13 +19,17 @@ from .models import (
     SellerTrust,
     VerificationAccess,
 )
+from .request_semantics import is_generic_request
 
 
 _SPACE_RE = re.compile(r"\s+")
 _STORAGE_RE = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*(тб|tb|гб|gb)(?!\w)", re.I)
 _DIAGONAL_RE = re.compile(r"(?<!\d)(\d{2}(?:[.,]\d)?)\s*(?:[\"″]|дюйм|inch)", re.I)
 _REFRESH_RE = re.compile(r"(?<!\d)(\d{2,3})\s*(?:гц|hz)(?!\w)", re.I)
-_RAM_RE = re.compile(r"(?<!\d)(\d{1,3})\s*(?:гб|gb)\s*(?:ram|озу)", re.I)
+_RAM_SUFFIX_RE = re.compile(r"(?<!\d)(\d{1,3})\s*(?:гб|gb)\s*(?:ram|озу)\b", re.I)
+_RAM_PREFIX_RE = re.compile(r"(?:ram|озу)\s*[-:]?\s*(\d{1,3})\s*(?:гб|gb)?", re.I)
+_SSD_PREFIX_RE = re.compile(r"\bssd\s*[-:]?\s*(\d{3,4})\s*(?:гб|gb)?", re.I)
+_SSD_SUFFIX_RE = re.compile(r"(?<!\d)(\d{3,4})\s*(?:гб|gb)?\s*ssd\b", re.I)
 _SLASH_CONFIG_RE = re.compile(r"(?<!\d)(\d{1,3})\s*/\s*(\d{3,4})(?:\s*(?:гб|gb))?(?!\d)", re.I)
 _MODIFIERS = ("pro max", "ultra", "pro", "max", "plus", "mini", "air", "se")
 _KNOWN_RETAIL = ("dns", "днс", "citilink", "ситилинк", "mvideo", "м.видео", "мвидео")
@@ -54,7 +58,8 @@ def canonicalize_url(value: Any) -> str:
     except ValueError:
         return raw
     query = [
-        (key, item) for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        (key, item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
         if not key.casefold().startswith("utm_") and key.casefold() not in _TRACKING_QUERY_KEYS
     ]
     path = re.sub(r"/{2,}", "/", parsed.path or "/").rstrip("/") or "/"
@@ -90,23 +95,66 @@ def _number(value: Any) -> float | None:
     return number if number > 0 else None
 
 
+def extract_ram(value: Any) -> int | None:
+    normalized = normalize_text(value)
+    match = _RAM_SUFFIX_RE.search(normalized) or _RAM_PREFIX_RE.search(normalized)
+    if match:
+        return int(match.group(1))
+    slash = _SLASH_CONFIG_RE.search(normalized)
+    return int(slash.group(1)) if slash else None
+
+
 def extract_storage(value: Any) -> int | None:
     normalized = normalize_text(value)
+    explicit = _SSD_PREFIX_RE.search(normalized) or _SSD_SUFFIX_RE.search(normalized)
+    if explicit:
+        return int(explicit.group(1))
+    slash = _SLASH_CONFIG_RE.search(normalized)
+    if slash:
+        return int(slash.group(2))
     matches = _STORAGE_RE.findall(normalized)
     if not matches:
-        slash = _SLASH_CONFIG_RE.search(normalized)
-        return int(slash.group(2)) if slash else None
+        return None
     values: list[int] = []
     for number, unit in matches:
         parsed = float(number.replace(",", "."))
         if unit.casefold() in {"тб", "tb"}:
             parsed *= 1024
         values.append(int(parsed))
-    # Storage is normally the largest capacity mentioned; RAM is filtered below.
-    ram = _RAM_RE.search(normalize_text(value))
-    ram_value = int(ram.group(1)) if ram else None
+    # Storage is normally the largest capacity mentioned; explicit RAM is excluded.
+    ram_value = extract_ram(normalized)
     candidates = [item for item in values if item != ram_value or len(values) == 1]
     return max(candidates or values)
+
+
+def extract_resolution(value: Any) -> str | None:
+    text = normalize_key(value).replace(" ", "")
+    if any(marker in text for marker in ("3840x2160", "2160p", "4k", "uhd")):
+        return "4K"
+    if any(marker in text for marker in ("2560x1440", "1440p", "qhd", "2k")):
+        return "QHD"
+    if any(marker in text for marker in ("1920x1080", "1080p", "fullhd", "fhd")):
+        return "FHD"
+    return None
+
+
+def extract_features(value: Any) -> list[str]:
+    text = normalize_key(value)
+    features: list[str] = []
+    if re.search(r"(?:\banc\b|активн\w*\s+шумоподав)", text, re.I):
+        features.append("ANC")
+    if re.search(r"\btws\b|true\s+wireless", text, re.I):
+        features.append("TWS")
+    return features
+
+
+def extract_cpu_family(value: Any) -> str | None:
+    text = normalize_key(value)
+    match = re.search(r"\b(?:amd\s+)?(ryzen\s+[3579])\b", text, re.I)
+    if match:
+        return " ".join(match.group(1).split()).title()
+    match = re.search(r"\b(?:intel\s+)?(?:core\s+)?(i[3579])\b", text, re.I)
+    return match.group(1).upper() if match else None
 
 
 def extract_modifiers(value: Any) -> list[str]:
@@ -202,34 +250,110 @@ def normalize_seller(raw: RawOffer, trust: PlatformTrust) -> SellerInfo:
     )
 
 
+def _canonical_model_from_title(value: Any) -> str:
+    title = normalize_text(value)
+    candidate = re.split(
+        r"\s+(?:купить|отзывы?|характеристики|вопросы?|подробное\s+описание)\b",
+        title,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    return candidate.strip(" -–—")[:180] or title[:180]
+
+
+def _offer_evidence(raw: RawOffer, metadata: dict[str, Any]) -> str:
+    structured = metadata.get("structured_facts") or {}
+    if isinstance(structured, dict):
+        structured_text = " ".join(str(value) for value in structured.values())
+    else:
+        structured_text = str(structured)
+    return normalize_text(
+        " ".join(
+            str(item or "")
+            for item in (
+                raw.title,
+                metadata.get("snippet"),
+                metadata.get("body"),
+                metadata.get("description"),
+                structured_text,
+            )
+        )
+    )
+
+
 def build_product_identity(raw: RawOffer, request: SearchRequestV2) -> ProductIdentity:
     metadata = _metadata(raw)
     title = normalize_text(raw.title)
-    lowered = title.casefold()
+    evidence = _offer_evidence(raw, metadata)
+    lowered = evidence.casefold()
     requested_model = normalize_text(request.canonical_model)
-    canonical_model = requested_model if requested_model and normalize_key(requested_model) in lowered else str(
-        metadata.get("canonical_model") or metadata.get("model") or title
+    generic_request = is_generic_request(request)
+    model_matched = bool(
+        requested_model
+        and not generic_request
+        and normalize_key(requested_model) in lowered
     )
+    metadata_model = str(metadata.get("canonical_model") or metadata.get("model") or "").strip()
+    if generic_request and normalize_key(metadata_model) == normalize_key(requested_model):
+        metadata_model = ""
+    canonical_model = requested_model if model_matched else (metadata_model or _canonical_model_from_title(title))
+
     storage = metadata.get("storage_gb", metadata.get("storage"))
-    storage = extract_storage(storage) if storage not in (None, "") else extract_storage(title)
-    diagonal_match = _DIAGONAL_RE.search(title)
-    refresh_match = _REFRESH_RE.search(title)
+    storage = extract_storage(storage) if storage not in (None, "") else extract_storage(evidence)
+    diagonal_match = _DIAGONAL_RE.search(evidence)
+    refresh_match = _REFRESH_RE.search(evidence)
     diagonal = metadata.get("diagonal")
     if diagonal in (None, "") and diagonal_match:
         diagonal = float(diagonal_match.group(1).replace(",", "."))
     refresh = metadata.get("refresh_rate", metadata.get("hz"))
     if refresh in (None, "") and refresh_match:
         refresh = int(refresh_match.group(1))
-    modifiers = extract_modifiers(title)
-    condition = normalize_condition(raw.condition, title)
+
+    modifiers = extract_modifiers(evidence)
+    condition = normalize_condition(raw.condition, evidence)
     key_configuration = dict(metadata.get("structured_facts") or {})
-    for key in ("ram", "cpu", "gpu", "color", "size"):
+    for key in (
+        "ram",
+        "ram_gb",
+        "ssd_gb",
+        "cpu",
+        "cpu_family",
+        "gpu",
+        "color",
+        "size",
+        "resolution",
+        "features",
+    ):
         if key in metadata and key not in key_configuration:
             key_configuration[key] = metadata[key]
-    model_matched = bool(requested_model and normalize_key(requested_model) in lowered)
+
+    ram_gb = extract_ram(evidence)
+    ssd_gb = extract_storage(evidence)
+    resolution = extract_resolution(evidence)
+    features = extract_features(evidence)
+    cpu_family = extract_cpu_family(evidence)
+    if ram_gb is not None:
+        key_configuration.setdefault("ram_gb", ram_gb)
+    if ssd_gb is not None:
+        key_configuration.setdefault("ssd_gb", ssd_gb)
+    if resolution:
+        key_configuration.setdefault("resolution", resolution)
+    if features:
+        current_features = key_configuration.get("features") or []
+        if not isinstance(current_features, (list, tuple, set, frozenset)):
+            current_features = [current_features]
+        key_configuration["features"] = list(dict.fromkeys([*current_features, *features]))
+    if cpu_family:
+        key_configuration.setdefault("cpu_family", cpu_family)
+
+    identity_confidence = 0.9 if model_matched else (0.7 if metadata_model else 0.6)
     identity = ProductIdentity(
         category=request.category or str(metadata.get("category") or "unknown"),
-        brand=request.brand if request.brand and (normalize_key(request.brand) in lowered or model_matched) else str(metadata.get("brand") or ""),
+        brand=(
+            request.brand
+            if request.brand and (normalize_key(request.brand) in lowered or model_matched)
+            else str(metadata.get("brand") or "")
+        ),
         canonical_model=canonical_model,
         modifiers=modifiers,
         storage=storage,
@@ -239,7 +363,7 @@ def build_product_identity(raw: RawOffer, request: SearchRequestV2) -> ProductId
         key_configuration=key_configuration,
         condition=condition,
         region_or_sim_variant=str(metadata.get("region_or_sim_variant") or metadata.get("sim_variant") or ""),
-        identity_confidence=0.9 if requested_model and normalize_key(requested_model) in lowered else 0.55,
+        identity_confidence=identity_confidence,
     )
     from .grouping import canonical_identity_key
 
@@ -283,7 +407,11 @@ def normalize_raw_offer(raw: RawOffer, request: SearchRequestV2) -> Offer:
         product_confidence=0.0,
         price_confidence=float(metadata.get("price_confidence") or (0.9 if price else 0.0)),
         availability_confidence=availability.confidence,
-        seller_confidence=0.9 if seller.trust is SellerTrust.HIGH else (0.65 if seller.trust is SellerTrust.MEDIUM else 0.2),
+        seller_confidence=(
+            0.9
+            if seller.trust is SellerTrust.HIGH
+            else (0.65 if seller.trust is SellerTrust.MEDIUM else 0.2)
+        ),
         verification_access=access,
         retrieved_at=raw.retrieved_at,
         raw_metadata=metadata,
@@ -302,7 +430,21 @@ def normalize_offers(raws: Iterable[RawOffer], request: SearchRequestV2) -> list
 
 
 __all__ = [
-    "build_product_identity", "canonicalize_url", "extract_modifiers", "extract_storage", "is_product_page_url", "normalize_availability",
-    "normalize_condition", "normalize_key", "normalize_offers", "normalize_raw_offer",
-    "normalize_seller", "normalize_text", "platform_trust",
+    "build_product_identity",
+    "canonicalize_url",
+    "extract_cpu_family",
+    "extract_features",
+    "extract_modifiers",
+    "extract_ram",
+    "extract_resolution",
+    "extract_storage",
+    "is_product_page_url",
+    "normalize_availability",
+    "normalize_condition",
+    "normalize_key",
+    "normalize_offers",
+    "normalize_raw_offer",
+    "normalize_seller",
+    "normalize_text",
+    "platform_trust",
 ]
