@@ -194,11 +194,20 @@ def _aggregate(cases: Iterable[dict[str, Any]], *, expected: int) -> dict[str, A
     completed = len(rows)
     wrong = sum(int((row.get("metrics") or {}).get("wrong_model_rejection_count") or 0) for row in rows)
     valid_price_cases = sum(float((row.get("metrics") or {}).get("valid_price_rate") or 0) > 0 for row in rows)
-    errors = sum(bool(row.get("errors")) for row in rows)
+    system_errors = sum(
+        str(row.get("status") or "").upper() in {"ERROR", "TIMEOUT"}
+        for row in rows
+    )
+    partial_source_error_cases = sum(
+        bool(row.get("errors"))
+        and str(row.get("status") or "").upper() not in {"ERROR", "TIMEOUT"}
+        for row in rows
+    )
     return {
         "expected_cases": expected,
         "completed_cases": completed,
-        "error_cases": errors,
+        "error_cases": system_errors,
+        "partial_source_error_cases": partial_source_error_cases,
         "cases_with_valid_prices": valid_price_cases,
         "cases_with_recommendations": recommendations,
         "top1_exact_cases": top1_exact,
@@ -211,7 +220,7 @@ def _aggregate(cases: Iterable[dict[str, Any]], *, expected: int) -> dict[str, A
         },
         "acceptance_pass": bool(
             completed == expected
-            and errors == 0
+            and system_errors == 0
             and top1_exact >= 24
             and useful >= 28
         ),

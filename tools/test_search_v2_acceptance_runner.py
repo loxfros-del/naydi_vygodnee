@@ -78,6 +78,7 @@ class SearchV2AcceptanceRunnerTests(unittest.TestCase):
     def test_aggregate_requires_all_acceptance_targets(self) -> None:
         passing = [
             {
+                "status": "SUCCESS",
                 "errors": [],
                 "recommendations": [{"role": "BEST_OVERALL"}],
                 "metrics": {"top1_exact": True, "top3_useful": 1, "valid_price_rate": 1.0},
@@ -90,7 +91,7 @@ class SearchV2AcceptanceRunnerTests(unittest.TestCase):
         self.assertEqual(summary["top3_useful_cases"], 30)
 
         failing = list(passing)
-        failing[0] = {"errors": ["boom"], "recommendations": [], "metrics": {}}
+        failing[0] = {"status": "ERROR", "errors": ["boom"], "recommendations": [], "metrics": {}}
         summary = _aggregate(failing, expected=30)
         self.assertFalse(summary["acceptance_pass"])
         self.assertEqual(summary["error_cases"], 1)

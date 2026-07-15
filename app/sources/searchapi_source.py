@@ -301,6 +301,7 @@ def debug_searchapi_google_shopping(
         status_code = getattr(error_response, "status_code", None)
         if status_code is not None:
             info["status_code"] = status_code
+        provider_error = ""
         if error_response is not None:
             try:
                 error_payload = error_response.json()
@@ -308,9 +309,21 @@ def debug_searchapi_google_shopping(
                 error_payload = None
             if isinstance(error_payload, dict):
                 info["top_level_keys"] = sorted(str(key) for key in error_payload.keys())[:30]
-        info["status"] = "auth" if status_code in {401, 403} else "http_error"
+                provider_error = str(
+                    error_payload.get("error")
+                    or error_payload.get("message")
+                    or error_payload.get("detail")
+                    or ""
+                )[:300]
+        if status_code in {401, 403}:
+            info["status"] = "auth"
+        elif status_code == 429:
+            info["status"] = "rate_limited"
+        else:
+            info["status"] = "http_error"
         info["error_class"] = exc.__class__.__name__
-        info["error"] = str(exc)[:180]
+        info["provider_error"] = provider_error
+        info["error"] = provider_error or str(exc)[:180]
         logger.debug(
             "SearchApi Google Shopping failed: query=%r status=%s elapsed=%.3fs",
             query, info["status"], info["elapsed"],
