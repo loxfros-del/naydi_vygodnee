@@ -1,0 +1,73 @@
+{
+  "schema": "search_v2:acceptance:evidence:1",
+  "run": {
+    "workflow_run_id": 29447715044,
+    "artifact_id": 8356349366,
+    "branch": "feature/search-engine-v2",
+    "environment": "GitHub Actions ubuntu-24.04",
+    "provider": "auto",
+    "searchapi_key_present": true,
+    "serpapi_key_present": false,
+    "note": "Historical baseline before structured-price recovery and quota circuit-breaker fixes. No secret or raw HTML is stored."
+  },
+  "summary": {
+    "expected_cases": 30,
+    "completed_cases": 30,
+    "case_statuses": {
+      "PARTIAL_SUCCESS": 25,
+      "NO_EXACT_MATCH": 4,
+      "TIMEOUT": 1
+    },
+    "cases_with_valid_prices": 0,
+    "cases_with_recommendations": 0,
+    "top1_exact_cases": 0,
+    "top3_useful_cases": 0,
+    "wrong_model_rejections": 269,
+    "acceptance_pass": false
+  },
+  "source_attempts": {
+    "ozon": {
+      "SUCCESS": 27,
+      "TIMEOUT": 3
+    },
+    "avito": {
+      "SUCCESS": 24,
+      "TIMEOUT": 6
+    },
+    "shopping_search": {
+      "SUCCESS": 19,
+      "TIMEOUT": 6,
+      "ERROR_429": 5
+    },
+    "dns": {
+      "UNAUTHORIZED": 27,
+      "TIMEOUT": 3
+    },
+    "generic_exact": {
+      "SUCCESS": 6
+    }
+  },
+  "diagnosis": [
+    "SearchApi secret was accepted and the structured source returned candidates before quota exhaustion.",
+    "Legacy price guard removed provider price fields before the V2 adapter recovered them, so valid_price_rate stayed zero.",
+    "The free monthly SearchApi quota was exhausted during the acceptance and diagnostic runs; the provider then returned HTTP 429.",
+    "Source-level failures were incorrectly counted as case system errors in this baseline."
+  ],
+  "repairs_after_run": [
+    "Recover SearchApi extracted_price and currency before common V2 normalization.",
+    "Prefer direct retailer product links over Google aggregation links.",
+    "Classify HTTP 429 as RATE_LIMITED and expose the sanitized provider reason.",
+    "Add a process-local circuit breaker so one quota response stops repeated provider calls.",
+    "Separate case system errors from partial source errors in acceptance metrics.",
+    "Add a SearchApi account/quota preflight before manual acceptance workflows."
+  ],
+  "next_live_gate": {
+    "requires": "SearchApi quota reset/upgrade or SERPAPI_API_KEY fallback",
+    "targets": {
+      "completed_cases": 30,
+      "system_error_cases": 0,
+      "top1_exact_min": 24,
+      "top3_useful_min": 28
+    }
+  }
+}
