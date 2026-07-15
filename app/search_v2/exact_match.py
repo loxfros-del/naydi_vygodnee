@@ -6,6 +6,12 @@ from dataclasses import replace
 from typing import Any
 
 from .models import ExactMatchResult, Offer, ProductCondition, SearchRequestV2
+from .request_semantics import (
+    category_title_matches,
+    is_generic_request,
+    meaningful_model_tokens,
+    semantic_tokens,
+)
 
 
 _ACCESSORY_MARKERS = (
@@ -13,10 +19,25 @@ _ACCESSORY_MARKERS = (
     "адаптер", "кронштейн", "наушники для", "клавиатура для", "запчаст",
 )
 _MODIFIERS = {"pro", "max", "ultra", "plus", "mini", "air", "se"}
+_MINIMUM_NUMERIC_KEYS = {"refresh_rate", "hz", "ram_gb", "ssd_gb"}
+_RESOLUTION_ALIASES = {
+    "4k": "4k",
+    "uhd": "4k",
+    "3840x2160": "4k",
+    "2160p": "4k",
+    "qhd": "qhd",
+    "2k": "qhd",
+    "2560x1440": "qhd",
+    "1440p": "qhd",
+    "fhd": "fhd",
+    "fullhd": "fhd",
+    "1920x1080": "fhd",
+    "1080p": "fhd",
+}
 
 
 def _tokens(value: Any) -> list[str]:
-    return re.findall(r"[0-9a-zа-я]+", str(value or "").replace("ё", "е").casefold())
+    return semantic_tokens(value)
 
 
 def _number(value: Any) -> float | None:
@@ -30,19 +51,47 @@ def _candidate_spec(offer: Offer, key: str) -> Any:
     identity = offer.identity
     if identity is None:
         return None
+    configuration = identity.key_configuration or {}
     aliases = {
         "storage": identity.storage,
         "storage_gb": identity.storage,
         "memory": identity.storage,
+        "ssd_gb": configuration.get("ssd_gb", identity.storage),
+        "ram": configuration.get("ram_gb", configuration.get("ram")),
+        "ram_gb": configuration.get("ram_gb", configuration.get("ram")),
         "size": identity.size,
         "diagonal": identity.diagonal,
         "refresh_rate": identity.refresh_rate,
         "hz": identity.refresh_rate,
+        "resolution": configuration.get("resolution"),
+        "features": configuration.get("features", ()),
+        "cpu": configuration.get("cpu", configuration.get("cpu_family")),
+        "cpu_family": configuration.get("cpu_family", configuration.get("cpu")),
         "condition": identity.condition,
     }
     if key in aliases:
-        return aliases[key]
-    return identity.key_configuration.get(key, offer.facts.get(key))
+        value = aliases[key]
+        return value if value not in (None, "", [], (), {}) else offer.facts.get(key)
+    return configuration.get(key, offer.facts.get(key))
+
+
+def _resolution(value: Any) -> str:
+    compact = "".join(_tokens(value))
+    for alias, canonical in _RESOLUTION_ALIASES.items():
+        if alias in compact:
+            return canonical
+    return compact
+
+
+def _feature_tokens(value: Any) -> set[str]:
+    if isinstance(value, (list, tuple, set, frozenset)):
+        text = " ".join(str(item) for item in value)
+    else:
+        text = str(value or "")
+    tokens = set(_tokens(text))
+    if "шумоподавление" in tokens or ("активное" in tokens and "шумоподавление" in tokens):
+        tokens.add("anc")
+    return tokens
 
 
 def _different(required: Any, candidate: Any, key: str) -> bool:
@@ -52,8 +101,14 @@ def _different(required: Any, candidate: Any, key: str) -> bool:
         required_value = required.value if isinstance(required, ProductCondition) else str(required).casefold()
         candidate_value = candidate.value if isinstance(candidate, ProductCondition) else str(candidate).casefold()
         return required_value not in {"", "any"} and candidate_value != required_value
+    if key == "features":
+        return not _feature_tokens(required).issubset(_feature_tokens(candidate))
+    if key == "resolution":
+        return _resolution(required) != _resolution(candidate)
     required_number, candidate_number = _number(required), _number(candidate)
     if required_number is not None and candidate_number is not None:
+        if key in _MINIMUM_NUMERIC_KEYS:
+            return candidate_number + 0.01 < required_number
         return abs(required_number - candidate_number) > 0.01
     return " ".join(_tokens(required)) != " ".join(_tokens(candidate))
 
@@ -66,8 +121,14 @@ def evaluate_exact_match(request: SearchRequestV2, offer: Offer) -> ExactMatchRe
     if not offer.identity:
         return ExactMatchResult.UNKNOWN
 
-    model_tokens = _tokens(request.canonical_model)
-    if model_tokens and not all(token in title_tokens for token in model_tokens):
+    generic_request = is_generic_request(request)
+    if generic_request:
+        if not category_title_matches(request.category, offer.title):
+            return ExactMatchResult.MODEL_MISMATCH
+        required_model_tokens = meaningful_model_tokens(request)
+    else:
+        required_model_tokens = _tokens(request.canonical_model)
+    if required_model_tokens and not all(token in title_tokens for token in required_model_tokens):
         return ExactMatchResult.MODEL_MISMATCH
 
     required_modifiers = set(_tokens(" ".join(request.model_modifiers))) & _MODIFIERS
@@ -76,7 +137,7 @@ def evaluate_exact_match(request: SearchRequestV2, offer: Offer) -> ExactMatchRe
         return ExactMatchResult.MODEL_MISMATCH
     # A different named variant is a different product, not a soft preference.
     conflicting = candidate_modifiers - required_modifiers
-    if conflicting and (required_modifiers or model_tokens):
+    if conflicting and (required_modifiers or not generic_request):
         return ExactMatchResult.MODEL_MISMATCH
 
     if request.condition is not ProductCondition.ANY:
@@ -88,19 +149,19 @@ def evaluate_exact_match(request: SearchRequestV2, offer: Offer) -> ExactMatchRe
     required_specs = dict(request.required_specs or {})
     for key, required in required_specs.items():
         candidate = _candidate_spec(offer, str(key))
-        if candidate in (None, "", ProductCondition.UNKNOWN):
+        if candidate in (None, "", ProductCondition.UNKNOWN, [], (), {}):
             missing_required = True
             continue
         if _different(required, candidate, str(key)):
             return ExactMatchResult.REQUIRED_SPEC_MISMATCH
 
-    if not model_tokens:
-        # Category requests (TV, monitor, laptop, chair) can still be exact
-        # when every explicit hard specification is present. A broad request
-        # without structured requirements remains GENERIC_MATCH/manual-only.
-        if required_specs and not missing_required:
-            return ExactMatchResult.EXACT
-        return ExactMatchResult.GENERIC_MATCH
+    if generic_request:
+        # A category request is exact when all explicit hard requirements were
+        # observed. Missing facts stay manual-only rather than becoming trash.
+        if missing_required:
+            return ExactMatchResult.GENERIC_MATCH
+        return ExactMatchResult.EXACT
+
     if missing_required or offer.identity.identity_confidence < 0.65:
         return ExactMatchResult.GENERIC_MATCH
     return ExactMatchResult.EXACT
