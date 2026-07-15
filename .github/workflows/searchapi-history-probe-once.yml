@@ -1,0 +1,38 @@
+name: SearchApi history probe once
+
+on:
+  pull_request:
+    paths:
+      - .ci/run-searchapi-history-probe-once
+      - .github/workflows/searchapi-history-probe-once.yml
+      - tools/searchapi_history_probe.py
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PYTHONUTF8: "1"
+      SEARCHAPI_API_KEY: ${{ secrets.SEARCHAPI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Read one recent successful shopping response
+        run: python tools/searchapi_history_probe.py > searchapi-history-probe.log 2>&1
+      - name: Upload sanitized history evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: searchapi-history-probe-once
+          path: |
+            data/searchapi_history_probe.json
+            searchapi-history-probe.log
+          if-no-files-found: error
+          retention-days: 7
