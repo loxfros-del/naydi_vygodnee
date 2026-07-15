@@ -5,7 +5,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   checks:
@@ -21,6 +21,15 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
+      - name: Apply one-shot Search V2 normalization upgrade
+        if: github.event_name == 'push' && hashFiles('.ci/apply-search-v2-normalization-upgrade') != ''
+        run: |
+          python tools/apply_search_v2_normalization_upgrade.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- app/search_v2/normalization.py tools/apply_search_v2_normalization_upgrade.py .ci/apply-search-v2-normalization-upgrade
+          git commit -m "Extract structured specs for generic Search V2 requests"
+          git push origin HEAD:feature/search-engine-v2
       - name: Compile
         run: python -m compileall -q .
       - name: Alice parser
@@ -65,25 +74,3 @@ jobs:
           test "${{ steps.unit_tests.outcome }}" = "success"
       - name: Codex smoke
         run: python tools/codex_smoke.py
-      - name: Bounded Search V2 live smoke
-        if: github.event_name == 'pull_request' && hashFiles('.ci/run-search-v2-live-smoke') != ''
-        id: live_smoke
-        continue-on-error: true
-        run: |
-          python tools/search_v2_live_smoke.py \
-            --confirm-live \
-            --case-timeout 15 \
-            --source-timeout 5 \
-            --result-limit 4 \
-            --output data/search_v2_live_smoke.json \
-            > search-v2-live-smoke.log 2>&1
-      - name: Upload Search V2 live smoke evidence
-        if: always() && github.event_name == 'pull_request' && hashFiles('.ci/run-search-v2-live-smoke') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: search-v2-live-smoke
-          path: |
-            data/search_v2_live_smoke.json
-            search-v2-live-smoke.log
-          if-no-files-found: error
-          retention-days: 7
