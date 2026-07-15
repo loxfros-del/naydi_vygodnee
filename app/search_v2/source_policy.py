@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping
 
 from app.search_v2.models import SourceQuery
 
@@ -10,7 +10,9 @@ from .adapters.base import validate_source_query
 from .source_registry import SourceRegistry, canonical_source_name
 
 
-DISCOVERY_CORE = ("yandex_market", "ozon", "avito", "wildberries")
+# Price-bearing structured shopping comes first when configured. The adapter is
+# a no-I/O EMPTY source without credentials, so Ozon and Avito remain usable.
+DISCOVERY_CORE = ("shopping_search", "yandex_market", "ozon", "avito", "wildberries")
 RELIABLE_ANCHORS = ("dns", "citilink", "mvideo")
 GENERIC_FALLBACK = ("generic_exact",)
 
