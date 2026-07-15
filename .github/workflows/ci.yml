@@ -5,7 +5,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   checks:
@@ -21,15 +21,6 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Apply one-shot Search V2 normalization upgrade
-        if: github.event_name == 'push' && hashFiles('.ci/apply-search-v2-normalization-upgrade') != ''
-        run: |
-          python tools/apply_search_v2_normalization_upgrade.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A -- app/search_v2/normalization.py tools/apply_search_v2_normalization_upgrade.py .ci/apply-search-v2-normalization-upgrade
-          git commit -m "Extract structured specs for generic Search V2 requests"
-          git push origin HEAD:feature/search-engine-v2
       - name: Compile
         run: python -m compileall -q .
       - name: Alice parser
