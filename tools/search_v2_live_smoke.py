@@ -119,6 +119,7 @@ async def run(args: argparse.Namespace) -> int:
         page_verifier=verify_offer_page,
         page_verification_timeout=min(6.0, args.source_timeout),
         page_verification_limit=4,
+        discovery_sources=("shopping_search", "ozon", "avito"),
     )
 
     for case_id, request in cases():
