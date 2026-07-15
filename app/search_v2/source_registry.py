@@ -11,6 +11,7 @@ from .adapters import (
     GenericExactSearchAdapter,
     MVideoAdapter,
     OzonAdapter,
+    ShoppingSearchAdapter,
     SourceAdapter,
     WildberriesAdapterV2,
     YandexMarketAdapter,
@@ -18,6 +19,10 @@ from .adapters import (
 
 
 SOURCE_ALIASES = {
+    "shopping": "shopping_search",
+    "google_shopping": "shopping_search",
+    "searchapi_google_shopping": "shopping_search",
+    "serpapi_google_shopping": "shopping_search",
     "yandex": "yandex_market",
     "yandex_market_search": "yandex_market",
     "yandex_market_direct": "yandex_market",
@@ -92,6 +97,7 @@ class SourceRegistry:
 
 def build_default_registry(*, include_optional: bool = True) -> SourceRegistry:
     adapters: list[SourceAdapter] = [
+        ShoppingSearchAdapter(),
         YandexMarketAdapter(),
         OzonAdapter(),
         AvitoAdapter(),
@@ -99,7 +105,7 @@ def build_default_registry(*, include_optional: bool = True) -> SourceRegistry:
         GenericExactSearchAdapter(),
     ]
     if include_optional:
-        adapters[3:3] = [WildberriesAdapterV2()]
+        adapters[4:4] = [WildberriesAdapterV2()]
         adapters[-1:-1] = [CitilinkAdapter(), MVideoAdapter()]
     return SourceRegistry(adapters)
 
