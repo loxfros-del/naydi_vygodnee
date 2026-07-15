@@ -5,7 +5,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   checks:
@@ -21,15 +21,6 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Apply one-shot independent feature-token repair
-        if: github.event_name == 'push' && hashFiles('.ci/apply-search-v2-feature-tokens') != ''
-        run: |
-          python tools/apply_search_v2_feature_tokens.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A -- app/search_v2/request_normalizer.py tools/test_search_v2_acceptance_runner.py tools/apply_search_v2_feature_tokens.py .ci/apply-search-v2-feature-tokens
-          git commit -m "Keep feature requirements as independent hard tokens"
-          git push origin HEAD:feature/search-engine-v2
       - name: Compile
         run: python -m compileall -q .
       - name: Alice parser
