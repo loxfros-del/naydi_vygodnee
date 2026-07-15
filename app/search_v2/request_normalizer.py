@@ -234,7 +234,12 @@ def normalize_legacy_request(request: Any) -> SearchRequestV2:
     if base_model:
         hard_tokens.append(base_model)
     hard_tokens.extend(modifiers)
-    hard_tokens.extend(spec_token(key, value) for key, value in required_specs.items())
+    for key, value in required_specs.items():
+        values = value if isinstance(value, (list, tuple, set, frozenset)) else (value,)
+        for item in values:
+            token = spec_token(key, item)
+            if token:
+                hard_tokens.append(token)
     if condition not in {ProductCondition.ANY, ProductCondition.UNKNOWN}:
         hard_tokens.append(condition.value)
 
