@@ -143,9 +143,10 @@ def _feature_tokens(value: Any) -> list[str]:
 
 
 def spec_token(key: str, value: Any) -> str:
-    """Canonical human token used by both normalizer and planner validation."""
+    """Canonical searchable token used by planner validation and source queries."""
     if value in (None, "", False):
         return ""
+    key = str(key).casefold()
     if key == "storage_gb":
         return f"{value} ГБ"
     if key == "ram_gb":
@@ -156,10 +157,25 @@ def spec_token(key: str, value: Any) -> str:
         return f"{value} дюймов"
     if key == "refresh_rate":
         return f"{value} Гц"
+    if key == "load_capacity_kg":
+        return f"нагрузка {value} кг"
     if key == "size":
-        return str(value).replace("х", "x").replace("×", "x")
+        return f"размер {str(value).replace('х', 'x').replace('×', 'x')}"
+    if key == "type":
+        return {"office": "офисное", "ergonomic": "эргономичное", "gaming": "игровое"}.get(str(value).casefold(), _clean(value))
+    if key == "material":
+        return {"mesh": "сетчатое"}.get(str(value).casefold(), _clean(value))
+    if key in {"matrix", "resolution", "cpu", "cpu_family", "gpu", "connector", "form_factor"}:
+        return _clean(value)
     if isinstance(value, bool):
-        return key.replace("_", " ") if value else ""
+        translations = {
+            "anc": "ANC",
+            "wireless": "беспроводные",
+            "ultrawide": "ультраширокий",
+            "headrest": "подголовник",
+            "lumbar_support": "поясничная поддержка",
+        }
+        return translations.get(key, key.replace("_", " ")) if value else ""
     if isinstance(value, (list, tuple, set)):
         return " ".join(_clean(item) for item in value if _clean(item))
     return _clean(value)

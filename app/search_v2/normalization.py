@@ -26,6 +26,8 @@ _SPACE_RE = re.compile(r"\s+")
 _STORAGE_RE = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*(тб|tb|гб|gb)(?!\w)", re.I)
 _DIAGONAL_RE = re.compile(r"(?<!\d)(\d{2}(?:[.,]\d)?)\s*(?:[\"″]|дюйм|inch)", re.I)
 _REFRESH_RE = re.compile(r"(?<!\d)(\d{2,3})\s*(?:гц|hz)(?!\w)", re.I)
+_LOAD_RE = re.compile(r"(?:нагрузк\w*|до)\D{0,16}(\d{2,3})\s*(?:кг|kg)", re.I)
+_SIZE_RE = re.compile(r"(?:размер|size)\s*[-:]?\s*([abc])\b", re.I)
 _RAM_SUFFIX_RE = re.compile(r"(?<!\d)(\d{1,3})\s*(?:гб|gb)\s*(?:ram|озу)\b", re.I)
 _RAM_PREFIX_RE = re.compile(r"(?:ram|озу)\s*[-:]?\s*(\d{1,3})\s*(?:гб|gb)?", re.I)
 _SSD_PREFIX_RE = re.compile(r"\bssd\s*[-:]?\s*(\d{3,4})\s*(?:гб|gb)?", re.I)
@@ -145,7 +147,67 @@ def extract_features(value: Any) -> list[str]:
         features.append("ANC")
     if re.search(r"\btws\b|true\s+wireless", text, re.I):
         features.append("TWS")
+    if re.search(r"\bwireless\b|беспроводн", text, re.I):
+        features.append("wireless")
     return features
+
+
+def extract_category_facts(value: Any, category: str = "") -> dict[str, Any]:
+    text = normalize_key(value)
+    compact = text.replace(" ", "")
+    facts: dict[str, Any] = {}
+
+    for marker, canonical in (
+        ("mini led", "Mini LED"),
+        ("miniled", "Mini LED"),
+        ("oled", "OLED"),
+        ("qled", "QLED"),
+        ("ips", "IPS"),
+        (" va ", "VA"),
+        (" tn ", "TN"),
+    ):
+        haystack = f" {text} " if marker.startswith(" ") else text
+        if marker in haystack:
+            facts["matrix"] = canonical
+            break
+
+    if any(marker in compact for marker in ("usb-c", "usbc", "usbtype-c", "type-c")):
+        facts["connector"] = "USB-C"
+    elif "lightning" in text:
+        facts["connector"] = "Lightning"
+
+    if re.search(r"\bwireless\b|беспроводн", text, re.I):
+        facts["wireless"] = True
+    if re.search(r"\btws\b|true\s+wireless", text, re.I):
+        facts["form_factor"] = "TWS"
+    if re.search(r"ultra\s*wide|ультраширок", text, re.I):
+        facts["ultrawide"] = True
+
+    gpu = re.search(r"\b(?:rtx|gtx|rx)\s*[- ]?\d{3,4}(?:\s*ti)?\b", text, re.I)
+    if gpu:
+        facts["gpu"] = " ".join(gpu.group(0).upper().replace("-", " ").split())
+
+    if str(category).casefold() == "chair" or any(marker in text for marker in ("кресло", "chair")):
+        if re.search(r"эргономич|ergonomic", text, re.I):
+            facts["type"] = "ergonomic"
+        elif re.search(r"игров|gaming", text, re.I):
+            facts["type"] = "gaming"
+        elif re.search(r"офисн|office|компьютерн", text, re.I):
+            facts["type"] = "office"
+        if re.search(r"сетчат|mesh|сетка", text, re.I):
+            facts["material"] = "mesh"
+        if re.search(r"подголовник|headrest", text, re.I):
+            facts["headrest"] = True
+        if re.search(r"пояснич|lumbar", text, re.I):
+            facts["lumbar_support"] = True
+        load = _LOAD_RE.search(text)
+        if load:
+            facts["load_capacity_kg"] = int(load.group(1))
+        size = _SIZE_RE.search(text)
+        if size:
+            facts["size"] = size.group(1).upper()
+
+    return facts
 
 
 def extract_cpu_family(value: Any) -> str | None:
@@ -323,6 +385,16 @@ def build_product_identity(raw: RawOffer, request: SearchRequestV2) -> ProductId
         "size",
         "resolution",
         "features",
+        "matrix",
+        "connector",
+        "wireless",
+        "form_factor",
+        "ultrawide",
+        "type",
+        "material",
+        "headrest",
+        "lumbar_support",
+        "load_capacity_kg",
     ):
         if key in metadata and key not in key_configuration:
             key_configuration[key] = metadata[key]
@@ -332,6 +404,7 @@ def build_product_identity(raw: RawOffer, request: SearchRequestV2) -> ProductId
     resolution = extract_resolution(evidence)
     features = extract_features(evidence)
     cpu_family = extract_cpu_family(evidence)
+    category_facts = extract_category_facts(evidence, request.category)
     if ram_gb is not None:
         key_configuration.setdefault("ram_gb", ram_gb)
     if ssd_gb is not None:
@@ -345,6 +418,8 @@ def build_product_identity(raw: RawOffer, request: SearchRequestV2) -> ProductId
         key_configuration["features"] = list(dict.fromkeys([*current_features, *features]))
     if cpu_family:
         key_configuration.setdefault("cpu_family", cpu_family)
+    for key, value in category_facts.items():
+        key_configuration.setdefault(key, value)
 
     identity_confidence = 0.9 if model_matched else (0.7 if metadata_model else 0.6)
     identity = ProductIdentity(
@@ -357,7 +432,7 @@ def build_product_identity(raw: RawOffer, request: SearchRequestV2) -> ProductId
         canonical_model=canonical_model,
         modifiers=modifiers,
         storage=storage,
-        size=str(metadata.get("size") or "") or None,
+        size=str(metadata.get("size") or key_configuration.get("size") or "") or None,
         diagonal=diagonal,
         refresh_rate=refresh,
         key_configuration=key_configuration,
@@ -432,6 +507,7 @@ def normalize_offers(raws: Iterable[RawOffer], request: SearchRequestV2) -> list
 __all__ = [
     "build_product_identity",
     "canonicalize_url",
+    "extract_category_facts",
     "extract_cpu_family",
     "extract_features",
     "extract_modifiers",
