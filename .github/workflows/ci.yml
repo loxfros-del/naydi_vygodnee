@@ -4,11 +4,16 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   checks:
     runs-on: ubuntu-latest
     env:
       PYTHONUTF8: "1"
+      BOT_TOKEN: "123456:ci_test_token"
+      ADMIN_IDS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,6 +21,15 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
+      - name: Apply one-shot Search V2 repairs
+        if: github.event_name == 'push' && hashFiles('.ci/apply-search-v2-repairs') != ''
+        run: |
+          python tools/apply_search_v2_repairs.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- app/alice_service.py tools/apply_search_v2_repairs.py .ci/apply-search-v2-repairs
+          git commit -m "Fix Alice postscript filtering"
+          git push origin HEAD:feature/search-engine-v2
       - name: Compile
         run: python -m compileall -q .
       - name: Alice parser
