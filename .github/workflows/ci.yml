@@ -7,6 +7,8 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    env:
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -15,12 +17,31 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile
-        run: python -m compileall .
+        run: python -m compileall -q .
       - name: Alice parser
-        run: python tools/test_alice_parser.py
+        id: alice_parser
+        continue-on-error: true
+        run: python tools/test_alice_parser.py > alice-parser.log 2>&1
+      - name: Upload Alice parser diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alice-parser-log
+          path: alice-parser.log
+          if-no-files-found: error
+          retention-days: 7
+      - name: Check Alice parser result
+        if: always()
+        run: |
+          cat alice-parser.log
+          test "${{ steps.alice_parser.outcome }}" = "success"
       - name: AI cards
         run: python tools/test_ai_cards.py
       - name: Report readiness
         run: python tools/test_report_readiness.py
       - name: DB migration
         run: python tools/test_db_migration.py
+      - name: Unit tests
+        run: python -m unittest discover
+      - name: Codex smoke
+        run: python tools/codex_smoke.py
