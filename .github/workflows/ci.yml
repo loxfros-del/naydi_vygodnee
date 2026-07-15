@@ -65,3 +65,25 @@ jobs:
           test "${{ steps.unit_tests.outcome }}" = "success"
       - name: Codex smoke
         run: python tools/codex_smoke.py
+      - name: Priced Search V2 live smoke
+        if: github.event_name == 'pull_request' && hashFiles('.ci/run-search-v2-priced-smoke') != ''
+        id: live_smoke
+        continue-on-error: true
+        run: |
+          python tools/search_v2_live_smoke.py \
+            --confirm-live \
+            --case-timeout 24 \
+            --source-timeout 6 \
+            --result-limit 8 \
+            --output data/search_v2_live_smoke.json \
+            > search-v2-live-smoke.log 2>&1
+      - name: Upload priced Search V2 evidence
+        if: always() && github.event_name == 'pull_request' && hashFiles('.ci/run-search-v2-priced-smoke') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-v2-live-smoke-priced
+          path: |
+            data/search_v2_live_smoke.json
+            search-v2-live-smoke.log
+          if-no-files-found: error
+          retention-days: 14
