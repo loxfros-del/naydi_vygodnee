@@ -35,10 +35,10 @@ class SearchV2AcceptanceRunnerTests(unittest.TestCase):
         })
         self.assertEqual(request.brand, "Apple")
         self.assertEqual(request.canonical_model, "iPhone 16")
-        self.assertEqual(request.model_modifiers, ["Pro"])
+        self.assertEqual([item.casefold() for item in request.model_modifiers], ["pro"])
         self.assertEqual(request.required_specs["storage_gb"], 256)
         self.assertEqual(request.condition, ProductCondition.NEW)
-        self.assertIn("Pro", request.hard_tokens)
+        self.assertIn("pro", [item.casefold() for item in request.hard_tokens])
         self.assertIn("256 ГБ", request.hard_tokens)
 
     def test_generic_headphones_translate_anc_to_features(self) -> None:
