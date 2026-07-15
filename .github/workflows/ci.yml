@@ -47,6 +47,21 @@ jobs:
       - name: DB migration
         run: python tools/test_db_migration.py
       - name: Unit tests
-        run: python -m unittest discover
+        id: unit_tests
+        continue-on-error: true
+        run: python -m unittest discover > unit-tests.log 2>&1
+      - name: Upload unit test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-tests-log
+          path: unit-tests.log
+          if-no-files-found: error
+          retention-days: 7
+      - name: Check unit test result
+        if: always()
+        run: |
+          cat unit-tests.log
+          test "${{ steps.unit_tests.outcome }}" = "success"
       - name: Codex smoke
         run: python tools/codex_smoke.py
