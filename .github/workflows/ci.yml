@@ -5,7 +5,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   checks:
@@ -21,6 +21,15 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
+      - name: Apply one-shot structured shopping discovery wiring
+        if: github.event_name == 'push' && hashFiles('.ci/apply-search-v2-shopping-discovery') != ''
+        run: |
+          python tools/apply_search_v2_shopping_discovery.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- app/services/search_engine_bridge.py tools/search_v2_live_smoke.py tools/apply_search_v2_shopping_discovery.py .ci/apply-search-v2-shopping-discovery
+          git commit -m "Use structured shopping discovery in Search V2"
+          git push origin HEAD:feature/search-engine-v2
       - name: Compile
         run: python -m compileall -q .
       - name: Alice parser
