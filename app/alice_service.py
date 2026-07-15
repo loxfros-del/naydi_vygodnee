@@ -714,7 +714,19 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
             item["within_budget"] = item["price_num"] <= budget
 
         name_key = re.sub(r"[^a-zа-яё0-9]+", "", item["name"].lower())
-        has_details = bool(item["price_num"] or item["store"] or item["link"] or item["pluses"] or item["risks"])
+        # The placeholder store is presentation fallback, not product evidence.
+        # Without this gate a conversational postscript such as
+        # "Надеюсь, это поможет" could become a fake product card.
+        has_real_store = bool(
+            item["store"] and item["store"] != "магазин нужно уточнить"
+        )
+        has_details = bool(
+            item["price_num"]
+            or has_real_store
+            or item["link"]
+            or item["pluses"]
+            or item["risks"]
+        )
         if len(item["name"]) >= 3 and has_details and name_key and name_key not in seen_names:
             seen_names.add(name_key)
             items.append(item)
