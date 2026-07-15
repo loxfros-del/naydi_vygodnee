@@ -93,7 +93,7 @@ class SearchV2RequestNormalizerTests(unittest.TestCase):
         })
         self.assertEqual(mattress.category, "mattress")
         self.assertEqual(mattress.required_specs["size"], "160x200")
-        self.assertIn("160x200", mattress.hard_tokens)
+        self.assertIn("160x200", " ".join(mattress.hard_tokens))
 
     def test_string_request_is_supported_and_has_no_transport_dependency(self) -> None:
         request = normalize_legacy_request("новый iPhone 16 Pro 256 ГБ до 80к в Ярославле")
