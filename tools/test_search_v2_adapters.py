@@ -12,6 +12,7 @@ from app.search_v2.adapters import (
     GenericExactSearchAdapter,
     MVideoAdapter,
     OzonAdapter,
+    ShoppingSearchAdapter,
     WildberriesAdapterV2,
     YandexMarketAdapter,
 )
@@ -217,21 +218,23 @@ class AdapterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(WildberriesAdapterV2().capabilities.optional)
         self.assertTrue(CitilinkAdapter().capabilities.optional)
         self.assertTrue(MVideoAdapter().capabilities.optional)
+        self.assertTrue(ShoppingSearchAdapter().capabilities.structured_endpoint)
         self.assertEqual(GenericExactSearchAdapter().capabilities.kind, "fallback")
 
 
 class RegistryAndPolicyTests(unittest.TestCase):
     def test_default_registry_and_aliases(self) -> None:
         registry = build_default_registry()
-        self.assertEqual(len(registry), 8)
+        self.assertEqual(len(registry), 9)
         self.assertIs(registry.get("ozon_search"), registry.get("ozon"))
         self.assertIs(registry.get("dns_direct"), registry.get("dns"))
         self.assertIs(registry.get("wb"), registry.get("wildberries"))
         self.assertEqual(canonical_source_name("market.yandex.ru"), "yandex_market")
+        self.assertEqual(canonical_source_name("serpapi_google_shopping"), "shopping_search")
         self.assertIn("generic_exact", registry.names())
 
         no_optional = build_default_registry(include_optional=False)
-        self.assertEqual(no_optional.names(), ("yandex_market", "ozon", "avito", "dns", "generic_exact"))
+        self.assertEqual(no_optional.names(), ("shopping_search", "yandex_market", "ozon", "avito", "dns", "generic_exact"))
         self.assertNotIn("wildberries", no_optional)
 
     def test_registry_rejects_duplicate_and_supports_replace(self) -> None:
