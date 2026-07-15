@@ -22,6 +22,7 @@ from app.search_cache import DEFAULT_CACHE_PATH, sanitize_payload
 from app.search_v2.cache import SQLiteSourceCache
 from app.search_v2.models import ProductCondition, SearchRequestV2
 from app.search_v2.orchestrator import SearchSourceOrchestrator
+from app.search_v2.page_verifier import verify_offer_page
 from app.search_v2.query_planner import QueryPlannerV2
 from app.search_v2.serialization import to_jsonable
 from app.search_v2.service import SearchServiceV2
@@ -115,7 +116,9 @@ async def run(args: argparse.Namespace) -> int:
         planner=QueryPlannerV2(max_queries_per_source=1),
         orchestrator=orchestrator,
         overall_timeout=args.case_timeout,
-        page_verifier=None,
+        page_verifier=verify_offer_page,
+        page_verification_timeout=min(6.0, args.source_timeout),
+        page_verification_limit=4,
     )
 
     for case_id, request in cases():

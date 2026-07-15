@@ -41,9 +41,10 @@ def _default_candidate_loader(request_id: int) -> Iterable[Any]:
 
 
 def _default_v2_service() -> Any:
+    from app.search_v2.page_verifier import verify_offer_page
     from app.search_v2.service import SearchServiceV2
 
-    return SearchServiceV2()
+    return SearchServiceV2(page_verifier=verify_offer_page, page_verification_limit=4)
 
 
 async def _call(value: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:

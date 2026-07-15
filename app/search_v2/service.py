@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+import inspect
 import re
 import time
 from typing import Any, Awaitable, Callable, Iterable
@@ -113,6 +114,7 @@ class SearchServiceV2:
         generic_sources: Iterable[str] = ("generic_search",),
         overall_timeout: float = 45.0,
         page_verification_timeout: float = 8.0,
+        page_verification_limit: int = 4,
     ) -> None:
         self.normalizer = normalizer
         self.planner = planner or QueryPlannerV2(max_queries_per_source=2)
@@ -133,6 +135,7 @@ class SearchServiceV2:
         self.generic_sources = tuple(generic_sources)
         self.overall_timeout = max(1.0, float(overall_timeout))
         self.page_verification_timeout = max(0.1, float(page_verification_timeout))
+        self.page_verification_limit = max(0, min(int(page_verification_limit or 0), 8))
 
     async def _stage(
         self,
@@ -265,13 +268,44 @@ class SearchServiceV2:
 
         offers, normalization_errors = self._normalize(raw_offers, normalized_request)
         errors.extend(normalization_errors)
-        if self.page_verifier and offers:
-            offers = await verify_offer_pages(
-                offers,
-                self.page_verifier,
-                max_concurrency=2,
-                timeout=self.page_verification_timeout,
-            )
+        if self.page_verifier and offers and self.page_verification_limit:
+            # Only exact product pages that still lack a price are opened. This
+            # keeps page verification bounded and avoids wasting network calls
+            # on hard mismatches, search pages or already priced offers.
+            eligible = [
+                offer for offer in offers
+                if offer.exact_match in {ExactMatchResult.EXACT, ExactMatchResult.COMPATIBLE_VARIANT}
+                and bool(offer.url)
+                and not bool(offer.raw_metadata.get("not_product_page"))
+                and not offer.price
+            ]
+            remaining = max(0.0, deadline - time.monotonic())
+            time_budget_limit = int((remaining * 2) // self.page_verification_timeout) if remaining else 0
+            selected = eligible[: min(self.page_verification_limit, max(0, time_budget_limit))]
+
+            async def bound_page_verifier(offer: Offer) -> Any:
+                verifier = self.page_verifier
+                if verifier is None:
+                    return None
+                try:
+                    parameters = inspect.signature(verifier).parameters
+                    accepts_request = len(parameters) >= 2
+                except (TypeError, ValueError):
+                    accepts_request = False
+                result = verifier(offer, normalized_request) if accepts_request else verifier(offer)
+                if inspect.isawaitable(result):
+                    return await result
+                return result
+
+            if selected:
+                verified = await verify_offer_pages(
+                    selected,
+                    bound_page_verifier,
+                    max_concurrency=2,
+                    timeout=self.page_verification_timeout,
+                )
+                by_verified_id = {offer.offer_id: offer for offer in verified}
+                offers = [by_verified_id.get(offer.offer_id, offer) for offer in offers]
 
         rejected: list[Offer] = []
         retained: list[Offer] = []
