@@ -24,6 +24,8 @@ snapshot = load_shadow_comparison(request.id)
 - `v2`: сохраняет нормализованные V2 offers через существующий persistence boundary; legacy вызывается только при системной ошибке, а не при обычном `NO_EXACT_MATCH`;
 - Telegram handlers не импортируют adapters и pipeline stages.
 
+Production/shadow V2 использует bounded discovery `shopping_search + ozon + avito`. `shopping_search` активируется только при настроенном SearchApi или SerpApi key. Без него adapter возвращает `EMPTY` без сетевого вызова, legacy и остальные V2 sources продолжают работать.
+
 ## Snapshots
 
 `SearchV2SnapshotStore` использует существующий `SearchCache` и namespaces:
@@ -35,13 +37,35 @@ snapshot = load_shadow_comparison(request.id)
 
 `build_shadow_comparison()` хранит кандидатов, rejected/wrong products, цены, рекомендации, source attempts, duration и errors. `load_shadow_comparison(request_id)` предназначен для Admin Debug. Shadow snapshot не является клиентским отчётом или product DB.
 
+## Acceptance
+
+30 реальных кейсов находятся в `tools/live_acceptance_cases.json`. Runner:
+
+```powershell
+python tools/search_v2_acceptance.py `
+  --confirm-live `
+  --cases tools/live_acceptance_cases.json `
+  --output data/search_v2_acceptance.json
+```
+
+Он сохраняет checkpoint после каждого case, не пишет secrets/raw HTML и честно фиксирует отсутствие цен или provider. В GitHub есть ручной workflow **Search V2 acceptance**. Для него используются repository secrets `SEARCHAPI_API_KEY` и/или `SERPAPI_API_KEY`; workflow никогда не стартует на обычный push.
+
+Проходные цели:
+
+- top-1 exact: минимум 24/30;
+- полезная рекомендация в top-3: минимум 28/30;
+- completed cases: 30/30;
+- system error cases: 0.
+
+Автоматический exact-match и наличие цены ещё не означают клиентское одобрение: blocked/manual offers проходят admin checklist перед карточкой.
+
 ## Порядок rollout
 
-1. Оставить `legacy`; прогнать deterministic/regression suites.
-2. Проверить один bounded live smoke и сохранение partial snapshot.
-3. Включить `shadow` только инфраструктурной настройкой; сравнить exact rate, wrong products, source diversity, prices и duration.
-4. Исправить расхождения; не снижать hard-match/manual-verification gates.
-5. Включать `v2` только отдельным операционным решением после стабильного shadow периода.
+1. Оставить `legacy`; deterministic/regression suites и GitHub CI должны быть зелёными.
+2. Настроить один structured price provider и прогнать bounded 30-case acceptance.
+3. Включить `shadow`; сравнить Legacy/V2 на реальных Telegram-заявках: exact rate, wrong products, source diversity, prices, seller и duration.
+4. Исправлять только воспроизводимые расхождения; не снижать hard-match/manual-verification gates.
+5. Включить `v2` сначала только для смартфонов после достижения acceptance targets и ручного Telegram end-to-end.
 6. Для немедленного rollback вернуть `legacy`; schema migration и удаление legacy не требуются.
 
-Для локальных tests режим лучше передавать аргументом `mode`, не редактируя `.env`. Автоматического production switch, commit или push эта миграция не выполняет.
+Для локальных tests режим лучше передавать аргументом `mode`, не редактируя `.env`. Автоматического production switch эта миграция не выполняет.
