@@ -108,9 +108,11 @@ def request_from_case(case: dict[str, Any]) -> SearchRequestV2:
         if item and item not in hard_tokens:
             hard_tokens.append(item)
     for key, value in specs.items():
-        token = spec_token(str(key), value)
-        if token and token not in hard_tokens:
-            hard_tokens.append(token)
+        values = value if isinstance(value, (list, tuple, set, frozenset)) else (value,)
+        for item in values:
+            token = spec_token(str(key), item)
+            if token and token not in hard_tokens:
+                hard_tokens.append(token)
     if condition not in {ProductCondition.ANY, ProductCondition.UNKNOWN}:
         hard_tokens.append(condition.value)
 

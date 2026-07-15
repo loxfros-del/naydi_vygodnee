@@ -58,7 +58,9 @@ class SearchV2AcceptanceRunnerTests(unittest.TestCase):
         })
         self.assertEqual(request.canonical_model, "наушники")
         self.assertEqual(request.required_specs["features"], ["ANC", "TWS", "wireless"])
-        self.assertIn("ANC TWS wireless", request.hard_tokens)
+        self.assertIn("ANC", request.hard_tokens)
+        self.assertIn("TWS", request.hard_tokens)
+        self.assertIn("wireless", request.hard_tokens)
 
     def test_used_allowed_case_uses_any_condition(self) -> None:
         request = request_from_case({
