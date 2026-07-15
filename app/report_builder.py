@@ -10,7 +10,17 @@ from app.db import (
     get_market_checks, MarketCheck,
 )
 from app.price_extractor import format_price
-from app.link_checks import LinkCheckStatus, store_url_matches
+from app.link_checks import store_url_matches
+from app.product_config import QUICK_SELECTION, get_service_package
+from app.services.ai_review import is_ai_card_client_approved
+from app.ai_cards_service import is_ai_card_candidate_eligible
+from app.services.recommendations import RecommendationService
+from app.verification_state import resolve_final_presentation
+from app.ui_formatters import (
+    format_client_card,
+    format_client_result_summary,
+    source_display_name,
+)
 
 
 
@@ -63,39 +73,71 @@ def _has_direct_link(url: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def _final_state(item: SearchResult) -> dict:
+    return resolve_final_presentation(getattr(item, "facts_json", "") or {})
+
+
+def _final_value(item: SearchResult, key: str, fallback: object = None) -> object:
+    final = _final_state(item)
+    return (final.get("final_facts") or {}).get(key, fallback)
+
+
 def _active_alice_items(req: Request) -> list[SearchResult]:
-    return [item for item in get_alice_results(req.id) if item.status != "REJECTED"]
+    return [
+        item for item in get_alice_results(req.id)
+        if item.status not in {"REJECTED", "REJECTED_AUTO", "DO_NOT_BUY", "CAUTION"}
+        and is_ai_card_client_approved(item)
+        and is_ai_card_candidate_eligible(item)
+    ]
+
+
+def _approved_alice_top(req: Request) -> SearchResult | None:
+    return next((item for item in _active_alice_items(req) if item.status in {"BEST", "TOP", "TOP1"}), None)
 
 
 def _alice_item_is_report_ready(item: SearchResult) -> bool:
     """Карточка допускается к финальному клиентскому отчёту только после проверки."""
+    final = _final_state(item)
+    url = str((final.get("final_facts") or {}).get("url") or item.url or "")
     return bool(
-        item.status in ("BEST", "APPROVED", "BACKUP", "APPROVED_BACKUP", "BUDGET", "APPROVED_BUDGET")
-        and item.price
-        and item.price_verified
-        and item.link_check_status == LinkCheckStatus.VERIFIED.value
-        and _has_direct_link(item.url)
-        and store_url_matches(item.source, item.url) is not False
+        is_ai_card_candidate_eligible(item)
+        and is_ai_card_client_approved(item)
+        and item.status in ("BEST", "APPROVED", "BACKUP", "APPROVED_BACKUP", "BUDGET", "APPROVED_BUDGET")
+        and final.get("presentation_ready")
+        and final.get("price_verified")
+        and final.get("link_verified")
+        and (final.get("final_facts") or {}).get("price", item.price)
+        and _has_direct_link(url)
+        and store_url_matches(item.source, url) is not False
     )
 
 
 def get_alice_report_issues(req: Request) -> tuple[str, int]:
     """Возвращает блокирующую причину и число неготовых не-ТОП карточек."""
     alice_items = _active_alice_items(req)
+    if get_alice_results(req.id) and not alice_items:
+        return "Нельзя отправить отчёт: утвердите хотя бы одну карточку.", 0
     if not alice_items:
         return "", 0
-    top = get_alice_top_result(req.id)
-    if not top or top.status == "REJECTED":
-        return "Нельзя отправить отчёт: выберите ТОП-1 среди карточек Алисы.", 0
+    top = _approved_alice_top(req)
+    if not top:
+        return "Нельзя отправить отчёт: выберите и утвердите ТОП-1.", 0
     if req.budget.isdigit() and top.price and top.price > int(req.budget):
         return "Нельзя отправить отчёт: ТОП-1 выше бюджета, перенесите его в блок «Осторожно».", 0
-    if top.link_check_status != LinkCheckStatus.VERIFIED.value:
-        return "Нельзя отправить отчёт: ссылка у ТОП-1 не подтверждена админом.", 0
-    if not top.price or not top.price_verified:
-        return "Нельзя отправить отчёт: цена у ТОП-1 не подтверждена админом.", 0
-    if not _has_direct_link(top.url):
+    final = _final_state(top)
+    final_facts = final.get("final_facts") or {}
+    final_url = str(final_facts.get("url") or top.url or "")
+    final_price = final_facts.get("price", top.price)
+    if not final.get("presentation_ready"):
+        fields = ", ".join(final.get("unresolved_fields") or [])
+        return f"Нельзя отправить отчёт: завершите финальную проверку ТОП-1 ({fields or 'есть блокирующая причина'}).", 0
+    if not final.get("link_verified"):
+        return "Нельзя отправить отчёт: ссылка у ТОП-1 не подтверждена.", 0
+    if not final_price or not final.get("price_verified"):
+        return "Нельзя отправить отчёт: цена у ТОП-1 не подтверждена.", 0
+    if not _has_direct_link(final_url):
         return "Нельзя отправить отчёт: у ТОП-1 должна быть прямая ссылка на товар.", 0
-    if store_url_matches(top.source, top.url) is False:
+    if store_url_matches(top.source, final_url) is False:
         return "Нельзя отправить отчёт: магазин и ссылка у ТОП-1 не совпадают.", 0
     excluded_other = sum(
         1 for item in alice_items
@@ -106,17 +148,35 @@ def get_alice_report_issues(req: Request) -> tuple[str, int]:
 
 def _alice_risks(item: SearchResult) -> list[str]:
     try:
-        return json.loads(item.risk_flags) if item.risk_flags else []
+        facts = json.loads(getattr(item, "facts_json", "") or "{}")
     except json.JSONDecodeError:
-        return []
+        facts = {}
+    facts = facts if isinstance(facts, dict) else {}
+    try:
+        raw_risks = json.loads(item.risk_flags) if item.risk_flags else []
+    except json.JSONDecodeError:
+        raw_risks = [item.risk_flags] if item.risk_flags else []
+    if not isinstance(raw_risks, list):
+        raw_risks = [raw_risks]
+    automatic = dict(facts.get("automatic_verification") or facts)
+    existing = automatic.get("warnings")
+    if not isinstance(existing, list):
+        existing = [existing] if existing else []
+    automatic["warnings"] = [*existing, *raw_risks]
+    facts["automatic_verification"] = automatic
+    final = resolve_final_presentation(facts)
+    return [str(value) for value in (final.get("warnings") or []) if str(value).strip()]
 
 
 def _format_alice_item(item: SearchResult) -> list[str]:
+    final_facts = _final_state(item).get("final_facts") or {}
+    final_price = final_facts.get("price", item.price)
+    final_url = str(final_facts.get("url") or item.url or "")
     lines = [f"Название: {html.escape(item.title or 'не указано')}"]
-    lines.append(f"Цена: {format_price(item.price) if item.price else 'уточнить'}")
+    lines.append(f"Цена: {format_price(final_price) if final_price else 'уточнить'}")
     lines.append(f"Где: {html.escape(item.source or 'уточнить')}")
-    if _has_direct_link(item.url):
-        lines.append(f"Ссылка: {_format_link(item.url)}")
+    if _has_direct_link(final_url):
+        lines.append(f"Ссылка: {_format_link(final_url)}")
     else:
         lines.append("Ссылку нужно уточнить вручную")
     lines.append(f"Почему: {html.escape(item.snippet or 'не указано')}")
@@ -243,129 +303,25 @@ def _alice_caution_reasons(item: SearchResult) -> str:
 
 
 def build_alice_client_report(req: Request) -> str:
-    """Полный отчёт клиенту — после оплаты. Все роли, полные блоки."""
-    alice_items = get_alice_results(req.id)  # все, включая REJECTED
-    active = _active_alice_items(req)  # без REJECTED
-    top = get_alice_top_result(req.id)
-    if not active or not top:
-        return "Нельзя отправить отчёт: выберите и оставьте хотя бы одну карточку Алисы."
-
-    # ТОП-1 должен быть report-ready
-    if not _alice_item_is_report_ready(top):
-        return "Нельзя отправить отчёт: ТОП-1 не прошёл ручную проверку ссылки и цены."
-
-    budget = int(req.budget) if req.budget and req.budget.isdigit() else None
-
+    """Безопасный клиентский отчёт: только APPROVED lifecycle и максимум 3 роли."""
+    issue, _excluded = get_alice_report_issues(req)
+    if issue:
+        return issue
+    recommendations = [
+        item for item in RecommendationService().for_request(req.id)
+        if _alice_item_is_report_ready(item.card)
+    ][:3]
+    if not recommendations or recommendations[0].role != "BEST":
+        return "Нельзя отправить отчёт: утверждённый ТОП-1 не готов."
+    cards = [item.card for item in recommendations]
     lines = [
-        "✅ <b>Подборка проверена вручную</b>",
-        "",
-        "Я посмотрел варианты, убрал слабые и оставил те, которые реально можно рассматривать к покупке.",
+        format_client_result_summary(req, cards, found_count=count_search_results(req.id)),
         "",
     ]
-
-    # ── 🏆 ТОП-1 ──
-    lines.append("🏆 <b>Лучший вариант — брать в первую очередь</b>")
-    lines.extend(_format_alice_item_full(top))
-    lines.append("")
-
-    # ── 🔍 Проверка рынка ──
-    market_checks = get_market_checks(req.id)
-    if market_checks:
-        lines.append("🔍 <b>Проверка на дешевле</b>")
-        lines.append("Самый дешёвый вариант я тоже проверил.")
-        for mc in market_checks:
-            verdict_text = {
-                "BUY": "Можно брать — вариант реальный и дешевле.",
-                "RELIABLE": "Надёжнее, но дороже.",
-                "DO_NOT_BUY": "Лучше не брать.",
-                "PROMOTED": "Добавлен в подборку.",
-            }.get(mc.verdict, "—")
-            lines.append(f"Вердикт: {verdict_text}")
-            if mc.reason:
-                lines.append(f"Почему: {html.escape(mc.reason)}")
-        lines.append("")
-
-    # ── Распределение по ролям из report-ready ──
-    eligible = [i for i in active if _alice_item_is_report_ready(i)]
-    other = [i for i in eligible if i.id != top.id]
-    other.sort(key=lambda i: _alice_report_item_score(i, budget), reverse=True)
-
-    backup: list[SearchResult] = []
-    budget_items: list[SearchResult] = []
-    approved_items: list[SearchResult] = []
-    leftover: list[SearchResult] = []
-
-    for item in other:
-        st = item.status or ""
-        if st in ("BACKUP", "APPROVED_BACKUP"):
-            backup.append(item)
-        elif st in ("BUDGET", "APPROVED_BUDGET"):
-            budget_items.append(item)
-        elif st == "APPROVED":
-            approved_items.append(item)
-        elif st in ("DO_NOT_BUY", "CAUTION"):
-            # эти не попадают в eligible для хороших блоков,
-            # обработаем ниже отдельно
-            pass
-        else:
-            leftover.append(item)
-
-    # ── Caution: берём из ВСЕХ active (не только eligible) со статусами DO_NOT_BUY/CAUTION ──
-    caution = [
-        i for i in active
-        if i.status in ("DO_NOT_BUY", "CAUTION") and i.id != top.id
-    ]
-    # Не исключаем caution без проверки ссылки — это блок «лучше не брать»
-    # Но REJECTED не показываем (уже отфильтровано _active_alice_items)
-
-    # ── ✅ Запасной ──
-    if backup:
-        lines.append("✅ <b>Запасной вариант</b>")
-        for item in backup[:2]:
-            lines.extend(_format_alice_item_full(item))
-            lines.append("")
-    elif leftover:
-        best_leftover = leftover[0]
-        lines.append("✅ <b>Запасной вариант</b>")
-        lines.extend(_format_alice_item_full(best_leftover))
-        lines.append("")
-
-    # ── 💰 Бюджетный ──
-    if budget_items:
-        lines.append("💰 <b>Бюджетный вариант</b>")
-        for item in budget_items[:2]:
-            lines.extend(_format_alice_item_full(item))
-            lines.append("")
-
-    # ── 📌 Ещё можно рассмотреть (APPROVED) ──
-    if approved_items:
-        lines.append("📌 <b>Ещё можно рассмотреть</b>")
-        for item in approved_items[:3]:
-            lines.extend(_format_alice_item_full(item))
-            lines.append("")
-
-    # ── ⚠️ Осторожно / лучше не брать ──
-    if caution:
-        lines.append("⚠️ <b>Осторожно / лучше не брать</b>")
-        for item in caution[:3]:
-            lines.extend(_format_alice_item_caution(item))
-            lines.append("")
-
-    # ── 🧠 Итог ──
-    top_title = html.escape(top.title or "ТОП-1")
-    top_price = f"за {format_price(top.price)}" if top.price else ""
-    top_source = f"в {html.escape(top.source)}" if top.source else ""
-    lines.append("🧠 <b>Итог</b>")
-    lines.append(f"Лучший выбор — {top_title} {top_price} {top_source}.".replace("  ", " ").strip())
-    lines.append("Если хотите максимально безопасно — берите ТОП-1.")
-    if budget_items:
-        lines.append("Если хотите сэкономить — можно рассмотреть бюджетный вариант, но с учётом рисков.")
-    if backup:
-        lines.append("Есть запасной вариант на случай, если ТОП-1 не будет в наличии.")
-    lines.append("")
-    lines.append("📌 Цена и наличие актуальны на момент ручной проверки.")
-    lines.append("Перед покупкой уточните наличие, доставку и гарантию.")
-    return "\n".join(lines)
+    for recommendation in recommendations:
+        lines.extend([format_client_card(recommendation.card, recommendation.role), ""])
+    lines.append("<i>Цена и наличие актуальны на дату проверки. Перед покупкой ещё раз уточните доставку и гарантию.</i>")
+    return "\n".join(lines).strip()
 
 
 def _alice_caution_count(items: list[SearchResult], budget: int | None) -> int:
@@ -400,13 +356,9 @@ def build_admin_preview(req: Request) -> str:
             }.get(item.status, "🟡 на проверке")
             lines.extend(["", f"<b>{index}. {status}</b>"])
             lines.extend(_format_alice_item(item))
-            link_status = {
-                LinkCheckStatus.NEEDED.value: "⚠️ ссылка нужна",
-                LinkCheckStatus.FOUND_UNVERIFIED.value: "🔍 ссылка найдена, но не проверена",
-                LinkCheckStatus.VERIFIED.value: "✅ ссылка проверена админом",
-                LinkCheckStatus.UNSUITABLE.value: "❌ ссылка не подходит",
-            }.get(item.link_check_status, "⚠️ ссылка нужна")
-            price_status = "✅ цена проверена" if item.price and item.price_verified else "⚠️ цену нужно подтвердить"
+            final = _final_state(item)
+            link_status = "✅ ссылка подтверждена" if final.get("link_verified") else "⚠️ ссылку нужно подтвердить"
+            price_status = "✅ цена подтверждена" if final.get("price_verified") else "⚠️ цену нужно подтвердить"
             lines.append(f"Статус проверки: {link_status}")
             lines.append(f"Статус цены: {price_status}")
         issue, missing = get_alice_report_issues(req)
@@ -466,7 +418,7 @@ def _build_client_teaser(req: Request) -> str:
     if alice_items:
         suitable = [item for item in alice_items if not budget or not item.price or item.price <= budget]
         total = len(suitable) or len(alice_items)
-        has_best = get_alice_top_result(req.id) is not None
+        has_best = _approved_alice_top(req) is not None
         has_reserve = sum(1 for i in alice_items if i.status in ("APPROVED", "BUDGET", "BACKUP", "APPROVED_BACKUP")) >= 1
         has_caution = _alice_caution_count(alice_items, budget) > 0
         market_checks = get_market_checks(req.id)
@@ -481,12 +433,12 @@ def _build_client_teaser(req: Request) -> str:
         has_market_check = False
 
     lines = ["✅ <b>Подборка готова</b>", ""]
-    lines.append("Я нашёл варианты под ваш запрос и вручную проверил основные риски.")
+    lines.append("Варианты собраны и прошли проверку специалиста.")
     lines.append("")
     lines.append("<b>Что уже сделано:</b>")
     if has_best:
         lines.append("• найден лучший вариант")
-    lines.append("• проверены цена и ссылка")
+    lines.append("• проверены соответствие модели, цена и основные риски")
     if has_reserve:
         lines.append("• есть запасные варианты")
     if has_market_check:
@@ -494,6 +446,7 @@ def _build_client_teaser(req: Request) -> str:
     if has_caution:
         lines.append("• отдельно отмечены варианты, которые лучше не брать")
 
+    package = get_service_package(getattr(req, "package_code", "") or QUICK_SELECTION.code) or QUICK_SELECTION
     lines.extend([
         "", "<b>В полном отчёте будет:</b>",
         "• ТОП-1 с прямой ссылкой",
@@ -501,7 +454,7 @@ def _build_client_teaser(req: Request) -> str:
         "• проверка на самый дешёвый вариант",
         "• риски по каждому варианту",
         "• итоговый совет перед покупкой",
-        "", "Стоимость отчёта: <b>149–299 ₽</b>",
+        "", f"Стоимость: <b>{html.escape(package.price_label)}</b>",
         "Оплата после того, как подборка готова.",
     ])
     return "\n".join(lines)
@@ -512,13 +465,22 @@ def _can_send_preview(req: Request) -> tuple[bool, str]:
     if get_alice_results(req.id):
         if not _active_alice_items(req):
             return False, "Нельзя отправить предпросмотр: не осталось карточек для клиента."
-        if not get_alice_top_result(req.id):
-            return False, "Нельзя отправить предпросмотр: выберите ТОП-1 среди карточек ИИ."
+        if not _approved_alice_top(req):
+            return False, "Нельзя отправить предпросмотр: выберите и утвердите ТОП-1."
         return True, ""
     total = count_search_results(req.id)
     approved = count_approved_results(req.id)
 
     if approved >= 1:
+        best = next((item for item in get_search_results(req.id) if item.status == "BEST"), None)
+        if not best:
+            return False, "Нельзя отправить предпросмотр: выберите лучший вариант."
+        final = _final_state(best)
+        final_facts = final.get("final_facts") or {}
+        if not final.get("presentation_ready"):
+            return False, "Нельзя отправить предпросмотр: завершите финальную проверку лучшего варианта."
+        if not final_facts.get("price", best.price) or not _has_direct_link(str(final_facts.get("url") or best.url or "")):
+            return False, "Нельзя отправить предпросмотр: у лучшего варианта нужны цена и прямая ссылка."
         return True, ""
     if total == 0:
         return False, "Нельзя отправить предпросмотр: автопоиск ничего не нашёл. Проверь debug поиска или добавь варианты вручную."
@@ -530,8 +492,17 @@ def _can_send_report(req: Request) -> tuple[bool, str]:
     alice_issue, _missing = get_alice_report_issues(req)
     if get_alice_results(req.id):
         return (not alice_issue, alice_issue)
-    approved = count_approved_results(req.id)
-    if approved >= 1:
+    approved = [item for item in get_search_results(req.id) if item.status in {"BEST", "CHEAP", "RELIABLE", "APPROVED"}]
+    best = next((item for item in approved if item.status == "BEST"), None)
+    if best:
+        final = _final_state(best)
+        final_facts = final.get("final_facts") or {}
+        if not final.get("presentation_ready"):
+            return False, "Нельзя отправить полный отчёт: финальная проверка лучшего варианта не завершена."
+        if not final_facts.get("price", best.price) or not final.get("price_verified"):
+            return False, "Нельзя отправить полный отчёт: цена лучшего варианта не подтверждена."
+        if not _has_direct_link(str(final_facts.get("url") or best.url or "")) or not final.get("link_verified"):
+            return False, "Нельзя отправить полный отчёт: ссылка лучшего варианта не подтверждена."
         return True, ""
     return False, "Нельзя отправить полный отчёт: нет подтверждённых вариантов."
 
@@ -562,78 +533,27 @@ def build_full_report(req: Request) -> str:
 
     if get_alice_results(req.id):
         return build_alice_client_report(req)
-
-    product = _get_product_display_name(req)
     found = get_search_results(req.id)
-
-    lines = [f"📊 <b>Полный отчёт: {product}</b>\n"]
-
-    if req.budget:
-        lines.append(f"💰 Бюджет: {format_price(int(req.budget)) if req.budget.isdigit() else req.budget}")
-    if req.city:
-        lines.append(f"📍 Город: {req.city}")
-    if req.use_case or req.purpose:
-        lines.append(f"🎯 Цель: {req.use_case or req.purpose}")
-    if req.important_criteria or req.criteria:
-        lines.append(f"📌 Критерии: {req.important_criteria or req.criteria}")
-
-    # PS5 — специальный блок
-    if _is_ps5_request(req):
-        lines.append(f"\n<i>{_get_ps5_criteria_text(req)}</i>")
-
-    lines.append("")
-
-    # Показываем подтверждённые варианты (со ссылками)
     approved_items = [r for r in found if r.status in ("BEST", "CHEAP", "RELIABLE", "APPROVED")]
-
-    if approved_items:
-        lines.append("<b>Рекомендуемые варианты:</b>\n")
-
-        # Сначала лучшие
-        sorted_items = sorted(
-            approved_items,
-            key=lambda x: (
-                0 if x.status == "BEST" else
-                1 if x.status == "RELIABLE" else
-                2 if x.status == "CHEAP" else 3
-            )
-        )
-
-        for i, item in enumerate(sorted_items, 1):
-            entry = f"{i}. <b>{item.title[:80]}</b>"
-            if item.price:
-                entry += f" — {format_price(item.price)}"
-            if item.source:
-                entry += f"\n   🏪 {item.source}"
-            if item.url:
-                entry += f"\n   🔗 {item.url}"
-
-            # Метка статуса
-            if item.status == "BEST":
-                entry += "\n   ⭐ <b>Лучший выбор</b>"
-            elif item.status == "CHEAP":
-                entry += "\n   💸 <b>Выгодная цена</b>"
-            elif item.status == "RELIABLE":
-                entry += "\n   🛡 <b>Надёжный вариант</b>"
-
-            if item.admin_note:
-                entry += f"\n   📝 {item.admin_note}"
-
-            lines.append(entry)
-            lines.append("")
-    else:
-        lines.append("Подтверждённых вариантов нет.")
-
-    # Поисковые ссылки
-    search_links = json.loads(req.search_links) if req.search_links else []
-    if search_links:
-        lines.append("<b>Поисковые ссылки для самостоятельного поиска:</b>\n")
-        for link in search_links:
-            lines.append(f'• <a href="{link["url"]}">{link["site"]}</a>')
-
-    lines.extend([
-        "",
-        "<i>Цена и наличие актуальны на момент ручной проверки. Перед покупкой нужно ещё раз уточнить наличие, доставку и гарантию.</i>",
-    ])
-
-    return "\n".join(lines)
+    if not approved_items:
+        return "Нельзя отправить полный отчёт: нет подтверждённых вариантов."
+    role_map = {"BEST": "BEST", "CHEAP": "BUDGET", "RELIABLE": "BACKUP", "APPROVED": "BACKUP"}
+    role_order = {"BEST": 0, "BUDGET": 1, "BACKUP": 2}
+    selected: list[tuple[SearchResult, str]] = []
+    seen_roles: set[str] = set()
+    for item in sorted(approved_items, key=lambda row: (role_order[role_map[row.status]], row.sort_order, row.id)):
+        role = role_map[item.status]
+        if role in seen_roles:
+            continue
+        seen_roles.add(role)
+        selected.append((item, role))
+        if len(selected) == 3:
+            break
+    if not any(role == "BEST" for _item, role in selected):
+        return "Нельзя отправить полный отчёт: выберите лучший вариант."
+    cards = [item for item, _role in selected]
+    lines = [format_client_result_summary(req, cards, found_count=len(found)), ""]
+    for item, role in selected:
+        lines.extend([format_client_card(item, role), ""])
+    lines.append("<i>Цена и наличие актуальны на дату проверки. Перед покупкой ещё раз уточните доставку и гарантию.</i>")
+    return "\n".join(lines).strip()

@@ -3,9 +3,10 @@ from dataclasses import dataclass, field
 
 from app.db import (
     Request, SearchResult,
-    get_alice_results, get_alice_top_result, get_market_checks,
+    get_alice_results, get_market_checks,
 )
-from app.link_checks import LinkCheckStatus
+from app.ai_cards_service import is_ai_card_candidate_eligible
+from app.verification_state import resolve_final_presentation
 
 
 @dataclass
@@ -20,10 +21,14 @@ class ReadinessResult:
 def check_readiness(req: Request) -> ReadinessResult:
     """Рассчитывает готовность заявки к отправке клиенту."""
     items: list[dict] = []
-    alice = get_alice_results(req.id)
-    top = get_alice_top_result(req.id)
+    alice = [item for item in get_alice_results(req.id) if is_ai_card_candidate_eligible(item)]
+    top = next(
+        (item for item in alice if item.status in {"BEST", "TOP", "TOP1"}),
+        None,
+    )
     budget = int(req.budget) if req.budget and req.budget.isdigit() else None
     market_checks = get_market_checks(req.id)
+    top_final = resolve_final_presentation(getattr(top, "facts_json", "") or {}) if top else {}
 
     total_checks = 10
     passed = 0
@@ -41,13 +46,8 @@ def check_readiness(req: Request) -> ReadinessResult:
         passed += 1
 
     # 3. ТОП-1 ссылка и цена проверены
-    top_verified = (
-        has_top
-        and top.link_check_status == LinkCheckStatus.VERIFIED.value
-        and bool(top.price)
-        and top.price_verified
-    )
-    items.append({"label": "ТОП-1 ссылка и цена проверены", "ok": top_verified})
+    top_verified = bool(has_top and top_final.get("presentation_ready") and top.price and top.url)
+    items.append({"label": "Финальная проверка ТОП-1 завершена", "ok": top_verified})
     if top_verified:
         passed += 1
 

@@ -1,0 +1,137 @@
+{
+  "schema": "search_v2:live_smoke:evidence:1",
+  "source_run": {
+    "started_at": "2026-07-15T14:02:01.927763+00:00",
+    "finished_at": "2026-07-15T14:02:48.256597+00:00",
+    "environment": "GitHub Actions ubuntu-24.04",
+    "network_policy": "bounded; max 3 sources; max 2 page verifications concurrently; no captcha bypass",
+    "structured_price_provider_configured": false,
+    "note": "This run predates the optional shopping_search adapter. It is retained as truthful no-provider baseline evidence."
+  },
+  "settings": {
+    "case_timeout": 24.0,
+    "source_timeout": 6.0,
+    "max_source_concurrency": 3,
+    "max_queries_per_source": 1,
+    "result_limit": 8
+  },
+  "summary": {
+    "case_count": 6,
+    "completed": 6,
+    "system_errors": 0,
+    "cases_with_exact_offers": 6,
+    "cases_with_valid_prices": 0,
+    "cases_with_recommendations": 0,
+    "main_blocker": "No configured structured price provider; Ozon/Avito discovery snippets had no verified prices; DNS returned UNAUTHORIZED."
+  },
+  "cases": [
+    {
+      "case_id": "phone",
+      "query": "iPhone 16 Pro 256 ГБ новый до 80к в Ярославле",
+      "status": "PARTIAL_SUCCESS",
+      "raw_offer_count": 16,
+      "normalized_offer_count": 14,
+      "rejected_offer_count": 2,
+      "exact_offer_count": 14,
+      "valid_price_rate": 0.0,
+      "recommendation_count": 0,
+      "source_attempts": [
+        {"source": "yandex_market", "status": "EMPTY", "raw_offer_count": 0},
+        {"source": "ozon", "status": "SUCCESS", "raw_offer_count": 8},
+        {"source": "avito", "status": "SUCCESS", "raw_offer_count": 8},
+        {"source": "dns", "status": "UNAUTHORIZED", "raw_offer_count": 0}
+      ],
+      "errors": []
+    },
+    {
+      "case_id": "laptop",
+      "query": "ноутбук Ryzen 5 16/512 до 60к",
+      "status": "PARTIAL_SUCCESS",
+      "raw_offer_count": 16,
+      "normalized_offer_count": 6,
+      "rejected_offer_count": 10,
+      "exact_offer_count": 5,
+      "valid_price_rate": 0.0,
+      "recommendation_count": 0,
+      "source_attempts": [
+        {"source": "yandex_market", "status": "EMPTY", "raw_offer_count": 0},
+        {"source": "avito", "status": "SUCCESS", "raw_offer_count": 8},
+        {"source": "ozon", "status": "SUCCESS", "raw_offer_count": 8},
+        {"source": "dns", "status": "UNAUTHORIZED", "raw_offer_count": 0}
+      ],
+      "errors": []
+    },
+    {
+      "case_id": "tv",
+      "query": "телевизор 55 4K 120 Гц для PS5 до 70к",
+      "status": "PARTIAL_SUCCESS",
+      "raw_offer_count": 16,
+      "normalized_offer_count": 7,
+      "rejected_offer_count": 9,
+      "exact_offer_count": 2,
+      "valid_price_rate": 0.0,
+      "recommendation_count": 0,
+      "source_attempts": [
+        {"source": "yandex_market", "status": "EMPTY", "raw_offer_count": 0},
+        {"source": "avito", "status": "SUCCESS", "raw_offer_count": 8},
+        {"source": "ozon", "status": "SUCCESS", "raw_offer_count": 8},
+        {"source": "dns", "status": "UNAUTHORIZED", "raw_offer_count": 0}
+      ],
+      "errors": []
+    },
+    {
+      "case_id": "headphones",
+      "query": "TWS-наушники ANC до 12к",
+      "status": "PARTIAL_SUCCESS",
+      "raw_offer_count": 16,
+      "normalized_offer_count": 2,
+      "rejected_offer_count": 14,
+      "exact_offer_count": 2,
+      "valid_price_rate": 0.0,
+      "recommendation_count": 0,
+      "source_attempts": [
+        {"source": "yandex_market", "status": "EMPTY", "raw_offer_count": 0},
+        {"source": "ozon", "status": "SUCCESS", "raw_offer_count": 8},
+        {"source": "avito", "status": "SUCCESS", "raw_offer_count": 8},
+        {"source": "dns", "status": "UNAUTHORIZED", "raw_offer_count": 0}
+      ],
+      "errors": []
+    },
+    {
+      "case_id": "monitor",
+      "query": "монитор 27 QHD 144 Гц до 35к",
+      "status": "PARTIAL_SUCCESS",
+      "raw_offer_count": 14,
+      "normalized_offer_count": 2,
+      "rejected_offer_count": 12,
+      "exact_offer_count": 1,
+      "valid_price_rate": 0.0,
+      "recommendation_count": 0,
+      "source_attempts": [
+        {"source": "yandex_market", "status": "EMPTY", "raw_offer_count": 0},
+        {"source": "avito", "status": "SUCCESS", "raw_offer_count": 8},
+        {"source": "ozon", "status": "SUCCESS", "raw_offer_count": 6},
+        {"source": "dns", "status": "UNAUTHORIZED", "raw_offer_count": 0}
+      ],
+      "errors": []
+    },
+    {
+      "case_id": "chair",
+      "query": "офисное кресло для 8 часов до 15к",
+      "status": "PARTIAL_SUCCESS",
+      "raw_offer_count": 14,
+      "normalized_offer_count": 8,
+      "rejected_offer_count": 6,
+      "exact_offer_count": 8,
+      "valid_price_rate": 0.0,
+      "recommendation_count": 0,
+      "source_attempts": [
+        {"source": "yandex_market", "status": "EMPTY", "raw_offer_count": 0},
+        {"source": "ozon", "status": "SUCCESS", "raw_offer_count": 8},
+        {"source": "avito", "status": "SUCCESS", "raw_offer_count": 6},
+        {"source": "dns", "status": "UNAUTHORIZED", "raw_offer_count": 0}
+      ],
+      "errors": []
+    }
+  ]
+}

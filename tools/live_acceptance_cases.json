@@ -1,0 +1,272 @@
+[
+  {
+    "id": "phone_01",
+    "query": "iPhone 16 Pro 256 ГБ до 80000 Ярославль новый",
+    "category": "phone",
+    "budget": 80000,
+    "required_specs": {"brand": "Apple", "model": "iPhone 16 Pro", "storage_gb": 256, "condition": "new"},
+    "city": "Ярославль",
+    "used_allowed": false
+  },
+  {
+    "id": "phone_02",
+    "query": "Samsung Galaxy A55 256 ГБ до 35000 Москва новый",
+    "category": "phone",
+    "budget": 35000,
+    "required_specs": {"brand": "Samsung", "model": "Galaxy A55", "storage_gb": 256, "condition": "new"},
+    "city": "Москва",
+    "used_allowed": false
+  },
+  {
+    "id": "phone_03",
+    "query": "Google Pixel 9 128 ГБ до 70000 Санкт-Петербург новый",
+    "category": "phone",
+    "budget": 70000,
+    "required_specs": {"brand": "Google", "model": "Pixel 9", "storage_gb": 128, "condition": "new"},
+    "city": "Санкт-Петербург",
+    "used_allowed": false
+  },
+  {
+    "id": "phone_04",
+    "query": "Xiaomi 14T 12/256 ГБ до 55000 Казань новый",
+    "category": "phone",
+    "budget": 55000,
+    "required_specs": {"brand": "Xiaomi", "model": "14T", "ram_gb": 12, "storage_gb": 256, "condition": "new"},
+    "city": "Казань",
+    "used_allowed": false
+  },
+  {
+    "id": "phone_05",
+    "query": "iPhone 15 128 ГБ до 55000 Екатеринбург можно б/у",
+    "category": "phone",
+    "budget": 55000,
+    "required_specs": {"brand": "Apple", "model": "iPhone 15", "storage_gb": 128},
+    "city": "Екатеринбург",
+    "used_allowed": true
+  },
+  {
+    "id": "laptop_01",
+    "query": "ноутбук Ryzen 5 RAM 16 ГБ SSD 512 ГБ до 60000 Ярославль новый",
+    "category": "laptop",
+    "budget": 60000,
+    "required_specs": {"cpu": "Ryzen 5", "ram_gb": 16, "ssd_gb": 512, "condition": "new"},
+    "city": "Ярославль",
+    "used_allowed": false
+  },
+  {
+    "id": "laptop_02",
+    "query": "Lenovo IdeaPad Slim 5 Ryzen 7 RAM 16 ГБ SSD 1 ТБ до 90000 Москва",
+    "category": "laptop",
+    "budget": 90000,
+    "required_specs": {"brand": "Lenovo", "model": "IdeaPad Slim 5", "cpu": "Ryzen 7", "ram_gb": 16, "ssd_gb": 1024},
+    "city": "Москва",
+    "used_allowed": false
+  },
+  {
+    "id": "laptop_03",
+    "query": "MacBook Air M2 RAM 16 ГБ SSD 256 ГБ до 110000 Санкт-Петербург новый",
+    "category": "laptop",
+    "budget": 110000,
+    "required_specs": {"brand": "Apple", "model": "MacBook Air M2", "ram_gb": 16, "ssd_gb": 256, "condition": "new"},
+    "city": "Санкт-Петербург",
+    "used_allowed": false
+  },
+  {
+    "id": "laptop_04",
+    "query": "ASUS TUF Gaming A15 RTX 4060 RAM 16 ГБ SSD 512 ГБ до 130000 Казань",
+    "category": "laptop",
+    "budget": 130000,
+    "required_specs": {"brand": "ASUS", "model": "TUF Gaming A15", "gpu": "RTX 4060", "ram_gb": 16, "ssd_gb": 512},
+    "city": "Казань",
+    "used_allowed": false
+  },
+  {
+    "id": "laptop_05",
+    "query": "Lenovo ThinkPad T14 Gen 3 Core i5 RAM 16 ГБ SSD 512 ГБ до 80000 Екатеринбург можно б/у",
+    "category": "laptop",
+    "budget": 80000,
+    "required_specs": {"brand": "Lenovo", "model": "ThinkPad T14 Gen 3", "cpu": "Core i5", "ram_gb": 16, "ssd_gb": 512},
+    "city": "Екатеринбург",
+    "used_allowed": true
+  },
+  {
+    "id": "tv_01",
+    "query": "телевизор 55 дюймов 4K 120 Гц до 70000 Ярославль новый",
+    "category": "tv",
+    "budget": 70000,
+    "required_specs": {"diagonal": 55, "resolution": "4K", "refresh_rate": 120, "condition": "new"},
+    "city": "Ярославль",
+    "used_allowed": false
+  },
+  {
+    "id": "tv_02",
+    "query": "Samsung телевизор 65 дюймов 4K до 90000 Москва новый",
+    "category": "tv",
+    "budget": 90000,
+    "required_specs": {"brand": "Samsung", "diagonal": 65, "resolution": "4K", "condition": "new"},
+    "city": "Москва",
+    "used_allowed": false
+  },
+  {
+    "id": "tv_03",
+    "query": "LG OLED телевизор 55 дюймов 4K 120 Гц до 130000 Санкт-Петербург",
+    "category": "tv",
+    "budget": 130000,
+    "required_specs": {"brand": "LG", "matrix": "OLED", "diagonal": 55, "resolution": "4K", "refresh_rate": 120},
+    "city": "Санкт-Петербург",
+    "used_allowed": false
+  },
+  {
+    "id": "tv_04",
+    "query": "TCL QLED телевизор 50 дюймов 4K до 60000 Казань новый",
+    "category": "tv",
+    "budget": 60000,
+    "required_specs": {"brand": "TCL", "matrix": "QLED", "diagonal": 50, "resolution": "4K", "condition": "new"},
+    "city": "Казань",
+    "used_allowed": false
+  },
+  {
+    "id": "tv_05",
+    "query": "Hisense телевизор 43 дюйма 4K до 35000 Екатеринбург можно б/у",
+    "category": "tv",
+    "budget": 35000,
+    "required_specs": {"brand": "Hisense", "diagonal": 43, "resolution": "4K"},
+    "city": "Екатеринбург",
+    "used_allowed": true
+  },
+  {
+    "id": "headphones_01",
+    "query": "TWS наушники ANC до 12000 Ярославль новые",
+    "category": "headphones",
+    "budget": 12000,
+    "required_specs": {"form_factor": "TWS", "anc": true, "wireless": true, "condition": "new"},
+    "city": "Ярославль",
+    "used_allowed": false
+  },
+  {
+    "id": "headphones_02",
+    "query": "Sony WH-1000XM5 до 35000 Москва новые",
+    "category": "headphones",
+    "budget": 35000,
+    "required_specs": {"brand": "Sony", "model": "WH-1000XM5", "anc": true, "condition": "new"},
+    "city": "Москва",
+    "used_allowed": false
+  },
+  {
+    "id": "headphones_03",
+    "query": "AirPods Pro 2 USB-C до 25000 Санкт-Петербург новые",
+    "category": "headphones",
+    "budget": 25000,
+    "required_specs": {"brand": "Apple", "model": "AirPods Pro 2", "connector": "USB-C", "condition": "new"},
+    "city": "Санкт-Петербург",
+    "used_allowed": false
+  },
+  {
+    "id": "headphones_04",
+    "query": "JBL Tune 770NC до 10000 Казань новые",
+    "category": "headphones",
+    "budget": 10000,
+    "required_specs": {"brand": "JBL", "model": "Tune 770NC", "wireless": true, "condition": "new"},
+    "city": "Казань",
+    "used_allowed": false
+  },
+  {
+    "id": "headphones_05",
+    "query": "Bose QuietComfort 45 до 20000 Екатеринбург можно б/у",
+    "category": "headphones",
+    "budget": 20000,
+    "required_specs": {"brand": "Bose", "model": "QuietComfort 45", "anc": true},
+    "city": "Екатеринбург",
+    "used_allowed": true
+  },
+  {
+    "id": "monitor_01",
+    "query": "монитор 27 дюймов QHD IPS 144 Гц до 35000 Ярославль новый",
+    "category": "monitor",
+    "budget": 35000,
+    "required_specs": {"diagonal": 27, "resolution": "QHD", "matrix": "IPS", "refresh_rate": 144, "condition": "new"},
+    "city": "Ярославль",
+    "used_allowed": false
+  },
+  {
+    "id": "monitor_02",
+    "query": "монитор 32 дюйма 4K IPS до 55000 Москва новый",
+    "category": "monitor",
+    "budget": 55000,
+    "required_specs": {"diagonal": 32, "resolution": "4K", "matrix": "IPS", "condition": "new"},
+    "city": "Москва",
+    "used_allowed": false
+  },
+  {
+    "id": "monitor_03",
+    "query": "монитор 24 дюйма Full HD IPS 144 Гц до 20000 Санкт-Петербург",
+    "category": "monitor",
+    "budget": 20000,
+    "required_specs": {"diagonal": 24, "resolution": "Full HD", "matrix": "IPS", "refresh_rate": 144},
+    "city": "Санкт-Петербург",
+    "used_allowed": false
+  },
+  {
+    "id": "monitor_04",
+    "query": "ультраширокий монитор 34 дюйма WQHD 144 Гц до 60000 Казань новый",
+    "category": "monitor",
+    "budget": 60000,
+    "required_specs": {"diagonal": 34, "resolution": "WQHD", "refresh_rate": 144, "ultrawide": true, "condition": "new"},
+    "city": "Казань",
+    "used_allowed": false
+  },
+  {
+    "id": "monitor_05",
+    "query": "LG 27GP850 27 дюймов QHD 165 Гц до 35000 Екатеринбург можно б/у",
+    "category": "monitor",
+    "budget": 35000,
+    "required_specs": {"brand": "LG", "model": "27GP850", "diagonal": 27, "resolution": "QHD", "refresh_rate": 165},
+    "city": "Екатеринбург",
+    "used_allowed": true
+  },
+  {
+    "id": "chair_01",
+    "query": "офисное кресло с поясничной поддержкой до 15000 Ярославль новое",
+    "category": "chair",
+    "budget": 15000,
+    "required_specs": {"type": "office", "lumbar_support": true, "condition": "new"},
+    "city": "Ярославль",
+    "used_allowed": false
+  },
+  {
+    "id": "chair_02",
+    "query": "эргономичное сетчатое кресло с подголовником до 25000 Москва новое",
+    "category": "chair",
+    "budget": 25000,
+    "required_specs": {"type": "ergonomic", "material": "mesh", "headrest": true, "condition": "new"},
+    "city": "Москва",
+    "used_allowed": false
+  },
+  {
+    "id": "chair_03",
+    "query": "игровое кресло нагрузка 150 кг до 20000 Санкт-Петербург новое",
+    "category": "chair",
+    "budget": 20000,
+    "required_specs": {"type": "gaming", "load_capacity_kg": 150, "condition": "new"},
+    "city": "Санкт-Петербург",
+    "used_allowed": false
+  },
+  {
+    "id": "chair_04",
+    "query": "Herman Miller Aeron размер B до 70000 Казань можно б/у",
+    "category": "chair",
+    "budget": 70000,
+    "required_specs": {"brand": "Herman Miller", "model": "Aeron", "size": "B"},
+    "city": "Казань",
+    "used_allowed": true
+  },
+  {
+    "id": "chair_05",
+    "query": "IKEA MARKUS офисное кресло до 30000 Екатеринбург новое",
+    "category": "chair",
+    "budget": 30000,
+    "required_specs": {"brand": "IKEA", "model": "MARKUS", "type": "office", "condition": "new"},
+    "city": "Екатеринбург",
+    "used_allowed": false
+  }
+]

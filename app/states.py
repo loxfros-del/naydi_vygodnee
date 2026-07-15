@@ -6,6 +6,10 @@ class UserStates(StatesGroup):
     waiting_for_request = State()       # Ожидание описания товара
     answering_questions = State()       # Ответы на уточняющие вопросы
     waiting_for_confirm = State()       # Подтверждение заявки
+    wizard_input = State()              # Текстовый шаг мастера заявки
+    waiting_for_links = State()         # Ссылки для отдельного сравнения
+    waiting_for_support = State()       # Сообщение специалисту
+    waiting_for_problem = State()       # Проблема после получения результата
 
 
 class AdminStates(StatesGroup):
@@ -23,3 +27,7 @@ class AdminStates(StatesGroup):
     editing_market_price = State()      # Редактирование цены проверки рынка
     editing_market_link = State()       # Редактирование ссылки проверки рынка
     editing_store = State()             # Редактирование названия магазина в карточке ИИ
+    editing_ai_text = State()           # Редактирование текста AI-карточки
+    editing_ai_image = State()          # Замена изображения AI-карточки
+    editing_request_note = State()       # Внутренняя заметка по заявке
+    editing_comparison = State()         # Ручная корректировка фактов ссылки

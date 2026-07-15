@@ -132,13 +132,23 @@ def build_report(raw_query: str) -> dict:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     parsed = full_parse(raw_query)
+    request_fields = {
+        key: parsed[key]
+        for key in (
+            "original_query", "product_name", "use_case", "budget", "city",
+            "important_criteria", "clean_search_query", "is_used_allowed",
+        )
+        if key in parsed
+    }
     request = Request(
         id=0,
+        user_id=0,
         product=parsed["product_name"],
         purpose=parsed["use_case"],
         criteria=parsed["important_criteria"],
-        **parsed,
+        **request_fields,
     )
+    request.parsed_details = parsed
 
     collection = collect_product_candidates(request, max_results=15)
 

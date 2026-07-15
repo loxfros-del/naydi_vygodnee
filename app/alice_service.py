@@ -714,7 +714,16 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
             item["within_budget"] = item["price_num"] <= budget
 
         name_key = re.sub(r"[^a-zа-яё0-9]+", "", item["name"].lower())
-        has_details = bool(item["price_num"] or item["store"] or item["link"] or item["pluses"] or item["risks"])
+        # Arbitrary plain text must not become a store and make a fake card valid.
+        # Store-only cards are accepted only when the store is from the known-store list.
+        has_known_store = bool(store_re.search(str(item["store"] or "")))
+        has_details = bool(
+            item["price_num"]
+            or has_known_store
+            or item["link"]
+            or item["pluses"]
+            or item["risks"]
+        )
         if len(item["name"]) >= 3 and has_details and name_key and name_key not in seen_names:
             seen_names.add(name_key)
             items.append(item)
@@ -765,7 +774,16 @@ def parse_alice_response(text: str, budget: int | None = None) -> list[dict]:
         if fallback_items:
             return fallback_items
 
-    return _legacy_parse_alice_response(normalized, budget)
+    legacy_items = _legacy_parse_alice_response(normalized, budget)
+    return [
+        item
+        for item in legacy_items
+        if item.get("price_num") is not None
+        or bool(item.get("link"))
+        or bool(item.get("pluses"))
+        or bool(item.get("risks"))
+        or bool(store_re.search(str(item.get("store") or "")))
+    ]
 
 
 def _parse_fallback_block(

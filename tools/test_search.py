@@ -19,10 +19,14 @@ from app.request_parser import full_parse
 from app.product_search import collect_product_candidates, generate_search_queries
 from app.candidate_verifier import (
     BAD_ENCODING,
+    NEED_MANUAL_CHECK,
+    OVER_BUDGET_HARD,
+    OVER_BUDGET_SOFT,
     PRICE_MISSING,
     REMOVED_LISTING,
     UNAVAILABLE,
     VERIFY_BLOCKED,
+    WRONG_PRODUCT,
 )
 
 
@@ -37,13 +41,22 @@ def main() -> int:
 
     raw_query = " ".join(sys.argv[1:]).strip()
     parsed = full_parse(raw_query)
+    request_fields = {
+        key: parsed[key]
+        for key in (
+            "original_query", "product_name", "use_case", "budget", "city",
+            "important_criteria", "clean_search_query", "is_used_allowed",
+        )
+        if key in parsed
+    }
     request = Request(
         id=0,
         user_id=0,
         username="test",
         product=parsed.get("product_name", ""),
-        **parsed,
+        **request_fields,
     )
+    request.parsed_details = parsed
 
     print("РАСПАРСЕННЫЙ ЗАПРОС")
     print(json.dumps(parsed, ensure_ascii=False, indent=2))
@@ -56,6 +69,17 @@ def main() -> int:
     verify_stats = collection.verify_stats
     raw_candidates = collection.raw_candidates
     saved_candidates = collection.candidates
+    saved_verified_good = sum(1 for item in saved_candidates if getattr(item, "verify_status", item.quality) == "VERIFIED_GOOD")
+    saved_verified_ok = sum(1 for item in saved_candidates if getattr(item, "verify_status", item.quality) == "VERIFIED_OK")
+    saved_need_manual = sum(1 for item in saved_candidates if getattr(item, "verify_status", item.quality) == NEED_MANUAL_CHECK)
+    saved_verify_blocked = sum(1 for item in saved_candidates if getattr(item, "verify_status", item.quality) == VERIFY_BLOCKED)
+    weak_status_count = sum(
+        1 for item in saved_candidates
+        if getattr(item, "verify_status", item.quality) in {
+            NEED_MANUAL_CHECK, VERIFY_BLOCKED, PRICE_MISSING, UNAVAILABLE,
+            WRONG_PRODUCT, OVER_BUDGET_SOFT, OVER_BUDGET_HARD,
+        }
+    )
     trash = [item for item in raw_candidates if item.quality == "TRASH"]
     good = [item for item in raw_candidates if item.quality == "GOOD"]
     ok = [item for item in raw_candidates if item.quality == "OK"]
@@ -76,11 +100,21 @@ def main() -> int:
     print("УПАЛИ ИСТОЧНИКИ: " + (", ".join(failed_sources) if failed_sources else "нет"))
     print("GOOD/OK ДАЛИ: " + (", ".join(productive_sources) if productive_sources else "нет"))
     print(
-        "\nВЕРИФИКАЦИЯ СТРАНИЦ: "
+        "\nСОХРАНЕНО ДЛЯ АДМИНА: "
+        f"saved_for_admin={len(saved_candidates)}; "
+        f"VERIFIED_GOOD={saved_verified_good}; "
+        f"VERIFIED_OK={saved_verified_ok}; "
+        f"NEED_MANUAL_CHECK={saved_need_manual}; "
+        f"VERIFY_BLOCKED={saved_verify_blocked}; "
+        f"WEAK/PRICE_MISSING/WRONG/UNAVAILABLE/OVER_BUDGET={weak_status_count}"
+    )
+    print(
+        "ВЕРИФИКАЦИЯ СТРАНИЦ (checked): "
         f"checked={verify_stats.get('checked', 0)}; "
         f"verified_good={verify_stats.get('VERIFIED_GOOD', 0)}; "
         f"verified_ok={verify_stats.get('VERIFIED_OK', 0)}; "
-        f"need_manual_check={verify_stats.get(VERIFY_BLOCKED, 0)}; "
+        f"need_manual_check={verify_stats.get(NEED_MANUAL_CHECK, 0)}; "
+        f"verify_blocked={verify_stats.get(VERIFY_BLOCKED, 0)}; "
         f"unavailable={verify_stats.get(UNAVAILABLE, 0)}; "
         f"removed_listing={verify_stats.get(REMOVED_LISTING, 0)}; "
         f"price_missing={verify_stats.get(PRICE_MISSING, 0)}; "
@@ -101,7 +135,7 @@ def main() -> int:
     print(f"\nОсновные кандидаты для админа: {len(saved_candidates)}")
     if budget:
         print(f"Среди RAW — в бюджете: {in_budget}; сильно выше бюджета: {strongly_over_budget}")
-    if verify_stats.get("VERIFIED_GOOD", 0) + verify_stats.get("VERIFIED_OK", 0) < 3:
+    if saved_verified_good < 3:
         print("Нормальных проверенных вариантов мало. Нужно ручное уточнение / Алиса / Gemini.")
     for index, item in enumerate(saved_candidates, 1):
         price = f"{item.price} ₽" if item.price else "цена не найдена"
@@ -121,20 +155,58 @@ def main() -> int:
             f"   {item.url}\n"
             f"   причины: {risks}"
         )
+        classification = next((flag for flag in item.risk_flags if "классификация:" in str(flag)), "-")
+        print(
+            "   diagnostics: "
+            f"classification={classification}; "
+            f"product_quality_level={getattr(item, 'product_quality_level', '-') or '-'}; "
+            f"brand_quality={getattr(item, 'brand_quality', '-') or '-'}; "
+            f"price_source={item.price_source or '-'}; "
+            f"price_reliability={item.price_reliability or '-'}; "
+            f"score_cap_applied={item.score_cap_applied or '-'}; "
+            f"why_not_verified_good={getattr(item, 'why_not_verified_good', '-') or '-'}"
+        )
         if facts:
-            print(
-                "   facts: "
-                f"model_key={facts.get('model_key') or '-'}; "
-                f"price={facts.get('price')}; "
+            category = facts.get("category") or "unknown"
+            common = (
+                f"category={category}; price={facts.get('price')}; "
                 f"budget_status={facts.get('budget_status') or '-'}; "
-                f"availability={facts.get('availability_text') or '-'}; "
-                f"diagonal={facts.get('diagonal') or '-'}; "
-                f"resolution={facts.get('resolution') or '-'}; "
-                f"refresh_rate={facts.get('refresh_rate') or '-'}; "
-                f"matrix_type={facts.get('matrix_type') or '-'}; "
-                f"ps5_flags={facts.get('ps5_flags') or []}; "
-                f"warnings={facts.get('warnings') or []}"
+                f"availability={facts.get('availability_text') or '-'}"
             )
+            if category == "phone":
+                detail = (
+                    f"model={facts.get('model') or '-'}; memory={facts.get('memory') or '-'}; "
+                    f"color={facts.get('color') or '-'}; condition={facts.get('condition') or '-'}"
+                )
+            elif category == "tv":
+                detail = (
+                    f"model_key={facts.get('model_key') or '-'}; diagonal={facts.get('diagonal') or '-'}; "
+                    f"resolution={facts.get('resolution') or '-'}; refresh_rate={facts.get('refresh_rate') or '-'}; "
+                    f"hdmi={facts.get('hdmi') or '-'}; matrix_type={facts.get('matrix_type') or '-'}; "
+                    f"ps5_flags={facts.get('ps5_flags') or []}; warnings={facts.get('warnings') or []}"
+                )
+            elif category == "laptop":
+                detail = (
+                    f"brand={facts.get('brand') or '-'}; cpu={facts.get('cpu') or '-'}; "
+                    f"ram={facts.get('ram') or '-'}; ssd={facts.get('ssd') or '-'}; "
+                    f"screen={facts.get('screen') or '-'}"
+                )
+            elif category == "headphones":
+                detail = (
+                    f"brand={facts.get('brand') or '-'}; type={facts.get('headphone_type') or '-'}; "
+                    f"anc={facts.get('anc') or '-'}; model={facts.get('model') or '-'}"
+                )
+            elif category == "chair":
+                detail = (
+                    f"ergonomics={facts.get('ergonomics') or '-'}; "
+                    f"lumbar_support={facts.get('lumbar_support') or '-'}; "
+                    f"adjustments={facts.get('adjustments') or []}; "
+                    f"headrest={facts.get('headrest') or '-'}; "
+                    f"load_capacity={facts.get('load_capacity') or '-'}"
+                )
+            else:
+                detail = "факты не подтверждены"
+            print(f"   facts: {common}; {detail}")
 
     if collection.verified_rejections:
         print("\nDEBUG ОТБРАКОВКИ VERIFY")
@@ -147,7 +219,7 @@ def main() -> int:
             )
 
     def is_manual_check_without_price(item) -> bool:
-        return item.price is None and getattr(item, "verify_status", "") in {VERIFY_BLOCKED, "NEED_MANUAL_CHECK"}
+        return item.price is None and getattr(item, "verify_status", "") in {VERIFY_BLOCKED, NEED_MANUAL_CHECK}
 
     bad_saved = [
         item for item in saved_candidates

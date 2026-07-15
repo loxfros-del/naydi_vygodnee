@@ -1,6 +1,7 @@
 """Проверка товарных кандидатов перед сохранением для админа."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import json
 import re
@@ -14,6 +15,8 @@ from bs4 import BeautifulSoup
 from app.net_client import fetch_http, get_domain_policy
 from app.config import settings
 from app.db import Request
+from app.category_registry import detect_category as detect_registry_category
+from app.category_facts import extract_category_facts
 
 
 VERIFIED_GOOD = "VERIFIED_GOOD"
@@ -28,7 +31,7 @@ BAD_ENCODING = "BAD_ENCODING"
 REJECTED = "REJECTED"
 VERIFY_ERROR = "VERIFY_ERROR"
 VERIFY_BLOCKED = "VERIFY_BLOCKED"
-NEED_MANUAL_CHECK = VERIFY_BLOCKED
+NEED_MANUAL_CHECK = "NEED_MANUAL_CHECK"
 OVER_BUDGET_SOFT = "OVER_BUDGET_SOFT"
 OVER_BUDGET_HARD = "OVER_BUDGET_HARD"
 
@@ -582,18 +585,7 @@ def _availability_bool(availability: str) -> Optional[bool]:
 
 
 def _category_from_text(text: str) -> str:
-    lowered = (text or "").lower()
-    if any(word in lowered for word in ("ноутбук", "ноут", "laptop", "macbook")):
-        return "laptop"
-    if any(word in lowered for word in ("iphone", "айфон", "смартфон", "телефон")):
-        return "phone"
-    if any(word in lowered for word in ("наушник", "гарнитур", "headphone", "earbuds", "airpods")):
-        return "headphones"
-    if any(word in lowered for word in ("кресло", "стул", "chair")):
-        return "chair"
-    if any(word in lowered for word in ("телевизор", " smart tv", " tv ", " qled", " oled")):
-        return "tv"
-    return "unknown"
+    return detect_registry_category(text)
 
 
 def detect_product_category(req: Request, candidate: Any = None, text: str = "") -> str:
@@ -609,6 +601,96 @@ def detect_product_category(req: Request, candidate: Any = None, text: str = "")
     return _category_from_text(candidate_text)
 
 
+def _extract_phone_facts(text: str) -> dict[str, Any]:
+    lowered = text.lower()
+    model = ""
+    match = re.search(r"\b(?:apple\s*)?(iphone|айфон)\s*(\d{1,2})(?:\s*(pro\s+max|pro|max|plus|mini|se|e))?\b", lowered)
+    if match:
+        model = "iPhone " + match.group(2) + (f" {match.group(3).upper()}" if match.group(3) else "")
+    memory_match = re.search(r"\b(64|128|256|512|1024)\s*(?:гб|gb|tb|тб)\b", lowered)
+    color = next((value for marker, value in (
+        ("черн", "черный"), ("бел", "белый"), ("красн", "красный"),
+        ("син", "синий"), ("зелен", "зеленый"), ("розов", "розовый"),
+        ("starlight", "starlight"), ("midnight", "midnight"),
+    ) if marker in lowered), "")
+    condition = "б/у" if any(marker in lowered for marker in ("б/у", "бу ", "used", "восстанов")) else "новый" if any(marker in lowered for marker in ("новый", "new")) else ""
+    return {
+        "model": model,
+        "memory": f"{memory_match.group(1)} ГБ" if memory_match else "",
+        "color": color,
+        "condition": condition,
+    }
+
+
+def _extract_laptop_facts(text: str) -> dict[str, Any]:
+    lowered = text.lower()
+    laptop_brands = (
+        "LUNNEN", "EXPEcomp", "ECHIPS", "Acer", "Asus", "Apple", "Dell", "HP",
+        "Huawei", "Honor", "Lenovo", "MSI", "Samsung", "Xiaomi", "Thunderobot",
+        "Maibenben", "Digma",
+    )
+    brand = next((brand for brand in laptop_brands if re.search(
+        rf"(?<![a-zа-я0-9]){re.escape(brand.lower())}(?![a-zа-я0-9])", lowered,
+    )), "")
+    cpu_match = re.search(r"\b((?:intel\s*)?(?:core\s*)?i[3579][-\s]?\d{3,5}[a-z]*|ryzen\s*[3579]\s*\d{3,4}[a-z]*|n95|n100|n150|n5095|celeron)\b", lowered, re.I)
+    ram_match = re.search(r"\b(?:ram\s*)?(\d{1,2})\s*(?:гб|gb)\b", lowered)
+    ssd_match = re.search(r"\b(?:ssd\s*)?(\d{3,4}|1\s*тб|1\s*tb)\s*(?:гб|gb|тб|tb)?\b", lowered)
+    screen_match = re.search(r"\b(13|14|15[.,]6|16|17[.,]3)\s*(?:\"|дюйм|inch)?", lowered)
+    return {
+        "brand": brand,
+        "cpu": cpu_match.group(1).upper() if cpu_match else "",
+        "ram": f"{ram_match.group(1)} ГБ" if ram_match else "",
+        "ssd": ssd_match.group(0).upper() if ssd_match else "",
+        "screen": screen_match.group(1).replace(",", ".") if screen_match else "",
+    }
+
+
+def _extract_headphone_facts(text: str) -> dict[str, Any]:
+    lowered = text.lower()
+    brand = next((brand for brand in (
+        "Sony", "JBL", "Anker", "Soundcore", "Xiaomi", "QCY", "Baseus",
+        "Samsung", "Huawei", "Honor", "Marshall", "Sennheiser", "Edifier",
+        "OnePlus", "Nothing", "Realme",
+    ) if brand.lower() in lowered), "")
+    if "tws" in lowered:
+        hp_type = "TWS"
+    elif any(marker in lowered for marker in ("беспровод", "bluetooth", "wireless")):
+        hp_type = "wireless"
+    elif any(marker in lowered for marker in ("проводн", "wired", "3.5", "3,5")):
+        hp_type = "wired"
+    else:
+        hp_type = ""
+    anc = any(marker in lowered for marker in ("anc", "шумоподав", "noise cancelling"))
+    model_match = re.search(r"\b([a-z]{1,8}\s?[-]?\s?\d{1,4}[a-z0-9-]*|wh-?1000xm\d|melobuds\s+\w+|liberty\s+\d+\s*\w*)\b", text, re.I)
+    return {
+        "brand": brand,
+        "headphone_type": hp_type,
+        "anc": anc if anc else "",
+        "model": model_match.group(1).strip() if model_match else "",
+    }
+
+
+def _extract_chair_facts(text: str) -> dict[str, Any]:
+    lowered = text.lower()
+    ergonomics = any(marker in lowered for marker in ("эргоном", "ортопед", "анатом"))
+    lumbar = "пояснич" in lowered
+    adjustments = []
+    if "регулиров" in lowered and "высот" in lowered:
+        adjustments.append("высота")
+    if "регулиров" in lowered and "подлокот" in lowered:
+        adjustments.append("подлокотники")
+    if "подголовник" in lowered:
+        adjustments.append("подголовник")
+    load_match = re.search(r"(?<!\d)(120|125|130|150)\s*кг", lowered)
+    return {
+        "ergonomics": ergonomics if ergonomics else "",
+        "lumbar_support": lumbar if lumbar else "",
+        "adjustments": adjustments,
+        "headrest": "подголовник" in lowered,
+        "load_capacity": f"{load_match.group(1)} кг" if load_match else "",
+    }
+
+
 def extract_product_facts(
     candidate: Any,
     req: Request,
@@ -617,58 +699,33 @@ def extract_product_facts(
     title: str = "",
     price: Optional[int] = None,
     availability: str = "",
+    verification_access: str = "AVAILABLE",
 ) -> dict[str, Any]:
     """Собирает структурированные факты товара без генерации описания."""
     soup_text = text or BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)
-    combined = _normalise_space(
-        " ".join([
-            title or getattr(candidate, "title", "") or "",
-            getattr(candidate, "snippet", "") or "",
-            soup_text[:6000],
-        ])
-    )
-    brand = _extract_brand(combined)
-    model, model_key = _extract_model(combined, brand)
-    diagonal = _extract_diagonal(combined, model_key)
-    resolution = _extract_resolution(combined)
-    refresh_rate = _extract_refresh_rate(combined)
-    hdmi = _extract_hdmi(combined)
-    matrix_type = _extract_matrix_type(combined)
-    smart_tv = _extract_smart_tv(combined)
-    os_name = _extract_os(combined)
-    rating, reviews_count = _extract_rating_reviews(combined)
+    identity_text = _normalise_space(title or getattr(candidate, "title", "") or "")
+    supplemental_text = _normalise_space(" ".join([
+        getattr(candidate, "title", "") or "",
+        getattr(candidate, "snippet", "") or "",
+        soup_text[:6000],
+    ]))
+    combined = _normalise_space(f"{identity_text} {supplemental_text}")
     actual_price = price if price is not None else getattr(candidate, "price", None)
     source = str(getattr(candidate, "source", "") or _source_from_url(getattr(candidate, "url", "")))
     url = str(getattr(candidate, "url", "") or "")
-    category = detect_product_category(req, candidate, combined)
-    if category != "tv":
-        return {
-            "category": category,
-            "brand": brand,
-            "model": model,
-            "model_key": model_key,
-            "price": actual_price,
-            "store": source,
-            "url": url,
-            "available": _availability_bool(availability),
-            "availability_text": availability or "UNKNOWN",
-            "rating": rating,
-            "reviews_count": reviews_count,
-            "budget_status": _budget_status(actual_price, req),
-            "warnings": [],
-        }
-    facts = {
-        "category": category,
-        "brand": brand,
-        "model": model,
-        "model_key": model_key,
-        "diagonal": diagonal,
-        "resolution": resolution,
-        "refresh_rate": refresh_rate,
-        "hdmi": hdmi,
-        "matrix_type": matrix_type,
-        "smart_tv": smart_tv,
-        "os": os_name,
+    category = detect_product_category(req, candidate, identity_text)
+    facts = extract_category_facts(category, identity_text, supplemental_text)
+    rating, reviews_count = _extract_rating_reviews(supplemental_text)
+    if rating is None:
+        rating = getattr(candidate, "rating", None)
+    if reviews_count is None:
+        reviews_count = getattr(candidate, "reviews_count", None)
+    raw = getattr(candidate, "raw", {}) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    seller = str(getattr(candidate, "seller", "") or raw.get("seller") or "").strip()
+    facts.update({
+        "model_key": facts.get("model", ""),
         "price": actual_price,
         "store": source,
         "url": url,
@@ -676,12 +733,36 @@ def extract_product_facts(
         "availability_text": availability or "UNKNOWN",
         "rating": rating,
         "reviews_count": reviews_count,
+        "seller": seller,
+        "seller_type": str(raw.get("seller_type") or "").strip(),
+        "seller_rating": rating,
+        "city": str(getattr(candidate, "city", "") or raw.get("city") or "").strip(),
+        "condition": raw.get("condition") or facts.get("condition") or "",
+        "delivery": raw.get("delivery") or "",
+        "listing_status": raw.get("listing_status") or ("active" if availability == "AVAILABLE" else ""),
+        "activation": raw.get("activation") or "",
+        "warranty": raw.get("warranty") or "",
+        "completeness": raw.get("completeness") or "",
         "budget_status": _budget_status(actual_price, req),
-        "ps5_flags": [],
+        "product_page_verified": bool(_looks_like_product_url(url)),
+        "price_verified": bool(actual_price is not None and verification_access == "AVAILABLE"),
+        "availability_verified": availability in {"AVAILABLE", "UNAVAILABLE", REMOVED_LISTING},
+        "seller_verified": bool(seller or rating is not None or reviews_count is not None),
+        "verification_access": verification_access,
+        "verification_access_history": [verification_access] if verification_access == "BLOCKED" else [],
         "warnings": [],
-    }
-    if _is_ps5_tv_request(req):
+    })
+    if category == "tv":
+        facts["smart_tv"] = _extract_smart_tv(combined)
+        facts["os"] = facts.get("smart_platform", "") or _extract_os(combined)
+        facts.setdefault("matrix_type", facts.get("panel", ""))
+        facts["ps5_flags"] = []
+    if category == "tv" and _is_ps5_tv_request(req):
         lowered = combined.lower()
+        resolution = str(facts.get("resolution") or "")
+        refresh_rate = str(facts.get("refresh_rate") or "")
+        hdmi = str(facts.get("hdmi") or "")
+        matrix_type = str(facts.get("matrix_type") or facts.get("panel") or "")
         if resolution == "4K":
             facts["ps5_flags"].append("4K")
         if refresh_rate in {"120 Гц", "144 Гц"}:
@@ -700,7 +781,8 @@ def extract_product_facts(
             facts["warnings"].append("HDMI 2.1 не подтверждён")
         if resolution == "Full HD":
             facts["warnings"].append("Full HD слабый вариант для PS5")
-    facts["ps5_flags"] = list(dict.fromkeys(facts["ps5_flags"]))
+    if "ps5_flags" in facts:
+        facts["ps5_flags"] = list(dict.fromkeys(facts["ps5_flags"]))
     facts["warnings"] = list(dict.fromkeys(facts["warnings"]))
     return facts
 
@@ -790,6 +872,9 @@ def _apply_verified(candidate: Any, verified: VerifiedCandidate) -> VerifiedCand
         candidate.price = verified.price
         if not getattr(candidate, "price_source", ""):
             candidate.price_source = "requests" if verified.html_loaded else "search"
+        if verified.html_loaded:
+            candidate.price_confidence = "high"
+            candidate.price_evidence = "structured_page"
     candidate.availability = verified.availability
     if verified.facts:
         candidate.product_facts = verified.facts
@@ -800,7 +885,7 @@ def _apply_verified(candidate: Any, verified: VerifiedCandidate) -> VerifiedCand
         candidate.quality = "GOOD"
         candidate.status = "CANDIDATE"
         candidate.score = min(float(getattr(candidate, "score", 0) or 0) + 15, 99)
-    elif verified.verify_status in {VERIFIED_OK, OVER_BUDGET_SOFT, VERIFY_BLOCKED}:
+    elif verified.verify_status in {VERIFIED_OK, OVER_BUDGET_SOFT, VERIFY_BLOCKED, NEED_MANUAL_CHECK}:
         candidate.quality = "OK"
         candidate.status = "CANDIDATE"
     elif verified.keep_for_admin:
@@ -873,9 +958,18 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
     try:
         response = _safe_get(url)
     except Exception as exc:    
+        fetch_result = getattr(exc, "fetch_result", None)
+        if fetch_result is not None:
+            candidate.used_proxy = fetch_result.used_proxy
+            candidate.used_browser = fetch_result.used_browser
+            candidate.fetch_status_code = fetch_result.status_code
+            candidate.blocked_reason = fetch_result.blocked_reason
+            candidate.fetch_provider = fetch_result.fetch_provider
+            candidate.retry_count = fetch_result.retry_count
         if _is_blocked_error(exc) and _looks_safe_for_manual_check(candidate, req, source, url):
             risks = [
                 "страница заблокировала проверку",
+                "network block",
                 "цена найдена в выдаче, нужна ручная проверка",
             ]
             if source == "avito_search":
@@ -885,6 +979,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
             facts = extract_product_facts(
                 candidate, req, title=getattr(candidate, "title", ""),
                 price=getattr(candidate, "price", None), availability="UNKNOWN",
+                verification_access="BLOCKED",
             )
             verified = VerifiedCandidate(
                 candidate,
@@ -903,6 +998,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
         facts = extract_product_facts(
             candidate, req, title=getattr(candidate, "title", ""),
             price=getattr(candidate, "price", None), availability="UNKNOWN",
+            verification_access="FAILED",
         )
         verified = VerifiedCandidate(
             candidate,
@@ -955,6 +1051,7 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
         )
         return _apply_verified(candidate, verified)
     if price is None:
+        facts["price_verified"] = False
         verified = VerifiedCandidate(
             candidate, PRICE_MISSING, title=page_title,
             availability=availability, reason="цена не подтверждена", facts=facts, html_loaded=True,
@@ -1019,7 +1116,9 @@ def verify_candidate(candidate: Any, req: Request) -> VerifiedCandidate:
 
 
 def verify_candidates(candidates: list[Any], req: Request, limit: int = 30) -> list[VerifiedCandidate]:
-    result: list[VerifiedCandidate] = []
-    for candidate in candidates[:limit]:
-        result.append(verify_candidate(candidate, req))
-    return result
+    selected = candidates[:limit]
+    if not selected:
+        return []
+    # Сохраняем исходный порядок, но не открываем больше двух страниц одновременно.
+    with ThreadPoolExecutor(max_workers=min(2, len(selected)), thread_name_prefix="verify") as pool:
+        return list(pool.map(lambda candidate: verify_candidate(candidate, req), selected))
