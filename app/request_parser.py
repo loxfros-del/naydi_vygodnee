@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any
 
-from app.category_registry import detect_category, get_category_spec, known_brand, normalize_text
+from app.category_registry import contains_marker, detect_category, get_category_spec, known_brand, normalize_text
 from app.search_links import build_search_query
 
 
@@ -610,16 +610,19 @@ def normalize_request_data(request: Any) -> dict[str, Any]:
     city = str(payload.get("city") or _object_value(request, "city") or parsed.get("city") or "").strip()
     condition = str(payload.get("condition") or _object_value(request, "condition") or parsed.get("condition") or "any")
 
+    brand = str(
+        payload.get("brand")
+        or parsed.get("brand")
+        or known_brand(category, " ".join(part for part in (product_name, original_query) if part))
+        or ("Apple" if normalize_text(model).startswith("iphone ") else "")
+    )
+
     result = {
         **parsed,
         "original_query": original_query,
         "product_name": product_name or str(parsed.get("product_name") or "товар"),
         "category": category or "unknown",
-        "brand": str(
-            payload.get("brand")
-            or parsed.get("brand")
-            or ("Apple" if normalize_text(model).startswith("iphone ") else "")
-        ),
+        "brand": brand,
         "model": model,
         "model_modifiers": model_modifiers,
         "storage_gb": storage_gb,
@@ -640,14 +643,33 @@ def _number_from_value(value: object) -> int | None:
     return int(match.group()) if match else None
 
 
+def build_request_search_identity(request: Any) -> str:
+    """Keep the saved product category in every external search phrase."""
+    details = normalize_request_data(request)
+    identity = str(details.get("product_name") or details.get("model") or "товар").strip()
+    category = str(details.get("category") or "unknown")
+    category_label = _CATEGORY_DISPLAY.get(category, "")
+    spec = get_category_spec(category)
+    has_category_word = any(
+        contains_marker(identity, marker)
+        for marker in (*spec.names, *spec.required_product_markers)
+    )
+    if category_label and category_label != "товар" and not has_category_word:
+        identity = f"{identity} {category_label}".strip()
+    return identity or "товар"
+
+
 def build_request_search_query(request: Any) -> str:
     """Builds a clean query from canonical values, never wizard prompts."""
     details = normalize_request_data(request)
     criteria = _human_criteria(dict(details.get("required_criteria") or {}))
     criteria.extend(str(item) for item in details.get("required_features") or [])
+    request_text = " ".join(str(getattr(request, name, "") or "") for name in ("use_case", "original_query", "criteria"))
+    if str(details.get("category") or "") == "laptop" and re.search(r"\b(?:игров\w*|gaming|game)\b", request_text, re.I):
+        criteria.insert(0, "игровой")
     clean_criteria = ", ".join(dict.fromkeys(item for item in criteria if item))
     return build_search_query(
-        str(details.get("product_name") or details.get("model") or "товар"),
+        build_request_search_identity(request),
         "",
         str(details.get("budget") or ""),
         str(details.get("city") or ""),

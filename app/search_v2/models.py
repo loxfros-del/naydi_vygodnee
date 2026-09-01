@@ -4,7 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .savings import SavingsEvidence
 
 
 class ValueEnum(str, Enum):
@@ -164,6 +167,7 @@ class SourceQuery(JsonModel):
     hard_tokens_required: list[str] = field(default_factory=list)
     hard_tokens_preserved: list[str] = field(default_factory=list)
     dropped_soft_tokens: list[str] = field(default_factory=list)
+    structured_filters: dict[str, Any] = field(default_factory=dict)
     rejection_reason: str = ""
     status: SourceStatus = SourceStatus.SUCCESS
 
@@ -372,10 +376,15 @@ class Recommendation(JsonModel):
     reasons: list[str] = field(default_factory=list)
     risks: list[RiskFlag] = field(default_factory=list)
     checks: list[str] = field(default_factory=list)
+    savings_evidence: SavingsEvidence | None = None
 
 
 @dataclass(slots=True)
 class SearchMetrics(JsonModel):
+    # Aggregate-only quality signals.  They deliberately contain no query,
+    # product title, link, locality, seller, or source diagnostic data.
+    attempted_source_count: int = 0
+    successful_source_count: int = 0
     source_success_rate: float = 0.0
     source_timeout_rate: float = 0.0
     blocked_rate: float = 0.0
@@ -383,7 +392,13 @@ class SearchMetrics(JsonModel):
     exact_offer_count: int = 0
     wrong_model_rejection_count: int = 0
     valid_price_rate: float = 0.0
+    priced_exact_source_count: int = 0
+    comparable_offer_count: int = 0
+    fresh_comparable_offer_count: int = 0
+    stale_comparable_offer_count: int = 0
     product_group_count: int = 0
+    market_median_group_count: int = 0
+    reference_price_span_percent: float | None = None
     recommendation_count: int = 0
     top1_exact: bool = False
     top3_useful: int = 0

@@ -13,6 +13,7 @@ from app.market_analysis import OfferIdentity, RecommendationRole, plan_recommen
 from app.price_extractor import format_price
 from app.verification_state import normalize_verification_facts, resolve_final_presentation
 from app.services.ai_review import (
+    AI_CARD_APPROVED,
     AI_CARD_DRAFT,
     AI_CARD_ERROR,
     AI_CARD_GENERATED,
@@ -179,15 +180,21 @@ def _role_offer(item: SearchResult) -> dict[str, Any]:
     }
 
 
-def _best_candidates(candidates: list[SearchResult], limit: int = MAX_AI_CARDS) -> list[SearchResult]:
+def _best_candidates(
+    candidates: list[SearchResult],
+    limit: int = MAX_AI_CARDS,
+    *,
+    require_ready: bool = True,
+) -> list[SearchResult]:
     blocked_statuses = {"REJECTED", "REJECTED_AUTO", "DO_NOT_BUY", "CAUTION"}
     valid = [
         item for item in candidates
         if str(getattr(item, "status", "") or "").upper() not in blocked_statuses
         and str(getattr(item, "origin", "") or "").lower() != "alice"
         and bool(str(getattr(item, "title", "") or "").strip())
-        and is_ai_card_candidate_eligible(item)
-        and _role_quality_eligible(item)
+        # Черновики для администратора можно создать и до ручной проверки.
+        # В клиентский отчёт всё равно проходят только ready-карточки.
+        and (not require_ready or (is_ai_card_candidate_eligible(item) and _role_quality_eligible(item)))
     ]
     valid.sort(
         key=lambda item: (
@@ -232,9 +239,22 @@ def _best_candidates(candidates: list[SearchResult], limit: int = MAX_AI_CARDS) 
     return selected
 
 
-def assign_candidate_roles(req: Request, candidates: list[SearchResult]) -> dict[int, str]:
+def select_verified_ai_card_candidates(
+    candidates: list[SearchResult],
+    limit: int = MAX_AI_CARDS,
+) -> list[SearchResult]:
+    """Select only client-safe products for automatic recommendation cards."""
+    return _best_candidates(candidates, limit, require_ready=True)
+
+
+def assign_candidate_roles(
+    req: Request,
+    candidates: list[SearchResult],
+    *,
+    allow_drafts: bool = False,
+) -> dict[int, str]:
     """Preserve admin roles, then map pure planner roles to legacy statuses."""
-    selected = _best_candidates(candidates, MAX_AI_CARDS)
+    selected = _best_candidates(candidates, MAX_AI_CARDS, require_ready=not allow_drafts)
     if not selected:
         return {}
     roles: dict[int, str] = {}
@@ -276,14 +296,19 @@ def assign_candidate_roles(req: Request, candidates: list[SearchResult]) -> dict
     # carries an explicit BACKUP/BUDGET administrator role.
     apply_plan(selected)
     apply_plan([item for item in selected if int(item.id) not in roles])
+    # Планировщик не должен молча съедать выбранную админом карточку.
+    for item in selected:
+        candidate_id = int(item.id)
+        if candidate_id not in roles:
+            roles[candidate_id] = "BACKUP"
     return roles
 
 
 def build_ai_cards_prompt(req: Request, candidates: list[SearchResult]) -> str:
     """Строит prompt: модель редактирует текст, но не товарные факты."""
     budget = _budget_value(req)
-    candidates_for_prompt = _best_candidates(candidates, MAX_AI_CARDS)
-    roles = assign_candidate_roles(req, candidates_for_prompt)
+    candidates_for_prompt = _best_candidates(candidates, MAX_AI_CARDS, require_ready=False)
+    roles = assign_candidate_roles(req, candidates_for_prompt, allow_drafts=True)
     selected = [
         _normalize_candidate(item, idx)
         for idx, item in enumerate(
@@ -492,6 +517,7 @@ def _card_from_candidate(
     budget = _budget_value(req)
     facts = normalize_verification_facts(_candidate_facts(candidate))
     final = resolve_final_presentation(facts)
+    presentation_ready = bool(final.get("presentation_ready") and not final.get("blocking_reasons"))
     return {
         "candidate_id": candidate.id,
         "name": str(candidate.title or "").strip(),
@@ -505,11 +531,14 @@ def _card_from_candidate(
         "why": why,
         "pluses": [why] if why else [],
         "risks": _dedupe_text(risks),
-        "manual_check": _dedupe_text(manual_check),
-        "notes": _dedupe_text(manual_check),
+        "manual_check": [] if presentation_ready else _dedupe_text(manual_check),
+        "notes": [] if presentation_ready else _dedupe_text(manual_check),
         "role": trusted_role,
         "status": trusted_role,
-        "ai_card_status": ai_card_status,
+        # Verification belongs to the product facts, not to the wording that AI
+        # adds. A fully verified source candidate therefore needs no second
+        # lifecycle approval after the card is generated.
+        "ai_card_status": AI_CARD_APPROVED if presentation_ready else ai_card_status,
         "facts": facts,
         "facts_json": json.dumps(facts, ensure_ascii=False),
         "price_verified": bool(final.get("price_verified")),
@@ -526,8 +555,8 @@ def parse_ai_cards_for_candidates(
     candidates: list[SearchResult],
 ) -> list[dict]:
     """Привязывает редакционный ответ модели к доверенным candidate_id."""
-    selected = _best_candidates(candidates, MAX_AI_CARDS)
-    roles = assign_candidate_roles(req, selected)
+    selected = _best_candidates(candidates, MAX_AI_CARDS, require_ready=False)
+    roles = assign_candidate_roles(req, selected, allow_drafts=True)
     candidate_by_id = {int(item.id): item for item in selected if int(item.id) in roles}
     data = _extract_json_object(text)
     raw_cards = data.get("cards", [])
@@ -571,8 +600,8 @@ def parse_ai_cards_for_candidates(
 def build_fallback_ai_cards(req: Request, candidates: list[SearchResult]) -> list[dict]:
     """Создаёт сетево-независимые текстовые draft-карточки."""
     cards: list[dict] = []
-    selected = _best_candidates(candidates, MAX_AI_CARDS)
-    roles = assign_candidate_roles(req, selected)
+    selected = _best_candidates(candidates, MAX_AI_CARDS, require_ready=False)
+    roles = assign_candidate_roles(req, selected, allow_drafts=True)
     for candidate in selected:
         if int(candidate.id) not in roles:
             continue
@@ -597,7 +626,7 @@ def build_fallback_ai_cards(req: Request, candidates: list[SearchResult]) -> lis
 
 def generate_ai_cards_from_candidates(req: Request, candidates: list[SearchResult]) -> dict:
     """Генерирует ИИ-карточки из кандидатов и возвращает success/message/cards."""
-    selected = _best_candidates(candidates, MAX_AI_CARDS)
+    selected = _best_candidates(candidates, MAX_AI_CARDS, require_ready=False)
     if not selected:
         return {
             "success": False,
@@ -635,6 +664,18 @@ def generate_ai_cards_from_candidates(req: Request, candidates: list[SearchResul
             "generation_status": AI_CARD_ERROR,
             "status": AI_CARD_ERROR,
         }
+
+    # Если модель вернула не все выбранные товары, добавляем обычные черновики,
+    # а не теряем товар без объяснения.
+    returned_ids = {int(card.get("candidate_id") or 0) for card in cards}
+    if len(cards) < len(selected):
+        for fallback_card in build_fallback_ai_cards(req, selected):
+            if int(fallback_card.get("candidate_id") or 0) in returned_ids:
+                continue
+            cards.append(fallback_card)
+            returned_ids.add(int(fallback_card.get("candidate_id") or 0))
+            if len(cards) >= MAX_AI_CARDS:
+                break
 
     return {
         "success": True,

@@ -105,7 +105,7 @@ CATEGORY_SPECS: dict[str, CategorySpec] = {
         required_product_markers=("наушники", "гарнитура", "headphones", "earbuds", "airpods"),
         accessory_markers=("амбушюры", "кейс", "чехол", "кабель", "переходник", "зарядка", "оголовье"),
         useful_facts=("brand", "model", "connection", "anc", "form_factor"),
-        known_brands=("Sony", "JBL", "Anker", "Soundcore", "Xiaomi", "QCY", "Baseus", "Samsung", "Huawei", "Honor", "Marshall", "Sennheiser", "Edifier", "Apple", "Nothing"),
+        known_brands=("Sony", "JBL", "HyperX", "Anker", "Soundcore", "Xiaomi", "QCY", "Baseus", "Samsung", "Huawei", "Honor", "Marshall", "Sennheiser", "Edifier", "Apple", "Nothing"),
         weak_indicators=("копия", "реплика", "без бренда", "проводные дешевые"),
         quality_requirements=("model", "connection"),
         minimum_plausible_price=300,
@@ -215,6 +215,30 @@ CATEGORY_SPECS: dict[str, CategorySpec] = {
         minimum_plausible_price=3_000,
         query_variants=("кровать {size} {criteria}", "двуспальная кровать {size}", "кровать с подъемным механизмом {size}"),
         ranking_preferences=("exact_size", "base", "lift_mechanism", "storage"),
+    ),
+    # A deliberately narrow escape hatch for technical products that do not
+    # belong to one of the verticals above.  It is never selected by
+    # ``detect_category``: the V2 request normalizer enters it only after it
+    # has extracted both a known technical brand and a concrete model code.
+    # This keeps a request such as "хорошая дрель" unsupported instead of
+    # pretending that arbitrary search snippets are comparable offers.
+    "generic_tech": _spec(
+        "generic_tech",
+        names=(),
+        required_product_markers=(),
+        accessory_markers=("запчасть", "аксессуар", "чехол", "кабель", "зарядка", "аккумулятор"),
+        useful_facts=("brand", "model", "availability"),
+        known_brands=(
+            "Acer", "Apple", "Asus", "Bosch", "Brother", "Canon", "DeWalt", "Dell", "DJI",
+            "Dyson", "Epson", "Garmin", "GoPro", "HP", "Huawei", "JBL", "Lenovo", "LG",
+            "Makita", "Meta", "MSI", "Nikon", "Nintendo", "Philips", "Samsung", "Sony",
+            "Steam", "Xiaomi",
+        ),
+        weak_indicators=("без модели", "неизвестная комплектация"),
+        quality_requirements=("model", "product_card", "price", "availability"),
+        minimum_plausible_price=500,
+        query_variants=("{identity} купить",),
+        ranking_preferences=("exact_model", "product_card", "price", "availability"),
     ),
     "unknown": _spec(
         "unknown",

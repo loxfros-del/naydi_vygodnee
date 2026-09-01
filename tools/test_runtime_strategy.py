@@ -114,6 +114,7 @@ class RuntimeStrategyTests(unittest.TestCase):
             patch.object(product_search.settings, "DIRECT_RETAIL_ENABLED", False),
             patch.object(product_search.settings, "SEARCHAPI_ENABLED", True),
             patch.object(product_search.settings, "SERPAPI_ENABLED", True),
+            patch.object(product_search.settings, "YANDEX_SEARCH_API_ENABLED", False),
             patch.object(product_search, "_collect_from_searchapi", side_effect=successful_source),
             patch.object(product_search, "_collect_from_serpapi", side_effect=failed_source),
             patch.object(product_search, "_apply_verification", side_effect=keep_raw),

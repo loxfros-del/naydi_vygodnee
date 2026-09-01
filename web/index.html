@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101010" />
+    <meta
+      name="description"
+      content="NOVA — спокойный поиск точных товаров ниже рынка."
+    />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="icon.svg" />
+    <link rel="stylesheet" href="styles.css?v=13" />
+    <title>NOVA — smart market</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#app">К содержанию</a>
+    <div id="app" class="app-shell" aria-live="polite"></div>
+    <!-- The browser app must never wait for Telegram's optional SDK. -->
+    <script src="app.js?v=13" defer></script>
+    <script
+      src="https://telegram.org/js/telegram-web-app.js?61"
+      async
+      onload="window.dispatchEvent(new Event('telegram-web-app-ready'))"
+    ></script>
+  </body>
+</html>

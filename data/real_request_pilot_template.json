@@ -1,0 +1,734 @@
+{
+  "schema": "search_v2:real-request-pilot:1",
+  "pilot_name": "pilot-30-real-requests",
+  "instructions": "Fill only after consent and manual review. Do not add names, IDs, usernames, phones, query text, titles, URLs, cities or sellers.",
+  "channel_funnel": {
+    "telegram_direct": {"invitations": 0, "starts": 0},
+    "telegram_channel": {"invitations": 0, "starts": 0},
+    "website": {"invitations": 0, "starts": 0},
+    "referral": {"invitations": 0, "starts": 0},
+    "offline": {"invitations": 0, "starts": 0}
+  },
+  "cases": [
+    {
+      "participant_ref": "P01",
+      "category": "phone",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P02",
+      "category": "phone",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P03",
+      "category": "phone",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P04",
+      "category": "phone",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P05",
+      "category": "phone",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P06",
+      "category": "laptop",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P07",
+      "category": "laptop",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P08",
+      "category": "laptop",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P09",
+      "category": "laptop",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P10",
+      "category": "laptop",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P11",
+      "category": "tv",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P12",
+      "category": "tv",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P13",
+      "category": "tv",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P14",
+      "category": "tv",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P15",
+      "category": "tv",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P16",
+      "category": "headphones",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P17",
+      "category": "headphones",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P18",
+      "category": "headphones",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P19",
+      "category": "headphones",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P20",
+      "category": "headphones",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P21",
+      "category": "monitor",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P22",
+      "category": "monitor",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P23",
+      "category": "monitor",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P24",
+      "category": "monitor",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P25",
+      "category": "monitor",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P26",
+      "category": "chair",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P27",
+      "category": "chair",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P28",
+      "category": "chair",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P29",
+      "category": "chair",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    },
+    {
+      "participant_ref": "P30",
+      "category": "chair",
+      "channel": null,
+      "consent_confirmed": false,
+      "distinct_participant_confirmed": false,
+      "real_request_confirmed": false,
+      "automated": {
+        "top1_exact": null,
+        "top1_verified": null,
+        "recommendation_created": null,
+        "unsafe_candidate_count": null,
+        "system_error": null,
+        "duration_ms": null
+      },
+      "manual_review": {
+        "model_matches": null,
+        "link_opens": null,
+        "price_matches": null,
+        "availability_matches": null,
+        "condition_clear": null,
+        "false_savings_claim": null
+      }
+    }
+  ]
+}

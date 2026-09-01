@@ -1,0 +1,879 @@
+diff --git a/.env.example b/.env.example
+index aa92522..6c0f387 100644
+--- a/.env.example
++++ b/.env.example
+@@ -28,3 +28,17 @@ SEARCHAPI_HL=ru
+ SEARCHAPI_LOCATION=Russia
+ SEARCHAPI_MAX_RESULTS=5
+ SEARCHAPI_TIMEOUT_SECONDS=15
++
++# SerpApi Google Shopping (optional)
++SERPAPI_ENABLED=false
++SERPAPI_API_KEY=
++SERPAPI_GL=ru
++SERPAPI_HL=ru
++SERPAPI_LOCATION=Russia
++SERPAPI_MAX_RESULTS=5
++SERPAPI_TIMEOUT_SECONDS=15
++
++# Direct retail structured sources
++DIRECT_RETAIL_ENABLED=true
++DIRECT_RETAIL_MAX_RESULTS=5
++DIRECT_RETAIL_TIMEOUT_SECONDS=15
+diff --git a/app/candidate_verifier.py b/app/candidate_verifier.py
+index 587bffa..973c3b2 100644
+--- a/app/candidate_verifier.py
++++ b/app/candidate_verifier.py
+@@ -609,6 +609,92 @@ def detect_product_category(req: Request, candidate: Any = None, text: str = "")
+     return _category_from_text(candidate_text)
+ 
+ 
++def _extract_phone_facts(text: str) -> dict[str, Any]:
++    lowered = text.lower()
++    model = ""
++    match = re.search(r"\b(?:apple\s*)?(iphone|айфон)\s*(\d{1,2})(?:\s*(pro\s+max|pro|max|plus|mini|se|e))?\b", lowered)
++    if match:
++        model = "iPhone " + match.group(2) + (f" {match.group(3).upper()}" if match.group(3) else "")
++    memory_match = re.search(r"\b(64|128|256|512|1024)\s*(?:гб|gb|tb|тб)\b", lowered)
++    color = next((value for marker, value in (
++        ("черн", "черный"), ("бел", "белый"), ("красн", "красный"),
++        ("син", "синий"), ("зелен", "зеленый"), ("розов", "розовый"),
++        ("starlight", "starlight"), ("midnight", "midnight"),
++    ) if marker in lowered), "")
++    condition = "б/у" if any(marker in lowered for marker in ("б/у", "бу ", "used", "восстанов")) else "новый" if any(marker in lowered for marker in ("новый", "new")) else ""
++    return {
++        "model": model,
++        "memory": f"{memory_match.group(1)} ГБ" if memory_match else "",
++        "color": color,
++        "condition": condition,
++    }
++
++
++def _extract_laptop_facts(text: str) -> dict[str, Any]:
++    lowered = text.lower()
++    brand = next((brand for brand in (
++        "Acer", "Asus", "Apple", "Dell", "HP", "Huawei", "Honor", "Lenovo",
++        "MSI", "Samsung", "Xiaomi", "Thunderobot", "Maibenben", "Digma",
++    ) if brand.lower() in lowered), "")
++    cpu_match = re.search(r"\b((?:intel\s*)?(?:core\s*)?i[3579][-\s]?\d{3,5}[a-z]*|ryzen\s*[3579]\s*\d{3,4}[a-z]*|n95|n100|n150|n5095|celeron)\b", lowered, re.I)
++    ram_match = re.search(r"\b(?:ram\s*)?(\d{1,2})\s*(?:гб|gb)\b", lowered)
++    ssd_match = re.search(r"\b(?:ssd\s*)?(\d{3,4}|1\s*тб|1\s*tb)\s*(?:гб|gb|тб|tb)?\b", lowered)
++    screen_match = re.search(r"\b(13|14|15[.,]6|16|17[.,]3)\s*(?:\"|дюйм|inch)?", lowered)
++    return {
++        "brand": brand,
++        "cpu": cpu_match.group(1).upper() if cpu_match else "",
++        "ram": f"{ram_match.group(1)} ГБ" if ram_match else "",
++        "ssd": ssd_match.group(0).upper() if ssd_match else "",
++        "screen": screen_match.group(1).replace(",", ".") if screen_match else "",
++    }
++
++
++def _extract_headphone_facts(text: str) -> dict[str, Any]:
++    lowered = text.lower()
++    brand = next((brand for brand in (
++        "Sony", "JBL", "Anker", "Soundcore", "Xiaomi", "QCY", "Baseus",
++        "Samsung", "Huawei", "Honor", "Marshall", "Sennheiser", "Edifier",
++        "OnePlus", "Nothing", "Realme",
++    ) if brand.lower() in lowered), "")
++    if "tws" in lowered:
++        hp_type = "TWS"
++    elif any(marker in lowered for marker in ("беспровод", "bluetooth", "wireless")):
++        hp_type = "wireless"
++    elif any(marker in lowered for marker in ("проводн", "wired", "3.5", "3,5")):
++        hp_type = "wired"
++    else:
++        hp_type = ""
++    anc = any(marker in lowered for marker in ("anc", "шумоподав", "noise cancelling"))
++    model_match = re.search(r"\b([a-z]{1,8}\s?[-]?\s?\d{1,4}[a-z0-9-]*|wh-?1000xm\d|melobuds\s+\w+|liberty\s+\d+\s*\w*)\b", text, re.I)
++    return {
++        "brand": brand,
++        "headphone_type": hp_type,
++        "anc": anc if anc else "",
++        "model": model_match.group(1).strip() if model_match else "",
++    }
++
++
++def _extract_chair_facts(text: str) -> dict[str, Any]:
++    lowered = text.lower()
++    ergonomics = any(marker in lowered for marker in ("эргоном", "ортопед", "анатом"))
++    lumbar = "пояснич" in lowered
++    adjustments = []
++    if "регулиров" in lowered and "высот" in lowered:
++        adjustments.append("высота")
++    if "регулиров" in lowered and "подлокот" in lowered:
++        adjustments.append("подлокотники")
++    if "подголовник" in lowered:
++        adjustments.append("подголовник")
++    load_match = re.search(r"(?<!\d)(120|125|130|150)\s*кг", lowered)
++    return {
++        "ergonomics": ergonomics if ergonomics else "",
++        "lumbar_support": lumbar if lumbar else "",
++        "adjustments": adjustments,
++        "headrest": "подголовник" in lowered,
++        "load_capacity": f"{load_match.group(1)} кг" if load_match else "",
++    }
++
++
+ def extract_product_facts(
+     candidate: Any,
+     req: Request,
+@@ -642,10 +728,19 @@ def extract_product_facts(
+     url = str(getattr(candidate, "url", "") or "")
+     category = detect_product_category(req, candidate, combined)
+     if category != "tv":
++        category_facts: dict[str, Any] = {}
++        if category == "phone":
++            category_facts = _extract_phone_facts(combined)
++        elif category == "laptop":
++            category_facts = _extract_laptop_facts(combined)
++        elif category == "headphones":
++            category_facts = _extract_headphone_facts(combined)
++        elif category == "chair":
++            category_facts = _extract_chair_facts(combined)
+         return {
+             "category": category,
+-            "brand": brand,
+-            "model": model,
++            "brand": category_facts.get("brand", brand),
++            "model": category_facts.get("model", model),
+             "model_key": model_key,
+             "price": actual_price,
+             "store": source,
+@@ -656,6 +751,7 @@ def extract_product_facts(
+             "reviews_count": reviews_count,
+             "budget_status": _budget_status(actual_price, req),
+             "warnings": [],
++            **category_facts,
+         }
+     facts = {
+         "category": category,
+diff --git a/app/config.py b/app/config.py
+index 9eee9cf..1d1a175 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -55,6 +55,16 @@ class Settings(BaseSettings):
+     SEARCHAPI_LOCATION: str = "Russia"
+     SEARCHAPI_MAX_RESULTS: int = 5
+     SEARCHAPI_TIMEOUT_SECONDS: int = 15
++    SERPAPI_ENABLED: bool = False
++    SERPAPI_API_KEY: str = ""
++    SERPAPI_GL: str = "ru"
++    SERPAPI_HL: str = "ru"
++    SERPAPI_LOCATION: str = "Russia"
++    SERPAPI_MAX_RESULTS: int = 5
++    SERPAPI_TIMEOUT_SECONDS: int = 15
++    DIRECT_RETAIL_ENABLED: bool = True
++    DIRECT_RETAIL_MAX_RESULTS: int = 5
++    DIRECT_RETAIL_TIMEOUT_SECONDS: int = 15
+     ENABLE_PLAYWRIGHT_VERIFIER: bool = False
+     PLAYWRIGHT_HEADLESS: bool = True
+     PLAYWRIGHT_TIMEOUT_MS: int = 8000
+@@ -116,6 +126,16 @@ class Settings(BaseSettings):
+             SEARCHAPI_LOCATION=os.getenv("SEARCHAPI_LOCATION", "Russia").strip(),
+             SEARCHAPI_MAX_RESULTS=_env_int("SEARCHAPI_MAX_RESULTS", 5),
+             SEARCHAPI_TIMEOUT_SECONDS=_env_int("SEARCHAPI_TIMEOUT_SECONDS", 15),
++            SERPAPI_ENABLED=_env_bool("SERPAPI_ENABLED", False),
++            SERPAPI_API_KEY=os.getenv("SERPAPI_API_KEY", "").strip(),
++            SERPAPI_GL=os.getenv("SERPAPI_GL", "ru").strip(),
++            SERPAPI_HL=os.getenv("SERPAPI_HL", "ru").strip(),
++            SERPAPI_LOCATION=os.getenv("SERPAPI_LOCATION", "Russia").strip(),
++            SERPAPI_MAX_RESULTS=_env_int("SERPAPI_MAX_RESULTS", 5),
++            SERPAPI_TIMEOUT_SECONDS=_env_int("SERPAPI_TIMEOUT_SECONDS", 15),
++            DIRECT_RETAIL_ENABLED=_env_bool("DIRECT_RETAIL_ENABLED", True),
++            DIRECT_RETAIL_MAX_RESULTS=_env_int("DIRECT_RETAIL_MAX_RESULTS", 5),
++            DIRECT_RETAIL_TIMEOUT_SECONDS=_env_int("DIRECT_RETAIL_TIMEOUT_SECONDS", 15),
+             ENABLE_PLAYWRIGHT_VERIFIER=_env_bool("ENABLE_PLAYWRIGHT_VERIFIER", False),
+             PLAYWRIGHT_HEADLESS=_env_bool("PLAYWRIGHT_HEADLESS", True),
+             PLAYWRIGHT_TIMEOUT_MS=_env_int("PLAYWRIGHT_TIMEOUT_MS", 8000),
+diff --git a/app/handlers/admin.py b/app/handlers/admin.py
+index 9039cb3..b9b8c90 100644
+--- a/app/handlers/admin.py
++++ b/app/handlers/admin.py
+@@ -237,12 +237,40 @@ def _availability_label(facts: dict) -> str:
+ 
+ 
+ def _facts_compact_line(facts: dict) -> str:
++    category = str(facts.get("category") or "")
+     parts = []
+-    if facts.get("diagonal"):
++    if category == "phone":
++        for key in ("model", "memory", "color", "condition"):
++            if facts.get(key):
++                parts.append(str(facts[key]))
++    elif category == "laptop":
++        for key in ("brand", "cpu", "ram", "ssd", "screen"):
++            if facts.get(key):
++                parts.append(str(facts[key]))
++    elif category == "headphones":
++        for key in ("brand", "headphone_type", "model"):
++            if facts.get(key):
++                parts.append(str(facts[key]))
++        if facts.get("anc"):
++            parts.append("ANC")
++    elif category == "chair":
++        if facts.get("ergonomics"):
++            parts.append("эргономика")
++        if facts.get("lumbar_support"):
++            parts.append("поясничная поддержка")
++        if facts.get("adjustments"):
++            parts.append("регулировки: " + ", ".join(str(item) for item in facts["adjustments"]))
++        if facts.get("headrest"):
++            parts.append("подголовник")
++        if facts.get("load_capacity"):
++            parts.append(str(facts["load_capacity"]))
++    elif facts.get("diagonal"):
+         parts.append(f'{facts["diagonal"]}"')
+-    for key in ("resolution", "refresh_rate", "matrix_type"):
+-        if facts.get(key):
+-            parts.append(str(facts[key]))
++        for key in ("resolution", "refresh_rate", "matrix_type"):
++            if facts.get(key):
++                parts.append(str(facts[key]))
++    if not parts:
++        parts.append("факты не подтверждены")
+     if facts.get("budget_status"):
+         parts.append(_budget_status_label(str(facts["budget_status"])))
+     return ", ".join(parts)
+@@ -259,21 +287,65 @@ def _facts_detail_lines(sr: SearchResult) -> list[str]:
+     facts = _parse_facts(getattr(sr, "facts_json", ""))
+     if not facts:
+         return []
+-    model = facts.get("model") or facts.get("model_key") or "не подтверждена"
+-    diagonal = f'{facts.get("diagonal")}"' if facts.get("diagonal") else "не подтверждена"
+-    lines = [
+-        "",
+-        "<b>Факты:</b>",
+-        f"- Модель: {html.escape(str(model))}",
+-        f"- Диагональ: {html.escape(diagonal)}",
+-        f"- Разрешение: {html.escape(str(facts.get('resolution') or 'не подтверждено'))}",
+-        f"- Частота: {html.escape(str(facts.get('refresh_rate') or 'не подтверждена'))}",
+-        f"- Матрица: {html.escape(str(facts.get('matrix_type') or 'не подтверждена'))}",
++    category = str(facts.get("category") or "unknown")
++    lines = ["", "<b>Факты:</b>"]
++    if category == "phone":
++        items = (
++            ("Модель", facts.get("model")),
++            ("Память", facts.get("memory")),
++            ("Цвет", facts.get("color")),
++            ("Состояние", facts.get("condition")),
++        )
++    elif category == "laptop":
++        items = (
++            ("Бренд", facts.get("brand")),
++            ("CPU", facts.get("cpu")),
++            ("RAM", facts.get("ram")),
++            ("SSD", facts.get("ssd")),
++            ("Экран", facts.get("screen")),
++        )
++    elif category == "headphones":
++        items = (
++            ("Бренд", facts.get("brand")),
++            ("Тип", facts.get("headphone_type")),
++            ("ANC", "есть" if facts.get("anc") else ""),
++            ("Модель", facts.get("model")),
++        )
++    elif category == "chair":
++        adjustments = ", ".join(str(item) for item in facts.get("adjustments") or [])
++        items = (
++            ("Эргономика", "есть" if facts.get("ergonomics") else ""),
++            ("Поясничная поддержка", "есть" if facts.get("lumbar_support") else ""),
++            ("Регулировки", adjustments),
++            ("Подголовник", "есть" if facts.get("headrest") else ""),
++            ("Нагрузка", facts.get("load_capacity")),
++        )
++    elif category == "tv":
++        diagonal = f'{facts.get("diagonal")}"' if facts.get("diagonal") else ""
++        items = (
++            ("Модель", facts.get("model") or facts.get("model_key")),
++            ("Диагональ", diagonal),
++            ("Разрешение", facts.get("resolution")),
++            ("Частота", facts.get("refresh_rate")),
++            ("HDMI", facts.get("hdmi")),
++            ("Матрица", facts.get("matrix_type")),
++        )
++    else:
++        items = ()
++    confirmed = False
++    for label, value in items:
++        text = str(value or "").strip()
++        if text:
++            confirmed = True
++        lines.append(f"- {label}: {html.escape(text or 'не подтверждено')}")
++    if not confirmed:
++        lines.append("- факты не подтверждены")
++    lines.extend([
+         f"- Наличие: {html.escape(_availability_label(facts))}",
+         f"- Бюджет: {html.escape(_budget_status_label(str(facts.get('budget_status') or '')))}",
+-    ]
++    ])
+     ps5_line = _facts_ps5_line(facts)
+-    if ps5_line:
++    if category == "tv" and ps5_line:
+         lines.append(f"- PS5: {html.escape(ps5_line)}")
+     return lines
+ 
+@@ -334,6 +406,8 @@ async def _safe_edit_text(callback: CallbackQuery, text: str, reply_markup: Inli
+ 
+ 
+ def build_results_page(req_id: int, results: list[SearchResult], rejected_auto_count: int, page: int) -> tuple[str, InlineKeyboardMarkup]:
++    normal_count = sum(1 for item in results if item.status == "CANDIDATE")
++    manual_count = sum(1 for item in results if item.status != "CANDIDATE")
+     total = len(results)
+     page_count = max(1, (total + RESULTS_PAGE_SIZE - 1) // RESULTS_PAGE_SIZE)
+     page = max(0, min(page, page_count - 1))
+@@ -342,7 +416,11 @@ def build_results_page(req_id: int, results: list[SearchResult], rejected_auto_c
+ 
+     lines = [
+         f"📦 <b>Найденные варианты (заявка #{req_id})</b>",
+-        f"Страница {page + 1} из {page_count}. Нормальных: {total}",
++        (
++            f"Страница {page + 1} из {page_count}. Нормальных: {normal_count}"
++            if normal_count
++            else f"Страница {page + 1} из {page_count}. Проверенных хороших: 0. Требуют ручной проверки: {manual_count}"
++        ),
+     ]
+     if rejected_auto_count:
+         lines.append(f"Автоматически отклонено: {rejected_auto_count}")
+diff --git a/app/product_quality.py b/app/product_quality.py
+index a8c6f77..2be1703 100644
+--- a/app/product_quality.py
++++ b/app/product_quality.py
+@@ -5,6 +5,7 @@ Telegram handlers. It only reads request/candidate-like objects.
+ """
+ from __future__ import annotations
+ 
++from dataclasses import dataclass
+ from typing import Any
+ import re
+ 
+@@ -16,6 +17,10 @@ PS5_4K_UNCONFIRMED_RISK = "4K/UHD не подтверждено для PS5"
+ CHAIR_WEAK_MANUAL_RISK = "кресло требует ручной проверки эргономики"
+ CHAIR_CHEAP_MANUAL_RISK = "дешёвое кресло, нужна ручная проверка эргономики"
+ BAD_PRODUCT_RISK = "мусор/аксессуар, не товар"
++PRICE_MISSING_RISK = "цена не подтверждена"
++UNAVAILABLE_RISK = "товар недоступен"
++OVER_BUDGET_RISK = "товар выше бюджета"
++WRONG_MODEL_RISK = "не та модель товара"
+ 
+ KNOWN_GOOD_HEADPHONE_BRANDS = (
+     "sony", "jbl", "anker", "soundcore", "xiaomi", "qcy", "baseus",
+@@ -55,12 +60,43 @@ CHAIR_PART_START_MARKERS = (
+     "комплект колес", "комплект колёс",
+ )
+ CHAIR_WEAK_QUALITY_FEATURES = {"office_or_computer"}
++UNAVAILABLE_TEXT_MARKERS = (
++    "товар закончился", "нет в наличии", "скоро снова поступит",
++    "посмотреть аналоги", "sold out", "unavailable",
++)
++ACCESSORY_START_MARKERS = (
++    "чехол", "защитное стекло", "стекло", "кабель", "зарядка", "зарядное",
++    "коробка", "запчасть", "колесо", "колеса", "колёса", "газлифт",
++    "подлокотник", "подлокотники", "пульт", "кронштейн", "муляж",
++    "копия", "реплика",
++)
++ACCESSORY_CONTEXT_MARKERS = (
++    "для iphone", "для айфон", "для samsung", "для galaxy", "для телевизор",
++    "для tv", "для ноутбук", "для наушник", "для кресл", "для стул",
++    "запчаст", "замена", "ремонт",
++)
++MODEL_VARIANTS = ("pro max", "pro", "plus", "mini", "se", "ultra", "lite", "max", "fe", "e")
++
++
++@dataclass(frozen=True)
++class FinalQualityGateResult:
++    status: str = ""
++    reason: str = ""
++    product_quality_level: str = ""
++    keep_for_admin: bool | None = None
++    score_cap: int | None = None
+ 
+ 
+ def normalized_text(candidate: Any) -> str:
+     return f"{getattr(candidate, 'title', '')} {getattr(candidate, 'snippet', '')}".lower().replace("ё", "е")
+ 
+ 
++def _request_text(parsed: Any) -> str:
++    return " ".join(str(getattr(parsed, attr, "") or "") for attr in (
++        "product_name", "product", "original_query", "important_criteria",
++    )).lower().replace("ё", "е")
++
++
+ def _has_word(text: str, value: str) -> bool:
+     return re.search(rf"(?<![a-zа-я0-9]){re.escape(value)}(?![a-zа-я0-9])", text) is not None
+ 
+@@ -76,6 +112,124 @@ def _candidate_price(candidate: Any) -> int | None:
+         return int(digits) if digits else None
+ 
+ 
++def _budget_value(parsed: Any) -> int | None:
++    budget = getattr(parsed, "budget", None)
++    if budget is None and isinstance(parsed, dict):
++        budget = parsed.get("budget")
++    if budget is None:
++        return None
++    try:
++        value = int(str(budget).replace(" ", ""))
++        return value if value > 0 else None
++    except (TypeError, ValueError):
++        return None
++
++
++def _facts_text(candidate: Any) -> str:
++    facts = getattr(candidate, "product_facts", {}) or {}
++    if not isinstance(facts, dict):
++        return ""
++    return " ".join(str(value) for value in facts.values() if value is not None).lower().replace("ё", "е")
++
++
++def _combined_text(candidate: Any) -> str:
++    return " ".join((
++        normalized_text(candidate),
++        _facts_text(candidate),
++        str(getattr(candidate, "page_text", "") or "").lower().replace("ё", "е"),
++    ))
++
++
++def _is_unavailable_text(candidate: Any) -> bool:
++    text = _combined_text(candidate)
++    facts = getattr(candidate, "product_facts", {}) or {}
++    fact_availability = facts.get("availability_text", "") if isinstance(facts, dict) else ""
++    availability = str(getattr(candidate, "availability", "") or fact_availability).upper()
++    return availability == "UNAVAILABLE" or any(marker in text for marker in UNAVAILABLE_TEXT_MARKERS)
++
++
++def _is_accessory_or_wrong_product(candidate: Any) -> bool:
++    text = normalized_text(candidate)
++    stripped = text.strip()
++    if any(stripped.startswith(marker) for marker in ACCESSORY_START_MARKERS):
++        return True
++    has_accessory = any(marker in text for marker in ACCESSORY_START_MARKERS)
++    has_context = any(marker in text for marker in ACCESSORY_CONTEXT_MARKERS)
++    if has_accessory and has_context:
++        return True
++    if any(marker in text for marker in ("муляж", "копия", "реплика")):
++        return True
++    return False
++
++
++def _normalize_model_text(value: str) -> str:
++    return re.sub(r"[^a-zа-я0-9]+", " ", (value or "").lower().replace("ё", "е")).strip()
++
++
++def _extract_iphone_model(text: str) -> tuple[str, str] | None:
++    match = re.search(r"\b(?:iphone|айфон)\s*(\d{1,2})(?:\s*(pro\s+max|pro|max|plus|mini|se|ultra|lite|fe|e))?\b", text)
++    if not match:
++        return None
++    return match.group(1), _normalize_model_text(match.group(2) or "")
++
++
++def _extract_galaxy_model(text: str) -> tuple[str, str] | None:
++    match = re.search(r"\b(?:galaxy\s*)?s\s*(\d{2})(?:\s*(ultra|fe|plus|\+|lite))?\b", text)
++    if not match:
++        return None
++    variant = "plus" if match.group(2) == "+" else _normalize_model_text(match.group(2) or "")
++    return match.group(1), variant
++
++
++def _extract_sony_wh_model(text: str) -> str:
++    match = re.search(r"\bwh\s*[- ]?\s*1000\s*xm\s*(\d)\b", text)
++    return match.group(1) if match else ""
++
++
++def _contains_forbidden_variant(title_text: str, requested_variant: str) -> bool:
++    for variant in MODEL_VARIANTS:
++        if variant == requested_variant:
++            continue
++        pattern = variant.replace(" ", r"\s+")
++        if re.search(rf"\b{pattern}\b", title_text):
++            return True
++    return False
++
++
++def has_model_mismatch(candidate: Any, parsed: Any) -> bool:
++    query_text = _request_text(parsed)
++    title_text = _normalize_model_text(f"{getattr(candidate, 'title', '')} {getattr(candidate, 'snippet', '')}")
++
++    requested_iphone = _extract_iphone_model(query_text)
++    if requested_iphone:
++        number, variant = requested_iphone
++        actual = _extract_iphone_model(title_text)
++        if not actual or actual[0] != number:
++            return True
++        actual_variant = actual[1]
++        if variant:
++            return actual_variant != variant
++        return bool(actual_variant)
++
++    requested_galaxy = _extract_galaxy_model(query_text)
++    if requested_galaxy and "galaxy" in query_text:
++        number, variant = requested_galaxy
++        actual = _extract_galaxy_model(title_text)
++        if not actual or actual[0] != number:
++            return True
++        actual_variant = actual[1]
++        if variant:
++            return actual_variant != variant
++        return bool(actual_variant)
++
++    requested_sony = _extract_sony_wh_model(query_text)
++    if requested_sony:
++        actual_sony = _extract_sony_wh_model(title_text)
++        return actual_sony != requested_sony
++
++    return False
++
++
+ def headphone_brand_quality(candidate: Any, *, enabled: bool, budget: int | None = None) -> str:
+     if not enabled or not ((budget or 0) >= 5_000):
+         return ""
+@@ -232,3 +386,77 @@ def final_product_quality_level(
+     if quality_is_weak or has_weak_classification:
+         return "weak", DIRECT_QUALITY_MANUAL_RISK
+     return current_level, ""
++
++
++def final_quality_gate(candidate: Any, parsed: Any) -> FinalQualityGateResult:
++    """Universal final gate: only fully checked in-budget products stay normal."""
++    status = str(getattr(candidate, "verify_status", "") or "")
++    product_level = str(getattr(candidate, "product_quality_level", "") or "")
++    budget = _budget_value(parsed)
++    price = _candidate_price(candidate)
++
++    if product_level == "bad" or _is_accessory_or_wrong_product(candidate):
++        return FinalQualityGateResult(
++            status="WRONG_PRODUCT",
++            reason=BAD_PRODUCT_RISK,
++            product_quality_level="bad",
++            keep_for_admin=False,
++            score_cap=30,
++        )
++
++    if has_model_mismatch(candidate, parsed):
++        return FinalQualityGateResult(
++            status="WRONG_PRODUCT",
++            reason=WRONG_MODEL_RISK,
++            product_quality_level="bad",
++            keep_for_admin=False,
++            score_cap=30,
++        )
++
++    if _is_unavailable_text(candidate):
++        return FinalQualityGateResult(
++            status="UNAVAILABLE",
++            reason=UNAVAILABLE_RISK,
++            product_quality_level="weak" if product_level != "bad" else product_level,
++            keep_for_admin=False,
++            score_cap=40,
++        )
++
++    if price is None:
++        return FinalQualityGateResult(
++            status="PRICE_MISSING",
++            reason=PRICE_MISSING_RISK,
++            product_quality_level="weak" if product_level != "bad" else product_level,
++            keep_for_admin=False,
++            score_cap=40,
++        )
++
++    if budget and price > budget:
++        hard = price > budget * 1.15
++        return FinalQualityGateResult(
++            status="OVER_BUDGET_HARD" if hard else "OVER_BUDGET_SOFT",
++            reason=OVER_BUDGET_RISK,
++            product_quality_level="weak" if product_level != "bad" else product_level,
++            keep_for_admin=not hard,
++            score_cap=40 if hard else 60,
++        )
++
++    if product_level == "weak" and status in {"VERIFIED_GOOD", "VERIFIED_OK"}:
++        return FinalQualityGateResult(
++            status="NEED_MANUAL_CHECK",
++            reason=getattr(candidate, "why_not_verified_good", "") or DIRECT_QUALITY_MANUAL_RISK,
++            product_quality_level="weak",
++            keep_for_admin=True,
++            score_cap=80,
++        )
++
++    if product_level == "bad" and status in {"VERIFIED_GOOD", "VERIFIED_OK"}:
++        return FinalQualityGateResult(
++            status="WRONG_PRODUCT",
++            reason=getattr(candidate, "why_not_verified_good", "") or BAD_PRODUCT_RISK,
++            product_quality_level="bad",
++            keep_for_admin=False,
++            score_cap=30,
++        )
++
++    return FinalQualityGateResult()
+diff --git a/app/product_search.py b/app/product_search.py
+index 049eb0c..5ca7116 100644
+--- a/app/product_search.py
++++ b/app/product_search.py
+@@ -21,6 +21,7 @@ from app.candidate_verifier import (
+     BAD_ENCODING,
+     NEED_MANUAL_CHECK,
+     NOT_PRODUCT_PAGE,
++    OVER_BUDGET_HARD,
+     OVER_BUDGET_SOFT,
+     PRICE_MISSING,
+     REMOVED_LISTING,
+@@ -28,6 +29,7 @@ from app.candidate_verifier import (
+     VERIFIED_GOOD,
+     VERIFIED_OK,
+     VERIFY_BLOCKED,
++    WRONG_PRODUCT,
+     detect_product_category,
+     verify_candidate,
+     verify_candidates,
+@@ -53,6 +55,7 @@ from app.product_quality import (
+     headphone_brand_quality as quality_headphone_brand_quality,
+     headphone_feature_profile as quality_headphone_feature_profile,
+     direct_product_quality_level as quality_direct_product_quality_level,
++    final_quality_gate as quality_final_quality_gate,
+     final_product_quality_level as quality_final_product_quality_level,
+ )
+ from app.price_extractor import extract_price
+@@ -1114,6 +1117,11 @@ def _apply_ranking_sanity(req: Request, candidate: ProductCandidate) -> None:
+     if getattr(candidate, "product_quality_level", "") == "bad" and candidate.score > 40:
+         candidate.score = 40
+         candidate.score_cap_applied = candidate.score_cap_applied or "bad_quality:40"
++    final_cap = getattr(candidate, "final_quality_score_cap", None)
++    if final_cap is not None and candidate.score > float(final_cap):
++        candidate.score = float(final_cap)
++        reason = getattr(candidate, "final_quality_score_cap_reason", "") or "final_quality_gate"
++        candidate.score_cap_applied = candidate.score_cap_applied or f"final_quality_gate:{final_cap}:{reason}"
+ 
+ 
+ def score_result(
+@@ -1938,6 +1946,54 @@ def _apply_final_product_quality_guard(req: Request, verified_items: list[object
+         ))
+ 
+ 
++def _apply_universal_final_quality_gate(req: Request, verified_items: list[object]) -> None:
++    non_normal_statuses = {
++        NEED_MANUAL_CHECK,
++        VERIFY_BLOCKED,
++        PRICE_MISSING,
++        UNAVAILABLE,
++        WRONG_PRODUCT,
++        NOT_PRODUCT_PAGE,
++        OVER_BUDGET_SOFT,
++        OVER_BUDGET_HARD,
++    }
++    for item in verified_items:
++        candidate = item.candidate
++        gate = quality_final_quality_gate(candidate, req)
++        if not gate.status:
++            continue
++        if gate.product_quality_level:
++            candidate.product_quality_level = gate.product_quality_level
++        if gate.reason:
++            candidate.why_not_verified_good = gate.reason
++            _add_risk_flag(candidate, gate.reason)
++            item.reason = getattr(item, "reason", "") or gate.reason
++            item.risk_flags = list(dict.fromkeys(
++                list(getattr(item, "risk_flags", []) or []) + [gate.reason]
++            ))
++        item.verify_status = gate.status
++        candidate.verify_status = gate.status
++        if gate.keep_for_admin is not None:
++            item.keep_for_admin = gate.keep_for_admin
++        if gate.score_cap is not None:
++            candidate.final_quality_score_cap = gate.score_cap
++            candidate.final_quality_score_cap_reason = gate.reason or gate.status
++
++        if gate.product_quality_level == "bad" or gate.status in {WRONG_PRODUCT, NOT_PRODUCT_PAGE}:
++            candidate.quality = QUALITY_TRASH
++            candidate.status = "REJECTED_AUTO"
++            item.keep_for_admin = False
++        elif gate.status in non_normal_statuses:
++            candidate.quality = QUALITY_WEAK
++            candidate.status = "WEAK_CANDIDATE"
++        elif gate.status == VERIFIED_OK:
++            candidate.quality = QUALITY_OK
++            candidate.status = "CANDIDATE"
++        elif gate.status == VERIFIED_GOOD:
++            candidate.quality = QUALITY_GOOD
++            candidate.status = "CANDIDATE"
++
++
+ def _apply_verification(collection: SearchCollection, req: Request) -> None:
+     candidates_to_verify = [
+         item for item in collection.candidates
+@@ -1947,6 +2003,7 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
+     verified, playwright_summary = verify_with_playwright_fallback(verified, req)
+     _apply_direct_retail_verified_sanity(req, verified)
+     _apply_final_product_quality_guard(req, verified)
++    _apply_universal_final_quality_gate(req, verified)
+     stats = collection.verify_stats
+     stats["checked"] = len(verified)
+     stats["playwright_used"] = playwright_summary.used
+@@ -2149,7 +2206,8 @@ def _run_compare_search(req: Request, candidates: list[ProductCandidate], attemp
+                 if normalized_url in existing_urls:
+                     continue
+                 verified = verify_candidate(comp, req)
+-                if not verified.keep_for_admin or not comp.price or _verified_status(comp) not in {VERIFIED_GOOD, VERIFIED_OK, OVER_BUDGET_SOFT, VERIFY_BLOCKED}:
++                _apply_universal_final_quality_gate(req, [verified])
++                if not verified.keep_for_admin or not comp.price or _verified_status(comp) not in {VERIFIED_GOOD, VERIFIED_OK}:
+                     continue
+                 existing_urls.add(normalized_url)
+                 # Если цена ниже, чем у оригинального кандидата с тем же ключом
+@@ -2208,7 +2266,7 @@ def run_product_search(req: Request, max_results: int = 15) -> dict:
+             added += 1
+ 
+     # Compare search: ищем ту же модель дешевле на других площадках
+-    normal_candidates = [c for c in collection.candidates if c.quality in {QUALITY_GOOD, QUALITY_OK}]
++    normal_candidates = [c for c in collection.candidates if _verified_status(c) in {VERIFIED_GOOD, VERIFIED_OK}]
+     compare_found = _run_compare_search(req, normal_candidates, collection.attempts)
+     stats = collection.quality_stats
+     stats["compare_total"] = len([a for a in collection.attempts if a.source.startswith("compare_")])
+diff --git a/tools/search_benchmark.py b/tools/search_benchmark.py
+index 2efe523..273f89d 100644
+--- a/tools/search_benchmark.py
++++ b/tools/search_benchmark.py
+@@ -322,16 +322,22 @@ def run_one(raw_query: str, index: int) -> dict[str, Any]:
+     checked_candidates = _verified_candidates(collection)
+     fetch_stats = _fetch_stats(checked_candidates)
+     quality = _quality_label(len(saved), has_missing_price)
++    saved_verified_good = sum(1 for item in saved if getattr(item, "verify_status", item.quality) == "VERIFIED_GOOD")
++    saved_need_manual = sum(1 for item in saved if getattr(item, "verify_status", item.quality) == NEED_MANUAL_CHECK)
++    saved_verify_blocked = sum(1 for item in saved if getattr(item, "verify_status", item.quality) == VERIFY_BLOCKED)
+     stats = {
+         "parsed_product_name": parsed.get("product_name") or "",
+         "category": category,
+         "RAW": len(raw_candidates),
+         "checked": verify_stats.get("checked", 0),
+         "saved_for_admin": len(saved),
+-        "verified_good": verify_stats.get("VERIFIED_GOOD", 0),
++        "saved_VERIFIED_GOOD": saved_verified_good,
+         "verified_ok": verify_stats.get("VERIFIED_OK", 0),
+-        "need_manual_check": verify_stats.get(NEED_MANUAL_CHECK, 0),
+-        "verify_blocked": verify_stats.get(VERIFY_BLOCKED, 0),
++        "saved_NEED_MANUAL_CHECK": saved_need_manual,
++        "saved_VERIFY_BLOCKED": saved_verify_blocked,
++        "checked_VERIFIED_GOOD": verify_stats.get("VERIFIED_GOOD", 0),
++        "checked_NEED_MANUAL_CHECK": verify_stats.get(NEED_MANUAL_CHECK, 0),
++        "checked_VERIFY_BLOCKED": verify_stats.get(VERIFY_BLOCKED, 0),
+         "blocked_by_site": verify_stats.get(VERIFY_BLOCKED, 0),
+         "in_budget": _in_budget_count(saved, budget),
+         "low_price_suspect": sum(1 for item in saved if _has_risk(item, LOW_PRICE_RISK)),
+diff --git a/tools/test_search.py b/tools/test_search.py
+index d9f085f..ef156dd 100644
+--- a/tools/test_search.py
++++ b/tools/test_search.py
+@@ -20,10 +20,13 @@ from app.product_search import collect_product_candidates, generate_search_queri
+ from app.candidate_verifier import (
+     BAD_ENCODING,
+     NEED_MANUAL_CHECK,
++    OVER_BUDGET_HARD,
++    OVER_BUDGET_SOFT,
+     PRICE_MISSING,
+     REMOVED_LISTING,
+     UNAVAILABLE,
+     VERIFY_BLOCKED,
++    WRONG_PRODUCT,
+ )
+ 
+ 
+@@ -57,6 +60,17 @@ def main() -> int:
+     verify_stats = collection.verify_stats
+     raw_candidates = collection.raw_candidates
+     saved_candidates = collection.candidates
++    saved_verified_good = sum(1 for item in saved_candidates if getattr(item, "verify_status", item.quality) == "VERIFIED_GOOD")
++    saved_verified_ok = sum(1 for item in saved_candidates if getattr(item, "verify_status", item.quality) == "VERIFIED_OK")
++    saved_need_manual = sum(1 for item in saved_candidates if getattr(item, "verify_status", item.quality) == NEED_MANUAL_CHECK)
++    saved_verify_blocked = sum(1 for item in saved_candidates if getattr(item, "verify_status", item.quality) == VERIFY_BLOCKED)
++    weak_status_count = sum(
++        1 for item in saved_candidates
++        if getattr(item, "verify_status", item.quality) in {
++            NEED_MANUAL_CHECK, VERIFY_BLOCKED, PRICE_MISSING, UNAVAILABLE,
++            WRONG_PRODUCT, OVER_BUDGET_SOFT, OVER_BUDGET_HARD,
++        }
++    )
+     trash = [item for item in raw_candidates if item.quality == "TRASH"]
+     good = [item for item in raw_candidates if item.quality == "GOOD"]
+     ok = [item for item in raw_candidates if item.quality == "OK"]
+@@ -77,7 +91,16 @@ def main() -> int:
+     print("УПАЛИ ИСТОЧНИКИ: " + (", ".join(failed_sources) if failed_sources else "нет"))
+     print("GOOD/OK ДАЛИ: " + (", ".join(productive_sources) if productive_sources else "нет"))
+     print(
+-        "\nВЕРИФИКАЦИЯ СТРАНИЦ: "
++        "\nСОХРАНЕНО ДЛЯ АДМИНА: "
++        f"saved_for_admin={len(saved_candidates)}; "
++        f"VERIFIED_GOOD={saved_verified_good}; "
++        f"VERIFIED_OK={saved_verified_ok}; "
++        f"NEED_MANUAL_CHECK={saved_need_manual}; "
++        f"VERIFY_BLOCKED={saved_verify_blocked}; "
++        f"WEAK/PRICE_MISSING/WRONG/UNAVAILABLE/OVER_BUDGET={weak_status_count}"
++    )
++    print(
++        "ВЕРИФИКАЦИЯ СТРАНИЦ (checked): "
+         f"checked={verify_stats.get('checked', 0)}; "
+         f"verified_good={verify_stats.get('VERIFIED_GOOD', 0)}; "
+         f"verified_ok={verify_stats.get('VERIFIED_OK', 0)}; "
+@@ -103,7 +126,7 @@ def main() -> int:
+     print(f"\nОсновные кандидаты для админа: {len(saved_candidates)}")
+     if budget:
+         print(f"Среди RAW — в бюджете: {in_budget}; сильно выше бюджета: {strongly_over_budget}")
+-    if verify_stats.get("VERIFIED_GOOD", 0) + verify_stats.get("VERIFIED_OK", 0) < 3:
++    if saved_verified_good < 3:
+         print("Нормальных проверенных вариантов мало. Нужно ручное уточнение / Алиса / Gemini.")
+     for index, item in enumerate(saved_candidates, 1):
+         price = f"{item.price} ₽" if item.price else "цена не найдена"
+@@ -135,19 +158,46 @@ def main() -> int:
+             f"why_not_verified_good={getattr(item, 'why_not_verified_good', '-') or '-'}"
+         )
+         if facts:
+-            print(
+-                "   facts: "
+-                f"model_key={facts.get('model_key') or '-'}; "
+-                f"price={facts.get('price')}; "
++            category = facts.get("category") or "unknown"
++            common = (
++                f"category={category}; price={facts.get('price')}; "
+                 f"budget_status={facts.get('budget_status') or '-'}; "
+-                f"availability={facts.get('availability_text') or '-'}; "
+-                f"diagonal={facts.get('diagonal') or '-'}; "
+-                f"resolution={facts.get('resolution') or '-'}; "
+-                f"refresh_rate={facts.get('refresh_rate') or '-'}; "
+-                f"matrix_type={facts.get('matrix_type') or '-'}; "
+-                f"ps5_flags={facts.get('ps5_flags') or []}; "
+-                f"warnings={facts.get('warnings') or []}"
++                f"availability={facts.get('availability_text') or '-'}"
+             )
++            if category == "phone":
++                detail = (
++                    f"model={facts.get('model') or '-'}; memory={facts.get('memory') or '-'}; "
++                    f"color={facts.get('color') or '-'}; condition={facts.get('condition') or '-'}"
++                )
++            elif category == "tv":
++                detail = (
++                    f"model_key={facts.get('model_key') or '-'}; diagonal={facts.get('diagonal') or '-'}; "
++                    f"resolution={facts.get('resolution') or '-'}; refresh_rate={facts.get('refresh_rate') or '-'}; "
++                    f"hdmi={facts.get('hdmi') or '-'}; matrix_type={facts.get('matrix_type') or '-'}; "
++                    f"ps5_flags={facts.get('ps5_flags') or []}; warnings={facts.get('warnings') or []}"
++                )
++            elif category == "laptop":
++                detail = (
++                    f"brand={facts.get('brand') or '-'}; cpu={facts.get('cpu') or '-'}; "
++                    f"ram={facts.get('ram') or '-'}; ssd={facts.get('ssd') or '-'}; "
++                    f"screen={facts.get('screen') or '-'}"
++                )
++            elif category == "headphones":
++                detail = (
++                    f"brand={facts.get('brand') or '-'}; type={facts.get('headphone_type') or '-'}; "
++                    f"anc={facts.get('anc') or '-'}; model={facts.get('model') or '-'}"
++                )
++            elif category == "chair":
++                detail = (
++                    f"ergonomics={facts.get('ergonomics') or '-'}; "
++                    f"lumbar_support={facts.get('lumbar_support') or '-'}; "
++                    f"adjustments={facts.get('adjustments') or []}; "
++                    f"headrest={facts.get('headrest') or '-'}; "
++                    f"load_capacity={facts.get('load_capacity') or '-'}"
++                )
++            else:
++                detail = "факты не подтверждены"
++            print(f"   facts: {common}; {detail}")
+ 
+     if collection.verified_rejections:
+         print("\nDEBUG ОТБРАКОВКИ VERIFY")

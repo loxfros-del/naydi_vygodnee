@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +11,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.search_v2.adapters.base import SourceAdapter, SourceCapabilities, SourceContext, SourceResult
+from app.net_client import FetchResult
+from app.search_v2.external_page_verifier import ExternalProductPageVerifier
 from app.search_v2.models import (
     ProductCondition, RawOffer, RecommendationRole, SearchRequestV2, SearchResultStatus,
     SourceAttempt, SourceQuery, SourceStatus, VerificationAccess,
@@ -213,6 +216,332 @@ class SearchV2EndToEndTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, SearchResultStatus.PARTIAL_SUCCESS)
         self.assertTrue(any(attempt.status is SourceStatus.ERROR for attempt in result.source_attempts))
         self.assertTrue(any("429" in error for error in result.errors))
+
+    async def test_core_marketplaces_run_before_optional_web_discovery(self) -> None:
+        call_order: list[str] = []
+
+        class OrderedAdapter(FakeAdapter):
+            async def search(self, request, source_query, context):
+                call_order.append(self.name)
+                return await super().search(request, source_query, context)
+
+        core = OrderedAdapter("yandex_market", "Яндекс Маркет", [
+            raw("yandex_market", "Яндекс Маркет", "core", "Apple iPhone 16 Pro 256 ГБ новый", 79_990, "https://market.yandex.ru/product--iphone/123456"),
+        ])
+        web = OrderedAdapter("yandex_web", "Яндекс Поиск", status=SourceStatus.EMPTY)
+        service = SearchServiceV2(
+            orchestrator=SearchSourceOrchestrator(
+                SourceRegistry((core, web)), max_concurrency=2, per_source_timeout=1, case_timeout=2,
+            ),
+            discovery_sources=("yandex_market",),
+            web_discovery_sources=("yandex_web",),
+            anchor_sources=(),
+            generic_sources=(),
+            overall_timeout=3,
+        )
+
+        await service.search(legacy_request())
+
+        self.assertLess(call_order.index("yandex_market"), call_order.index("yandex_web"))
+
+    async def test_page_verification_is_bounded_and_skips_hard_mismatches(self) -> None:
+        rows = [
+            raw(
+                "yandex_web",
+                "Яндекс Поиск",
+                f"good-{index}",
+                "Apple iPhone 16 Pro 256 ГБ новый",
+                70_000 + index * 1_000,
+                f"https://shop.example/product/iphone-16-pro-{index}",
+                seller=f"Seller {index}",
+            )
+            for index in range(5)
+        ]
+        rows.insert(0, raw(
+            "yandex_web",
+            "Яндекс Поиск",
+            "wrong-model",
+            "Apple iPhone 15 Pro 256 ГБ новый",
+            50_000,
+            "https://shop.example/product/iphone-15-pro",
+            seller="Wrong Seller",
+        ))
+        adapter = FakeAdapter("yandex_web", "Яндекс Поиск", rows)
+        verified_ids: list[str] = []
+
+        async def verifier(offer):
+            verified_ids.append(offer.product_id)
+            return None
+
+        service = SearchServiceV2(
+            orchestrator=SearchSourceOrchestrator(
+                SourceRegistry((adapter,)),
+                max_concurrency=2,
+                per_source_timeout=1,
+                case_timeout=2,
+                result_limit=10,
+            ),
+            discovery_sources=("yandex_web",),
+            anchor_sources=(),
+            web_discovery_sources=(),
+            generic_sources=(),
+            page_verifier=verifier,
+            page_verification_limit=2,
+            overall_timeout=3,
+        )
+
+        result = await service.search(legacy_request())
+
+        self.assertEqual(len(verified_ids), 2)
+        self.assertNotIn("wrong-model", verified_ids)
+        self.assertIn("wrong-model", {offer.product_id for offer in result.rejected_offers})
+
+    async def test_unknown_yandex_product_url_shape_reaches_bounded_verifier(self) -> None:
+        adapter = FakeAdapter("yandex_web", "Яндекс Поиск", [
+            raw(
+                "yandex_web",
+                "Яндекс Поиск",
+                "unknown-route",
+                "Apple iPhone 16 Pro 256 ГБ новый",
+                79_990,
+                "https://shop.example/SM-A556E08256DBL2E1S/",
+                seller="Verified shop",
+                metadata={"page_verification_required": True, "seller_verified": True},
+            ),
+        ])
+        calls: list[str] = []
+
+        async def verifier(offer):
+            calls.append(offer.product_id)
+            metadata = dict(offer.raw_metadata)
+            metadata.pop("not_product_page", None)
+            metadata.update({
+                "product_page_verified": True,
+                "external_page_verified": True,
+                "price_verified": True,
+                "availability_verified": True,
+                "external_page_verification": {"verified": True},
+            })
+            return replace(offer, raw_metadata=metadata)
+
+        service = SearchServiceV2(
+            orchestrator=SearchSourceOrchestrator(
+                SourceRegistry((adapter,)), max_concurrency=1, per_source_timeout=1, case_timeout=2,
+            ),
+            discovery_sources=("yandex_web",),
+            anchor_sources=(),
+            web_discovery_sources=(),
+            generic_sources=(),
+            page_verifier=verifier,
+            page_verification_limit=1,
+            overall_timeout=3,
+        )
+
+        result = await service.search(legacy_request())
+
+        self.assertEqual(calls, ["unknown-route"])
+        self.assertIn("unknown-route", {offer.product_id for offer in result.normalized_offers})
+
+    async def test_single_expensive_exact_source_still_runs_broad_discovery(self) -> None:
+        yandex = FakeAdapter("yandex_market", "Яндекс Маркет", [
+            raw("yandex_market", "Яндекс Маркет", "market-expensive", "Apple iPhone 16 Pro 256 ГБ новый", 150_000, "https://market.yandex.ru/product--iphone/123456", seller="Market"),
+        ])
+        ozon = FakeAdapter("ozon", "Ozon", status=SourceStatus.EMPTY)
+        avito = FakeAdapter("avito", "Avito", status=SourceStatus.EMPTY)
+        dns = FakeAdapter("dns", "DNS", status=SourceStatus.EMPTY)
+        generic = FakeAdapter("generic_exact", "Веб-поиск", [
+            raw("generic_exact", "Веб-поиск", "external-low", "Apple iPhone 16 Pro 256 ГБ новый", 75_399, "https://shop.example/product/iphone-16-pro-256", seller="shop.example"),
+        ])
+
+        result = await self.service((yandex, ozon, avito, dns, generic)).search(legacy_request())
+
+        self.assertTrue(generic.calls, "one expensive source is not enough to establish the market")
+        self.assertIn("external-low", {offer.product_id for offer in result.normalized_offers})
+        self.assertEqual(
+            min(offer.price for offer in result.normalized_offers if offer.price),
+            75_399,
+        )
+
+    async def test_two_prices_from_two_sources_still_run_broad_discovery(self) -> None:
+        market = FakeAdapter("yandex_market", "Яндекс Маркет", [
+            raw("yandex_market", "Яндекс Маркет", "market-one", "Apple iPhone 16 Pro 256 ГБ новый", 90_000, "https://market.yandex.ru/product--iphone/123456"),
+        ])
+        ozon = FakeAdapter("ozon", "Ozon", [
+            raw("ozon", "Ozon", "ozon-one", "Apple iPhone 16 Pro 256 ГБ новый", 89_000, "https://ozon.ru/product/iphone-16-pro-123456"),
+        ])
+        avito = FakeAdapter("avito", "Avito", status=SourceStatus.EMPTY)
+        dns = FakeAdapter("dns", "DNS", status=SourceStatus.EMPTY)
+        generic = FakeAdapter("generic_exact", "Веб-поиск", status=SourceStatus.EMPTY)
+
+        await self.service((market, ozon, avito, dns, generic)).search(legacy_request())
+
+        self.assertTrue(generic.calls, "two prices are not enough for a market picture")
+
+    async def test_yandex_web_discovery_runs_and_uses_verified_page_price(self) -> None:
+        web = FakeAdapter("yandex_web", "Яндекс Поиск", [
+            raw(
+                "yandex_web", "Яндекс Поиск", "external-low",
+                "Сниппет iPhone 16 Pro 256 ГБ", None,
+                "https://store.example/product/iphone-16-pro-256",
+                metadata={
+                    "page_verification_required": True,
+                    "product_page_verified": False,
+                    "price_confidence": 0.0,
+                },
+            ),
+        ])
+        market = FakeAdapter("yandex_market", "Яндекс Маркет", [
+            raw("yandex_market", "Яндекс Маркет", "market-expensive", "Apple iPhone 16 Pro 256 ГБ новый", 150_217, "https://market.yandex.ru/product--iphone/987654"),
+        ])
+        ozon = FakeAdapter("ozon", "Ozon", [
+            raw("ozon", "Ozon", "ozon-expensive", "Apple iPhone 16 Pro 256 ГБ новый", 145_000, "https://ozon.ru/product/iphone-16-pro-987654"),
+        ])
+        avito = FakeAdapter("avito", "Avito", status=SourceStatus.EMPTY)
+        dns = FakeAdapter("dns", "DNS", status=SourceStatus.EMPTY)
+        generic = FakeAdapter("generic_exact", "Веб-поиск", status=SourceStatus.EMPTY)
+
+        async def verifier(offer):
+            if offer.source != "yandex_web":
+                return None
+            metadata = dict(offer.raw_metadata)
+            metadata.update({
+                "product_page_verified": True,
+                "external_page_verified": True,
+                "price_verified": True,
+                "availability_verified": True,
+                "external_page_verification": {"verified": True, "price_source": "json_ld:offer.price"},
+            })
+            return replace(
+                offer,
+                title="Apple iPhone 16 Pro 256 ГБ новый",
+                price=75_399,
+                price_confidence=0.95,
+                raw_metadata=metadata,
+            )
+
+        service = self.service((web, market, ozon, avito, dns, generic))
+        service = SearchServiceV2(
+            orchestrator=service.orchestrator,
+            web_discovery_sources=("yandex_web",),
+            page_verifier=verifier,
+            overall_timeout=5,
+        )
+        result = await service.search(legacy_request())
+
+        self.assertTrue(web.calls, "Yandex web discovery must not wait for a marketplace failure")
+        external = next(offer for offer in result.normalized_offers if offer.product_id == "external-low")
+        self.assertEqual(external.price, 75_399)
+        self.assertTrue(external.raw_metadata["external_page_verified"])
+        self.assertTrue(external.final_verification.price_verified)
+        self.assertEqual(min(offer.price for offer in result.normalized_offers if offer.price), 75_399)
+
+    async def test_wildberries_offer_is_removed_when_direct_page_verification_fails(self) -> None:
+        request = SearchRequestV2(
+            category="coffee_machine",
+            brand="DeLonghi",
+            canonical_model="DeLonghi Magnifica S ECAM21.117.SB",
+            supported_category=True,
+            hard_tokens=["DeLonghi", "Magnifica", "ECAM21.117.SB"],
+        )
+        wildberries = FakeAdapter("wildberries", "Wildberries", [
+            raw(
+                "wildberries", "Wildberries", "wb-ecam21",
+                "Кофемашина DeLonghi Magnifica S ECAM21.117.SB серебристый черный",
+                27_344,
+                "https://www.wildberries.ru/catalog/321732159/detail.aspx",
+            ),
+        ])
+
+        def blocked_fetch(url: str, **_kwargs):
+            return FetchResult(
+                ok=False,
+                status_code=429,
+                final_url=url,
+                blocked=True,
+                blocked_reason="rate_limited",
+            )
+
+        orchestrator = SearchSourceOrchestrator(
+            SourceRegistry((wildberries,)),
+            max_concurrency=1,
+            per_source_timeout=1,
+            case_timeout=2,
+            result_limit=5,
+        )
+        result = await SearchServiceV2(
+            orchestrator=orchestrator,
+            web_discovery_sources=("wildberries",),
+            discovery_sources=(),
+            anchor_sources=(),
+            generic_sources=(),
+            page_verifier=ExternalProductPageVerifier(blocked_fetch),
+            overall_timeout=3,
+        ).search(request)
+
+        self.assertTrue(wildberries.calls)
+        self.assertEqual(result.normalized_offers, [])
+        self.assertEqual(result.recommendations, [])
+        self.assertEqual({offer.product_id for offer in result.rejected_offers}, {"wb-ecam21"})
+        rejected = result.rejected_offers[0]
+        self.assertTrue(rejected.raw_metadata["not_product_page"])
+        self.assertFalse(rejected.raw_metadata["external_page_verified"])
+        self.assertIsNone(rejected.price)
+
+    async def test_wildberries_offer_appears_only_after_direct_page_verification(self) -> None:
+        request = SearchRequestV2(
+            category="coffee_machine",
+            brand="DeLonghi",
+            canonical_model="DeLonghi Magnifica S ECAM21.117.SB",
+            supported_category=True,
+            hard_tokens=["DeLonghi", "Magnifica", "ECAM21.117.SB"],
+        )
+        wildberries = FakeAdapter("wildberries", "Wildberries", [
+            raw(
+                "wildberries", "Wildberries", "wb-ecam21",
+                "Кофемашина DeLonghi Magnifica S ECAM21.117.SB серебристый черный",
+                30_580,
+                "https://www.wildberries.ru/catalog/321732159/detail.aspx",
+            ),
+        ])
+
+        def verified_fetch(url: str, **_kwargs):
+            return FetchResult(
+                ok=True,
+                status_code=200,
+                final_url=url,
+                html="""
+                    <script type="application/ld+json">
+                    {"@type":"Product",
+                     "name":"Кофемашина DeLonghi Magnifica S ECAM21.117.SB серебристый черный",
+                     "offers":{"@type":"Offer","price":"27344",
+                     "availability":"https://schema.org/InStock"}}
+                    </script>
+                """,
+            )
+
+        orchestrator = SearchSourceOrchestrator(
+            SourceRegistry((wildberries,)),
+            max_concurrency=1,
+            per_source_timeout=1,
+            case_timeout=2,
+            result_limit=5,
+        )
+        result = await SearchServiceV2(
+            orchestrator=orchestrator,
+            web_discovery_sources=("wildberries",),
+            discovery_sources=(),
+            anchor_sources=(),
+            generic_sources=(),
+            page_verifier=ExternalProductPageVerifier(verified_fetch),
+            overall_timeout=3,
+        ).search(request)
+
+        self.assertTrue(wildberries.calls)
+        offer = next(item for item in result.normalized_offers if item.product_id == "wb-ecam21")
+        self.assertEqual(offer.price, 27_344)
+        self.assertTrue(offer.raw_metadata["external_page_verified"])
+        self.assertTrue(offer.final_verification.price_verified)
+        self.assertEqual({item.offer_id for item in result.recommendations}, {offer.offer_id})
 
     async def test_unsupported_category_makes_no_network_call(self) -> None:
         adapters = self.adapters()

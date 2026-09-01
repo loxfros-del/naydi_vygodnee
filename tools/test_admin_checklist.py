@@ -48,6 +48,7 @@ class AdminChecklistTests(unittest.IsolatedAsyncioTestCase):
             for button in row
         }
         self.assertTrue({
+            "manualall_7",
             "manualmodel_7", "manuallink_7", "manualprice_7", "manualavailable_7",
             "manualsellerok_7", "manualsellercheck_7",
         }.issubset(callbacks))

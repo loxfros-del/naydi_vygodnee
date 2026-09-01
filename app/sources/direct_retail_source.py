@@ -37,7 +37,11 @@ SOURCES: tuple[DirectRetailDefinition, ...] = (
     DirectRetailDefinition("dns", DNS_DIRECT_SOURCE, "DNS", "https://www.dns-shop.ru/search/?q={query}"),
     DirectRetailDefinition("citilink", CITILINK_DIRECT_SOURCE, "Citilink", "https://www.citilink.ru/search/?text={query}"),
     DirectRetailDefinition("mvideo", MVIDEO_DIRECT_SOURCE, "M.Video", "https://www.mvideo.ru/internal/search.jsp?q={query}"),
-    DirectRetailDefinition("yandex_market", YANDEX_MARKET_DIRECT_SOURCE, "Yandex Market", "https://market.yandex.ru/search?text={query}"),
+    # ``how=aprice`` is the public Market sort value for "Подешевле".  It
+    # keeps this collector on the normal search page (no private endpoint,
+    # cookies or browser automation), but prevents the first sponsored cards
+    # from hiding cheaper direct product cards.
+    DirectRetailDefinition("yandex_market", YANDEX_MARKET_DIRECT_SOURCE, "Yandex Market", "https://market.yandex.ru/search?text={query}&how=aprice"),
 )
 
 CATEGORY_TITLE_MARKERS = (
@@ -249,6 +253,47 @@ def _extract_regex_items(html_text: str, source: DirectRetailDefinition) -> list
     return rows
 
 
+def _extract_yandex_market_html_items(html_text: str, source: DirectRetailDefinition) -> list[dict[str, Any]]:
+    """Extract the server-rendered organic cards from Market search HTML.
+
+    Market currently exposes these cards as ``article[data-auto=searchOrganic]``
+    rather than JSON-LD.  We intentionally require the card link, title and a
+    price embedded in the same article, so category/search URLs and snippets
+    can never become offers.
+    """
+    if source.source != YANDEX_MARKET_DIRECT_SOURCE:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    article_re = re.compile(
+        r"<article\b(?=[^>]*\bdata-auto=[\"']searchOrganic[\"'])[^>]*>(.*?)</article>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for article in article_re.findall(html_text):
+        link_match = re.search(r"<a\b[^>]*\bhref=[\"']([^\"']+)", article, re.IGNORECASE)
+        title_match = re.search(r"<img\b[^>]*\balt=[\"']([^\"']+)", article, re.IGNORECASE)
+        if not link_match or not title_match:
+            continue
+        url = _absolute_url(html.unescape(link_match.group(1)), source)
+        title = _clean_text(html.unescape(title_match.group(1)))
+        if not title or not _is_direct_product_url(url, source.source):
+            continue
+
+        # The same card can contain an old price and a timestamp.  Only values
+        # in the normal product-price range are considered, and the visible
+        # current price is the lower of old/current values.
+        raw_values = re.findall(
+            r'"price"\s*:\s*\{[^{}]{0,220}?"value"\s*:\s*"?(\d+)"?',
+            article,
+            re.IGNORECASE,
+        )
+        prices = [int(value) for value in raw_values if 1_000 <= int(value) <= 10_000_000]
+        if not prices:
+            continue
+        rows.append({"title": title, "url": url, "price": min(prices)})
+    return rows
+
+
 def _absolute_url(url: Any, source: DirectRetailDefinition) -> str:
     text = _clean_text(url)
     if not text:
@@ -274,6 +319,8 @@ def _is_direct_product_url(url: str, source_name: str) -> bool:
         return False
     if any(key in query for key in ("text=", "q=", "query=", "search=")):
         return False
+    if source_name == DNS_DIRECT_SOURCE:
+        return "dns-shop.ru" in domain and "/product/" in path
     if source_name == CITILINK_DIRECT_SOURCE:
         return "citilink.ru" in domain and "/product/" in path
     if source_name == MVIDEO_DIRECT_SOURCE:
@@ -362,6 +409,7 @@ def debug_search_direct_retail_source(
     html_text, debug = _fetch_source(source, query)
     rows = _extract_json_items(html_text)
     rows.extend(_extract_regex_items(html_text, source))
+    rows.extend(_extract_yandex_market_html_items(html_text, source))
     debug["raw_count"] = len(rows)
 
     candidates: list[dict] = []
@@ -375,8 +423,11 @@ def debug_search_direct_retail_source(
             continue
         seen.add(key)
         candidates.append(candidate)
-        if len(candidates) >= _max_results():
-            break
+    if source.source == YANDEX_MARKET_DIRECT_SOURCE:
+        # Price order is meaningful only for the Market search source.  Other
+        # direct retailers retain their own ordering.
+        candidates.sort(key=lambda item: (int(item.get("price") or 10**12), item.get("title") or ""))
+    candidates = candidates[:_max_results()]
     debug["candidates"] = candidates
     debug["candidates_count"] = len(candidates)
     if not candidates and debug["status"] == "ok":

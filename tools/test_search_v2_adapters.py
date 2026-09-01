@@ -14,6 +14,7 @@ from app.search_v2.adapters import (
     OzonAdapter,
     WildberriesAdapterV2,
     YandexMarketAdapter,
+    YandexWebDiscoveryAdapter,
 )
 from app.search_v2.adapters.base import (
     SourceContext,
@@ -211,27 +212,43 @@ class AdapterContractTests(unittest.IsolatedAsyncioTestCase):
 
     def test_adapter_capabilities_are_transport_facts(self) -> None:
         self.assertEqual(YandexMarketAdapter().capabilities.kind, "discovery")
+        self.assertFalse(YandexMarketAdapter().capabilities.supports_city)
+        self.assertTrue(YandexMarketAdapter().capabilities.returns_price)
+        self.assertTrue(YandexMarketAdapter().capabilities.requires_page_verification)
         self.assertEqual(OzonAdapter().platform, "Ozon")
         self.assertTrue(AvitoAdapter().capabilities.supports_condition)
+        self.assertTrue(AvitoAdapter().capabilities.requires_page_verification)
         self.assertEqual(DnsAdapter().capabilities.kind, "reliable_anchor")
+        self.assertFalse(DnsAdapter().capabilities.supports_city)
+        self.assertTrue(DnsAdapter().capabilities.returns_price)
+        self.assertTrue(DnsAdapter().capabilities.requires_page_verification)
         self.assertTrue(WildberriesAdapterV2().capabilities.optional)
+        self.assertTrue(WildberriesAdapterV2().capabilities.returns_availability)
         self.assertTrue(CitilinkAdapter().capabilities.optional)
+        self.assertTrue(CitilinkAdapter().capabilities.requires_page_verification)
         self.assertTrue(MVideoAdapter().capabilities.optional)
+        self.assertTrue(MVideoAdapter().capabilities.requires_page_verification)
         self.assertEqual(GenericExactSearchAdapter().capabilities.kind, "fallback")
+        self.assertTrue(GenericExactSearchAdapter().capabilities.requires_page_verification)
+        self.assertTrue(YandexWebDiscoveryAdapter().capabilities.optional)
+        self.assertTrue(YandexWebDiscoveryAdapter().capabilities.supports_city)
+        self.assertTrue(YandexWebDiscoveryAdapter().capabilities.requires_page_verification)
 
 
 class RegistryAndPolicyTests(unittest.TestCase):
     def test_default_registry_and_aliases(self) -> None:
         registry = build_default_registry()
-        self.assertEqual(len(registry), 8)
+        self.assertEqual(len(registry), 9)
         self.assertIs(registry.get("ozon_search"), registry.get("ozon"))
         self.assertIs(registry.get("dns_direct"), registry.get("dns"))
         self.assertIs(registry.get("wb"), registry.get("wildberries"))
         self.assertEqual(canonical_source_name("market.yandex.ru"), "yandex_market")
         self.assertIn("generic_exact", registry.names())
+        self.assertIn("yandex_web", registry.names())
+        self.assertIs(registry.get("yandex_search"), registry.get("yandex_web"))
 
         no_optional = build_default_registry(include_optional=False)
-        self.assertEqual(no_optional.names(), ("yandex_market", "ozon", "avito", "dns", "generic_exact"))
+        self.assertEqual(no_optional.names(), ("yandex_market", "ozon", "avito", "dns", "yandex_web", "generic_exact"))
         self.assertNotIn("wildberries", no_optional)
 
     def test_registry_rejects_duplicate_and_supports_replace(self) -> None:

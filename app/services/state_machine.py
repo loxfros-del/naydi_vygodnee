@@ -208,6 +208,21 @@ def transition_request(
 
         raw_source = str(row["status"] or NEW)
         source = normalize_request_status(raw_source)
+        if target == source:
+            # Re-running an operation such as AI-card generation is safe and
+            # must not manufacture a second state transition in the journal.
+            if updates:
+                updates["updated_at"] = datetime.now().isoformat()
+                assignments = ", ".join(f"{name} = ?" for name in updates)
+                conn.execute(
+                    f"UPDATE requests SET {assignments} WHERE id = ?",
+                    [*updates.values(), request_id],
+                )
+            conn.commit()
+            request = db.get_request(request_id)
+            if request is None:
+                raise RequestNotFound(f"Заявка #{request_id} не найдена после повторного перехода")
+            return request
         if target not in ALLOWED_TRANSITIONS[source]:
             raise InvalidStatusTransition(
                 f"Переход {source} -> {target} запрещён"

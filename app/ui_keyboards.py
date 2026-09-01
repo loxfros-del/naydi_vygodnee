@@ -9,9 +9,11 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    WebAppInfo,
 )
 from urllib.parse import urlsplit
 
+from app.config import settings
 from app.product_config import AUTO_CATEGORIES, ServicePackage, get_service_packages
 from app.ui_texts import (
     BTN_BACK,
@@ -24,9 +26,11 @@ from app.ui_texts import (
     BTN_HOW_IT_WORKS,
     BTN_MANUAL_SELECTION,
     BTN_MY_REQUESTS,
+    BTN_OPEN_NOVA,
     BTN_PRICING,
     BTN_QUICK_REQUEST,
     BTN_SELECT_PRODUCT,
+    BTN_SKIP,
     BTN_SEND_LINKS,
     BTN_SUPPORT,
     CONDITION_LABELS,
@@ -58,6 +62,7 @@ CB_RESULT_SAVE_PREFIX = "result:save:"
 CB_WIZARD_EDIT_PREFIX = "wiz:edit:"
 
 CB_WIZARD_BACK = "wiz:back"
+CB_WIZARD_SKIP = "wiz:skip"
 CB_WIZARD_CANCEL = "wiz:cancel"
 CB_WIZARD_CONFIRM = "wiz:confirm"
 CB_WIZARD_EDIT = "wiz:edit"
@@ -79,16 +84,30 @@ def _inline_button(text: str, callback_data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=ensure_callback_data(callback_data))
 
 
-def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Compact persistent client menu with only working actions."""
+def _safe_miniapp_url(value: object) -> str:
+    """Return only a public HTTPS launch URL suitable for Telegram Web Apps."""
+    url = str(value or "").strip()
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        return ""
+    return url
+
+
+def main_menu_keyboard(*, miniapp_url: str | None = None) -> ReplyKeyboardMarkup:
+    """Compact client menu; add the Mini App only once its public URL is set."""
+
+    url = _safe_miniapp_url(settings.MINI_APP_URL if miniapp_url is None else miniapp_url)
+    rows = [
+        [KeyboardButton(text=BTN_SELECT_PRODUCT)],
+        [KeyboardButton(text=BTN_COMPARE_LINKS), KeyboardButton(text=BTN_MY_REQUESTS)],
+        [KeyboardButton(text=BTN_HOW_IT_WORKS), KeyboardButton(text=BTN_PRICING)],
+        [KeyboardButton(text=BTN_SUPPORT), KeyboardButton(text=BTN_FAQ)],
+    ]
+    if url:
+        rows.insert(0, [KeyboardButton(text=BTN_OPEN_NOVA, web_app=WebAppInfo(url=url))])
 
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=BTN_SELECT_PRODUCT)],
-            [KeyboardButton(text=BTN_COMPARE_LINKS), KeyboardButton(text=BTN_MY_REQUESTS)],
-            [KeyboardButton(text=BTN_HOW_IT_WORKS), KeyboardButton(text=BTN_PRICING)],
-            [KeyboardButton(text=BTN_SUPPORT), KeyboardButton(text=BTN_FAQ)],
-        ],
+        keyboard=rows,
         resize_keyboard=True,
         input_field_placeholder="Выбери действие",
     )
@@ -140,14 +159,16 @@ def category_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def wizard_navigation_keyboard(show_back: bool = True) -> InlineKeyboardMarkup:
+def wizard_navigation_keyboard(show_back: bool = True, show_skip: bool = False) -> InlineKeyboardMarkup:
     first_row: list[InlineKeyboardButton] = []
     if show_back:
         first_row.append(_inline_button(BTN_BACK, CB_WIZARD_BACK))
     first_row.append(_inline_button(BTN_HOME, CB_HOME))
-    return InlineKeyboardMarkup(
-        inline_keyboard=[first_row, [_inline_button(BTN_CANCEL, CB_WIZARD_CANCEL)]]
-    )
+    rows = [first_row]
+    if show_skip:
+        rows.append([_inline_button(BTN_SKIP, CB_WIZARD_SKIP)])
+    rows.append([_inline_button(BTN_CANCEL, CB_WIZARD_CANCEL)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def condition_keyboard() -> InlineKeyboardMarkup:

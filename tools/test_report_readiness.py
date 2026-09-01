@@ -65,6 +65,12 @@ def main() -> int:
         assert result.percent >= 75, result
         assert result.can_send is True, result
 
+        # Extra market analysis improves the score but is not a hard blocker
+        # once the in-budget TOP-1 is completely verified.
+        db.delete_market_check(db.get_market_checks(req_id)[0].id)
+        without_market_check = check_readiness(req)
+        assert without_market_check.can_send is True, without_market_check
+
     print("test_report_readiness: OK")
     return 0
 

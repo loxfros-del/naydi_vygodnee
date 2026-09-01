@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "description": "Deterministic Search V2 golden cases. Four exact offers establish the market; one cheaper wrong variant must be rejected.",
+  "categories": ["phone", "laptop", "tv", "headphones", "monitor", "chair"],
+  "cases": [
+    {
+      "id": "phone_samsung_a55_256",
+      "request": {"category": "phone", "brand": "Samsung", "model": "Galaxy A55", "required_specs": {"storage_gb": 256}, "budget": 42000, "city": "Москва", "condition": "new"},
+      "exact_title": "Samsung Galaxy A55 256 ГБ новый",
+      "wrong_title": "Samsung Galaxy A55 128 ГБ новый",
+      "wrong_facts": {"storage_gb": 128},
+      "prices": [31990, 34990, 35990, 36990]
+    },
+    {
+      "id": "phone_iphone_16_pro_256",
+      "request": {"category": "phone", "brand": "Apple", "model": "iPhone 16 Pro", "required_specs": {"storage_gb": 256}, "budget": 110000, "city": "Ярославль", "condition": "new"},
+      "exact_title": "Apple iPhone 16 Pro 256 ГБ новый",
+      "wrong_title": "Apple iPhone 16 Pro Max 256 ГБ новый",
+      "wrong_facts": {"storage_gb": 256},
+      "prices": [89990, 96990, 98990, 101990]
+    },
+    {
+      "id": "phone_pixel_9_128",
+      "request": {"category": "phone", "brand": "Google", "model": "Pixel 9", "required_specs": {"storage_gb": 128}, "budget": 80000, "city": "Санкт-Петербург", "condition": "new"},
+      "exact_title": "Google Pixel 9 128 ГБ новый",
+      "wrong_title": "Google Pixel 9 Pro 128 ГБ новый",
+      "wrong_facts": {"storage_gb": 128},
+      "prices": [61990, 66990, 67990, 69990]
+    },
+    {
+      "id": "phone_xiaomi_14t_12_256",
+      "request": {"category": "phone", "brand": "Xiaomi", "model": "14T", "required_specs": {"ram_gb": 12, "storage_gb": 256}, "budget": 60000, "city": "Казань", "condition": "new"},
+      "exact_title": "Xiaomi 14T 12/256 ГБ новый",
+      "wrong_title": "Xiaomi 14T 8/256 ГБ новый",
+      "wrong_facts": {"ram_gb": 8, "storage_gb": 256},
+      "prices": [45990, 49990, 50990, 51990]
+    },
+    {
+      "id": "phone_oneplus_12_512",
+      "request": {"category": "phone", "brand": "OnePlus", "model": "OnePlus 12", "required_specs": {"storage_gb": 512}, "budget": 90000, "city": "Екатеринбург", "condition": "new"},
+      "exact_title": "OnePlus 12 512 ГБ новый",
+      "wrong_title": "OnePlus 12 256 ГБ новый",
+      "wrong_facts": {"storage_gb": 256},
+      "prices": [69990, 74990, 76990, 77990]
+    },
+
+    {
+      "id": "laptop_macbook_air_m4",
+      "request": {"category": "laptop", "brand": "Apple", "model": "MacBook Air M4", "required_specs": {"ram_gb": 16, "ssd_gb": 512}, "budget": 170000, "city": "Москва", "condition": "new"},
+      "exact_title": "Apple MacBook Air M4 RAM 16 ГБ SSD 512 ГБ новый",
+      "wrong_title": "Apple MacBook Air M4 RAM 8 ГБ SSD 512 ГБ новый",
+      "wrong_facts": {"ram_gb": 8, "ssd_gb": 512},
+      "prices": [139990, 149990, 152990, 155990]
+    },
+    {
+      "id": "laptop_asus_tuf_a15",
+      "request": {"category": "laptop", "brand": "ASUS", "model": "TUF Gaming A15", "required_specs": {"ram_gb": 16, "ssd_gb": 512}, "budget": 130000, "city": "Ярославль", "condition": "new"},
+      "exact_title": "ASUS TUF Gaming A15 RAM 16 ГБ SSD 512 ГБ новый",
+      "wrong_title": "ASUS TUF Gaming A15 RAM 8 ГБ SSD 512 ГБ новый",
+      "wrong_facts": {"ram_gb": 8, "ssd_gb": 512},
+      "prices": [99990, 109990, 111990, 114990]
+    },
+    {
+      "id": "laptop_thinkpad_t14_gen3",
+      "request": {"category": "laptop", "brand": "Lenovo", "model": "ThinkPad T14 Gen 3", "required_specs": {"ram_gb": 16, "ssd_gb": 512}, "budget": 125000, "city": "Санкт-Петербург", "condition": "new"},
+      "exact_title": "Lenovo ThinkPad T14 Gen 3 RAM 16 ГБ SSD 512 ГБ новый",
+      "wrong_title": "Lenovo ThinkPad T14 Gen 2 RAM 16 ГБ SSD 512 ГБ новый",
+      "wrong_facts": {"ram_gb": 16, "ssd_gb": 512},
+      "prices": [95990, 104990, 106990, 109990]
+    },
+    {
+      "id": "laptop_hp_victus_16_r0005",
+      "request": {"category": "laptop", "brand": "HP", "model": "Victus 16-r0005", "required_specs": {"ram_gb": 16, "ssd_gb": 512}, "budget": 140000, "city": "Казань", "condition": "new"},
+      "exact_title": "HP Victus 16-r0005 RAM 16 ГБ SSD 512 ГБ новый",
+      "wrong_title": "HP Victus 16-r0005 RAM 8 ГБ SSD 512 ГБ новый",
+      "wrong_facts": {"ram_gb": 8, "ssd_gb": 512},
+      "prices": [109990, 119990, 121990, 124990]
+    },
+    {
+      "id": "laptop_acer_nitro_anv15",
+      "request": {"category": "laptop", "brand": "Acer", "model": "Nitro V 15 ANV15-51", "required_specs": {"ram_gb": 16, "ssd_gb": 512}, "budget": 130000, "city": "Екатеринбург", "condition": "new"},
+      "exact_title": "Acer Nitro V 15 ANV15-51 RAM 16 ГБ SSD 512 ГБ новый",
+      "wrong_title": "Acer Nitro V 15 ANV15-51 RAM 8 ГБ SSD 512 ГБ новый",
+      "wrong_facts": {"ram_gb": 8, "ssd_gb": 512},
+      "prices": [97990, 106990, 108990, 111990]
+    },
+
+    {
+      "id": "tv_samsung_qn90d_55",
+      "request": {"category": "tv", "brand": "Samsung", "model": "QE55QN90D", "required_specs": {"diagonal": 55, "resolution": "4K", "refresh_rate": 120}, "budget": 180000, "city": "Москва", "condition": "new"},
+      "exact_title": "Samsung QE55QN90D 55 дюймов 4K 120 Гц новый",
+      "wrong_title": "Samsung QE65QN90D 65 дюймов 4K 120 Гц новый",
+      "wrong_facts": {"diagonal": 65, "resolution": "4K", "refresh_rate": 120},
+      "prices": [139990, 151990, 154990, 158990]
+    },
+    {
+      "id": "tv_lg_oled55c4",
+      "request": {"category": "tv", "brand": "LG", "model": "OLED55C4", "required_specs": {"diagonal": 55, "resolution": "4K", "refresh_rate": 120}, "budget": 170000, "city": "Ярославль", "condition": "new"},
+      "exact_title": "LG OLED55C4 55 дюймов 4K 120 Гц новый",
+      "wrong_title": "LG OLED55C4 55 дюймов 4K 60 Гц новый",
+      "wrong_facts": {"diagonal": 55, "resolution": "4K", "refresh_rate": 60},
+      "prices": [129990, 141990, 144990, 148990]
+    },
+    {
+      "id": "tv_tcl_55c755",
+      "request": {"category": "tv", "brand": "TCL", "model": "55C755", "required_specs": {"diagonal": 55, "resolution": "4K", "refresh_rate": 144}, "budget": 120000, "city": "Санкт-Петербург", "condition": "new"},
+      "exact_title": "TCL 55C755 55 дюймов 4K 144 Гц новый",
+      "wrong_title": "TCL 50C755 50 дюймов 4K 144 Гц новый",
+      "wrong_facts": {"diagonal": 50, "resolution": "4K", "refresh_rate": 144},
+      "prices": [84990, 92990, 94990, 96990]
+    },
+    {
+      "id": "tv_hisense_65u7nq",
+      "request": {"category": "tv", "brand": "Hisense", "model": "65U7NQ", "required_specs": {"diagonal": 65, "resolution": "4K", "refresh_rate": 144}, "budget": 150000, "city": "Казань", "condition": "new"},
+      "exact_title": "Hisense 65U7NQ 65 дюймов 4K 144 Гц новый",
+      "wrong_title": "Hisense 55U7NQ 55 дюймов 4K 144 Гц новый",
+      "wrong_facts": {"diagonal": 55, "resolution": "4K", "refresh_rate": 144},
+      "prices": [109990, 119990, 122990, 125990]
+    },
+    {
+      "id": "tv_xiaomi_a_pro_43",
+      "request": {"category": "tv", "brand": "Xiaomi", "model": "TV A Pro 43", "required_specs": {"diagonal": 43, "resolution": "4K", "refresh_rate": 60}, "budget": 55000, "city": "Екатеринбург", "condition": "new"},
+      "exact_title": "Xiaomi TV A Pro 43 43 дюйма 4K 60 Гц новый",
+      "wrong_title": "Xiaomi TV A Pro 55 55 дюймов 4K 60 Гц новый",
+      "wrong_facts": {"diagonal": 55, "resolution": "4K", "refresh_rate": 60},
+      "prices": [35990, 39990, 40990, 41990]
+    },
+
+    {
+      "id": "headphones_sony_xm5",
+      "request": {"category": "headphones", "brand": "Sony", "model": "WH-1000XM5", "required_specs": {"anc": true, "connection": "wireless"}, "budget": 45000, "city": "Москва", "condition": "new"},
+      "exact_title": "Sony WH-1000XM5 беспроводные ANC новые",
+      "wrong_title": "Sony WH-1000XM4 беспроводные ANC новые",
+      "wrong_facts": {"anc": true, "connection": "wireless"},
+      "prices": [29990, 32990, 33990, 34990]
+    },
+    {
+      "id": "headphones_airpods_pro2",
+      "request": {"category": "headphones", "brand": "Apple", "model": "AirPods Pro 2", "required_specs": {"anc": true, "connector": "USB-C"}, "budget": 35000, "city": "Ярославль", "condition": "new"},
+      "exact_title": "Apple AirPods Pro 2 USB-C ANC новые",
+      "wrong_title": "Apple AirPods 4 USB-C ANC новые",
+      "wrong_facts": {"anc": true, "connector": "USB-C"},
+      "prices": [22990, 24990, 25990, 26990]
+    },
+    {
+      "id": "headphones_bose_qc45",
+      "request": {"category": "headphones", "brand": "Bose", "model": "QuietComfort 45", "required_specs": {"anc": true, "connection": "wireless"}, "budget": 42000, "city": "Санкт-Петербург", "condition": "new"},
+      "exact_title": "Bose QuietComfort 45 беспроводные ANC новые",
+      "wrong_title": "Bose QuietComfort 35 беспроводные ANC новые",
+      "wrong_facts": {"anc": true, "connection": "wireless"},
+      "prices": [28990, 31990, 32990, 33990]
+    },
+    {
+      "id": "headphones_sennheiser_momentum4",
+      "request": {"category": "headphones", "brand": "Sennheiser", "model": "Momentum 4", "required_specs": {"connection": "wireless"}, "budget": 45000, "city": "Казань", "condition": "new"},
+      "exact_title": "Sennheiser Momentum 4 беспроводные новые",
+      "wrong_title": "Sennheiser Momentum 3 беспроводные новые",
+      "wrong_facts": {"connection": "wireless"},
+      "prices": [31990, 34990, 35990, 36990]
+    },
+    {
+      "id": "headphones_jbl_tour_m2",
+      "request": {"category": "headphones", "brand": "JBL", "model": "Tour One M2", "required_specs": {"anc": true, "connection": "wireless"}, "budget": 35000, "city": "Екатеринбург", "condition": "new"},
+      "exact_title": "JBL Tour One M2 беспроводные ANC новые",
+      "wrong_title": "JBL Live 770NC беспроводные ANC новые",
+      "wrong_facts": {"anc": true, "connection": "wireless"},
+      "prices": [23990, 26990, 27990, 28990]
+    },
+
+    {
+      "id": "monitor_lg_27gp850",
+      "request": {"category": "monitor", "brand": "LG", "model": "27GP850-B", "required_specs": {"diagonal": 27, "resolution": "QHD", "refresh_rate": 165}, "budget": 60000, "city": "Москва", "condition": "new"},
+      "exact_title": "LG 27GP850-B 27 дюймов QHD 165 Гц новый",
+      "wrong_title": "LG 27GP850-B 27 дюймов QHD 144 Гц новый",
+      "wrong_facts": {"diagonal": 27, "resolution": "QHD", "refresh_rate": 144},
+      "prices": [39990, 43990, 44990, 45990]
+    },
+    {
+      "id": "monitor_samsung_g5_27",
+      "request": {"category": "monitor", "brand": "Samsung", "model": "S27CG550", "required_specs": {"diagonal": 27, "resolution": "QHD", "refresh_rate": 165}, "budget": 50000, "city": "Ярославль", "condition": "new"},
+      "exact_title": "Samsung Odyssey G5 S27CG550 27 дюймов QHD 165 Гц новый",
+      "wrong_title": "Samsung Odyssey G5 S32CG550 32 дюйма QHD 165 Гц новый",
+      "wrong_facts": {"diagonal": 32, "resolution": "QHD", "refresh_rate": 165},
+      "prices": [32990, 35990, 36990, 37990]
+    },
+    {
+      "id": "monitor_asus_vg27aq3a",
+      "request": {"category": "monitor", "brand": "ASUS", "model": "VG27AQ3A", "required_specs": {"diagonal": 27, "resolution": "QHD", "refresh_rate": 180}, "budget": 55000, "city": "Санкт-Петербург", "condition": "new"},
+      "exact_title": "ASUS TUF VG27AQ3A 27 дюймов QHD 180 Гц новый",
+      "wrong_title": "ASUS TUF VG24AQ3A 24 дюйма QHD 180 Гц новый",
+      "wrong_facts": {"diagonal": 24, "resolution": "QHD", "refresh_rate": 180},
+      "prices": [36990, 40990, 41990, 42990]
+    },
+    {
+      "id": "monitor_aoc_q27g3xmn",
+      "request": {"category": "monitor", "brand": "AOC", "model": "Q27G3XMN", "required_specs": {"diagonal": 27, "resolution": "QHD", "refresh_rate": 180}, "budget": 65000, "city": "Казань", "condition": "new"},
+      "exact_title": "AOC Q27G3XMN 27 дюймов QHD 180 Гц новый",
+      "wrong_title": "AOC Q27G3XMN 27 дюймов QHD 60 Гц новый",
+      "wrong_facts": {"diagonal": 27, "resolution": "QHD", "refresh_rate": 60},
+      "prices": [44990, 48990, 49990, 50990]
+    },
+    {
+      "id": "monitor_xiaomi_gpro_27i",
+      "request": {"category": "monitor", "brand": "Xiaomi", "model": "G Pro 27i", "required_specs": {"diagonal": 27, "resolution": "QHD", "refresh_rate": 180}, "budget": 70000, "city": "Екатеринбург", "condition": "new"},
+      "exact_title": "Xiaomi Mini LED Gaming Monitor G Pro 27i 27 дюймов QHD 180 Гц новый",
+      "wrong_title": "Xiaomi Curved Gaming Monitor G34WQi 34 дюйма QHD 180 Гц новый",
+      "wrong_facts": {"diagonal": 34, "resolution": "QHD", "refresh_rate": 180},
+      "prices": [48990, 52990, 53990, 54990]
+    },
+
+    {
+      "id": "chair_thunderx3_tc5",
+      "request": {"category": "chair", "brand": "ThunderX3", "model": "TC5", "required_specs": {"headrest": true, "lumbar_support": true}, "budget": 45000, "city": "Москва", "condition": "new"},
+      "exact_title": "Игровое кресло ThunderX3 TC5 с подголовником и поясничной поддержкой новое",
+      "wrong_title": "Игровое кресло ThunderX3 TC3 без подголовника новое",
+      "wrong_facts": {"headrest": false, "lumbar_support": true},
+      "prices": [29990, 32990, 33990, 34990]
+    },
+    {
+      "id": "chair_cougar_armor_v2",
+      "request": {"category": "chair", "brand": "Cougar", "model": "Armor One V2", "required_specs": {"headrest": true, "lumbar_support": true}, "budget": 55000, "city": "Ярославль", "condition": "new"},
+      "exact_title": "Игровое кресло Cougar Armor One V2 с подголовником и поясничной поддержкой новое",
+      "wrong_title": "Игровое кресло Cougar Armor One V1 без поясничной поддержки новое",
+      "wrong_facts": {"headrest": true, "lumbar_support": false},
+      "prices": [36990, 40990, 41990, 42990]
+    },
+    {
+      "id": "chair_metta_samurai_s3",
+      "request": {"category": "chair", "brand": "Метта", "model": "Самурай S-3", "required_specs": {"headrest": true, "lumbar_support": true}, "budget": 65000, "city": "Санкт-Петербург", "condition": "new"},
+      "exact_title": "Кресло Метта Самурай S-3 с подголовником и поясничной поддержкой новое",
+      "wrong_title": "Кресло Метта Самурай S-1 без подголовника новое",
+      "wrong_facts": {"headrest": false, "lumbar_support": true},
+      "prices": [44990, 48990, 49990, 50990]
+    },
+    {
+      "id": "chair_chairman_696",
+      "request": {"category": "chair", "brand": "Chairman", "model": "696", "required_specs": {"headrest": true}, "budget": 30000, "city": "Казань", "condition": "new"},
+      "exact_title": "Офисное кресло Chairman 696 с подголовником новое",
+      "wrong_title": "Офисное кресло Chairman 698 без подголовника новое",
+      "wrong_facts": {"headrest": false},
+      "prices": [17990, 19990, 20990, 21990]
+    },
+    {
+      "id": "chair_zombie_viking_7",
+      "request": {"category": "chair", "brand": "Zombie", "model": "Viking 7 Knight", "required_specs": {"headrest": true, "lumbar_support": true}, "budget": 45000, "city": "Екатеринбург", "condition": "new"},
+      "exact_title": "Игровое кресло Zombie Viking 7 Knight с подголовником и поясничной поддержкой новое",
+      "wrong_title": "Игровое кресло Zombie Viking 5 Aero без поясничной поддержки новое",
+      "wrong_facts": {"headrest": true, "lumbar_support": false},
+      "prices": [27990, 30990, 31990, 32990]
+    }
+  ]
+}

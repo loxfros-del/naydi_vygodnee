@@ -411,7 +411,7 @@ def build_admin_preview(req: Request) -> str:
 
 
 def _build_client_teaser(req: Request) -> str:
-    """Предпросмотр до оплаты — без прямых ссылок и полного списка товаров."""
+    """Short free status update without direct links or a full product list."""
     alice_items = _active_alice_items(req)
     budget = int(req.budget) if req.budget and req.budget.isdigit() else None
 
@@ -454,9 +454,11 @@ def _build_client_teaser(req: Request) -> str:
         "• проверка на самый дешёвый вариант",
         "• риски по каждому варианту",
         "• итоговый совет перед покупкой",
-        "", f"Стоимость: <b>{html.escape(package.price_label)}</b>",
-        "Оплата после того, как подборка готова.",
     ])
+    if package.price_rub == 0:
+        lines.extend(["", "<b>Сервис бесплатный.</b> Полный отчёт придёт после проверки специалистом."])
+    else:
+        lines.extend(["", f"Стоимость: <b>{html.escape(package.price_label)}</b>", "Оплата после того, как подборка готова."])
     return "\n".join(lines)
 
 
@@ -508,7 +510,7 @@ def _can_send_report(req: Request) -> tuple[bool, str]:
 
 
 # ──────────────────────────────────────────────
-#  Клиентский предпросмотр до оплаты
+#  Клиентский короткий статус до полной доставки
 # ──────────────────────────────────────────────
 
 def build_preview(req: Request) -> str:
@@ -525,7 +527,7 @@ def build_preview(req: Request) -> str:
 
 def build_full_report(req: Request) -> str:
     """
-    Полный отчёт — со ссылками. Отправляется после подтверждения оплаты.
+    Полный отчёт — со ссылками. Отправляется после утверждения результата.
     """
     can_send, reason = _can_send_report(req)
     if not can_send:

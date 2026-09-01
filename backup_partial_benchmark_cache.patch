@@ -1,0 +1,782 @@
+diff --git a/.env.example b/.env.example
+index aa92522..6c0f387 100644
+--- a/.env.example
++++ b/.env.example
+@@ -28,3 +28,17 @@ SEARCHAPI_HL=ru
+ SEARCHAPI_LOCATION=Russia
+ SEARCHAPI_MAX_RESULTS=5
+ SEARCHAPI_TIMEOUT_SECONDS=15
++
++# SerpApi Google Shopping (optional)
++SERPAPI_ENABLED=false
++SERPAPI_API_KEY=
++SERPAPI_GL=ru
++SERPAPI_HL=ru
++SERPAPI_LOCATION=Russia
++SERPAPI_MAX_RESULTS=5
++SERPAPI_TIMEOUT_SECONDS=15
++
++# Direct retail structured sources
++DIRECT_RETAIL_ENABLED=true
++DIRECT_RETAIL_MAX_RESULTS=5
++DIRECT_RETAIL_TIMEOUT_SECONDS=15
+diff --git a/app/config.py b/app/config.py
+index 9eee9cf..1d1a175 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -55,6 +55,16 @@ class Settings(BaseSettings):
+     SEARCHAPI_LOCATION: str = "Russia"
+     SEARCHAPI_MAX_RESULTS: int = 5
+     SEARCHAPI_TIMEOUT_SECONDS: int = 15
++    SERPAPI_ENABLED: bool = False
++    SERPAPI_API_KEY: str = ""
++    SERPAPI_GL: str = "ru"
++    SERPAPI_HL: str = "ru"
++    SERPAPI_LOCATION: str = "Russia"
++    SERPAPI_MAX_RESULTS: int = 5
++    SERPAPI_TIMEOUT_SECONDS: int = 15
++    DIRECT_RETAIL_ENABLED: bool = True
++    DIRECT_RETAIL_MAX_RESULTS: int = 5
++    DIRECT_RETAIL_TIMEOUT_SECONDS: int = 15
+     ENABLE_PLAYWRIGHT_VERIFIER: bool = False
+     PLAYWRIGHT_HEADLESS: bool = True
+     PLAYWRIGHT_TIMEOUT_MS: int = 8000
+@@ -116,6 +126,16 @@ class Settings(BaseSettings):
+             SEARCHAPI_LOCATION=os.getenv("SEARCHAPI_LOCATION", "Russia").strip(),
+             SEARCHAPI_MAX_RESULTS=_env_int("SEARCHAPI_MAX_RESULTS", 5),
+             SEARCHAPI_TIMEOUT_SECONDS=_env_int("SEARCHAPI_TIMEOUT_SECONDS", 15),
++            SERPAPI_ENABLED=_env_bool("SERPAPI_ENABLED", False),
++            SERPAPI_API_KEY=os.getenv("SERPAPI_API_KEY", "").strip(),
++            SERPAPI_GL=os.getenv("SERPAPI_GL", "ru").strip(),
++            SERPAPI_HL=os.getenv("SERPAPI_HL", "ru").strip(),
++            SERPAPI_LOCATION=os.getenv("SERPAPI_LOCATION", "Russia").strip(),
++            SERPAPI_MAX_RESULTS=_env_int("SERPAPI_MAX_RESULTS", 5),
++            SERPAPI_TIMEOUT_SECONDS=_env_int("SERPAPI_TIMEOUT_SECONDS", 15),
++            DIRECT_RETAIL_ENABLED=_env_bool("DIRECT_RETAIL_ENABLED", True),
++            DIRECT_RETAIL_MAX_RESULTS=_env_int("DIRECT_RETAIL_MAX_RESULTS", 5),
++            DIRECT_RETAIL_TIMEOUT_SECONDS=_env_int("DIRECT_RETAIL_TIMEOUT_SECONDS", 15),
+             ENABLE_PLAYWRIGHT_VERIFIER=_env_bool("ENABLE_PLAYWRIGHT_VERIFIER", False),
+             PLAYWRIGHT_HEADLESS=_env_bool("PLAYWRIGHT_HEADLESS", True),
+             PLAYWRIGHT_TIMEOUT_MS=_env_int("PLAYWRIGHT_TIMEOUT_MS", 8000),
+diff --git a/app/product_search.py b/app/product_search.py
+index 9e5a1f0..8041b45 100644
+--- a/app/product_search.py
++++ b/app/product_search.py
+@@ -20,7 +20,7 @@ import json
+ import logging
+ import re
+ import time
+-from typing import Any, Iterable, Optional
++from typing import Any, Callable, Iterable, Optional
+ from urllib.parse import urlparse, urlunparse, urlencode
+ 
+ import requests
+@@ -87,6 +87,7 @@ from app.candidate_verifier import (
+     VERIFIED_OK,
+     VERIFY_BLOCKED,
+     WRONG_PRODUCT,
++    VerifiedCandidate,
+     detect_product_category,
+     verify_candidate,
+     verify_candidates,
+@@ -99,7 +100,7 @@ from app.db import (
+     replace_manual_search_links,
+ )
+ from app.net_client import FetchResult, fetch_http
+-from app.playwright_verifier import verify_with_playwright_fallback
++from app.playwright_verifier import PlaywrightFallbackSummary, verify_with_playwright_fallback
+ from app.price_guard import (
+     TOO_CHEAP_FOR_BUDGET_RISK,
+     apply_price_rank_penalties,
+@@ -2029,13 +2030,58 @@ def _apply_final_search_policy(req: Request, verified_items: list[object]) -> No
+         candidate.product_facts = facts
+         candidate.facts_json = json.dumps(facts, ensure_ascii=False)
+ 
+-def _apply_verification(collection: SearchCollection, req: Request) -> None:
++def _manual_verification_items(candidates: list[ProductCandidate]) -> list[VerifiedCandidate]:
++    """Safe no-page-verification fallback for benchmark fast/none modes."""
++    result: list[VerifiedCandidate] = []
++    for candidate in candidates:
++        status = PRICE_MISSING if candidate.price is None else NEED_MANUAL_CHECK
++        reason = "цена не подтверждена" if status == PRICE_MISSING else "страница не проверялась"
++        result.append(VerifiedCandidate(
++            candidate,
++            status,
++            price=candidate.price,
++            title=candidate.title,
++            availability=candidate.availability,
++            reason=reason,
++            risk_flags=[reason],
++            facts=dict(candidate.product_facts or {}),
++            keep_for_admin=True,
++        ))
++    return result
++
++
++def _apply_verification(
++    collection: SearchCollection,
++    req: Request,
++    *,
++    verification_mode: str = "full",
++) -> None:
+     candidates_to_verify = [
+         item for item in collection.candidates
+         if item.status != "REJECTED_AUTO" and item.quality != QUALITY_TRASH
+     ]
+-    verified = verify_candidates(candidates_to_verify, req, limit=30)
+-    verified, playwright_summary = verify_with_playwright_fallback(verified, req)
++    mode = verification_mode.lower().strip()
++    if mode not in {"full", "fast", "none"}:
++        raise ValueError(f"unknown verification mode: {verification_mode}")
++
++    if mode == "none":
++        verified = _manual_verification_items(candidates_to_verify)
++        playwright_summary = PlaywrightFallbackSummary(
++            skipped=len(candidates_to_verify),
++            skipped_reason={"verification_none": len(candidates_to_verify)},
++        )
++    else:
++        verification_limit = 3 if mode == "fast" else 30
++        verified = verify_candidates(candidates_to_verify, req, limit=verification_limit)
++        if mode == "full":
++            verified, playwright_summary = verify_with_playwright_fallback(verified, req)
++        else:
++            playwright_summary = PlaywrightFallbackSummary(
++                skipped=max(0, len(candidates_to_verify) - len(verified)),
++                skipped_reason={"fast_browser_skipped": len(verified)},
++            )
++        if mode == "fast" and len(candidates_to_verify) > verification_limit:
++            verified.extend(_manual_verification_items(candidates_to_verify[verification_limit:]))
+     _apply_direct_retail_verified_sanity(req, verified)
+     _apply_category_product_quality(req, verified)
+     _apply_final_search_policy(req, verified)
+@@ -2116,10 +2162,87 @@ def _apply_verification(collection: SearchCollection, req: Request) -> None:
+     ))
+ 
+ 
+-def collect_product_candidates(req: Request, max_results: int = 15) -> SearchCollection:
+-    """Собирает кандидатов без записи в БД; удобно для консольного теста."""
++def collect_product_candidates(
++    req: Request,
++    max_results: int = 15,
++    *,
++    verification_mode: str = "full",
++    source_timeout_seconds: float | None = None,
++    source_observer: Callable[[SearchAttemptData, list[ProductCandidate]], None] | None = None,
++    stage_observer: Callable[[str, SearchCollection, dict[str, Any]], None] | None = None,
++) -> SearchCollection:
++    """Collect candidates with optional benchmark-only stage callbacks.
++
++    Defaults preserve the Telegram application's full verification behavior.
++    """
+     collection = SearchCollection()
++    source_stage_started = time.monotonic()
++    source_deadline = (
++        source_stage_started + max(0.0, source_timeout_seconds)
++        if source_timeout_seconds is not None else None
++    )
++
++    def emit_stage(stage: str, **details: Any) -> None:
++        if stage_observer is None:
++            return
++        try:
++            stage_observer(stage, collection, details)
++        except Exception as exc:  # observer must never break production search
++            logger.debug("Автопоиск: stage observer %s failed: %s", stage, exc)
++
++    def emit_source(attempt: SearchAttemptData, candidates: list[ProductCandidate]) -> None:
++        if source_observer is None:
++            return
++        try:
++            source_observer(attempt, candidates)
++        except Exception as exc:  # source cache diagnostics are best effort
++            logger.debug("Автопоиск: source observer %s failed: %s", attempt.source, exc)
++
++    blocked_sources: set[str] = set()
++
++    def run_source_step(source: str, query: str, loader: Callable[[], None]) -> None:
++        before_attempts = len(collection.attempts)
++        before_candidates = len(collection.raw_candidates)
++        started = time.monotonic()
++        if source in blocked_sources:
++            attempt = SearchAttemptData(source, query, "SKIPPED_BLOCKED", error_text="same source was blocked earlier in this run")
++            collection.attempts.append(attempt)
++            emit_source(attempt, [])
++            emit_stage("collect_source_results", source=source, query=query, duration_ms=0, status=attempt.status)
++            return
++        if source_deadline is not None and started >= source_deadline:
++            attempt = SearchAttemptData(source, query, "SOURCE_TIMEOUT", error_text="source collection budget exhausted")
++            collection.attempts.append(attempt)
++            emit_source(attempt, [])
++            emit_stage("collect_source_results", source=source, query=query, duration_ms=0, status=attempt.status)
++            return
++        emit_stage("source_start", source=source, query=query)
++        loader()
++        duration_ms = int((time.monotonic() - started) * 1000)
++        attempts = collection.attempts[before_attempts:]
++        candidates = collection.raw_candidates[before_candidates:]
++        if not attempts:
++            attempts = [SearchAttemptData(source, query, "ERROR", error_text="source returned no diagnostic")]
++            collection.attempts.extend(attempts)
++        for attempt in attempts:
++            attempt.duration_ms = duration_ms
++            source_candidates = [item for item in candidates if item.source == attempt.source]
++            emit_source(attempt, source_candidates or candidates)
++            attempt_text = f"{attempt.status} {attempt.error_text}".lower()
++            if any(marker in attempt_text for marker in ("401", "403", "429", "498", "captcha", "rate_limit", "blocked")):
++                blocked_sources.add(source)
++        emit_stage(
++            "collect_source_results",
++            source=source,
++            query=query,
++            duration_ms=duration_ms,
++            candidate_count=len(collection.raw_candidates),
++            attempt_count=len(collection.attempts),
++        )
++
++    emit_stage("parse", request_product=req.product_name or req.product)
+     queries = generate_search_queries(req)
++    emit_stage("generate_queries", queries=queries)
+     seen_urls: set[str] = set()
+     generic = GenericSearchAdapter()
+ 
+@@ -2127,37 +2250,60 @@ def collect_product_candidates(req: Request, max_results: int = 15) -> SearchCol
+     if _is_generic_enabled():
+         generic_queries = [query for query in queries if not query.startswith("site:")]
+         for query in generic_queries[:3]:
+-            _collect_from_adapter(generic, req, "generic_web", query, 5, collection, seen_urls)
++            run_source_step(
++                "generic_web", query,
++                lambda query=query: _collect_from_adapter(generic, req, "generic_web", query, 5, collection, seen_urls),
++            )
+ 
+     wb_query = (req.clean_search_query or "").strip() or build_search_query(
+         _request_product(req), req.use_case or req.purpose, req.budget, "", req.important_criteria or req.criteria,
+     )
+     wb_source = next((source for source in SEARCH_SOURCES if source.key == "wildberries"), None)
+     if wb_source and _is_source_enabled(wb_source):
+-        _collect_from_adapter(WildberriesAdapter(), req, "wildberries", wb_query, 10, collection, seen_urls)
++        run_source_step(
++            "wildberries", wb_query,
++            lambda: _collect_from_adapter(WildberriesAdapter(), req, "wildberries", wb_query, 10, collection, seen_urls),
++        )
+ 
+     site_adapter = SearchBySiteAdapter()
+     for query in (query for query in queries if query.startswith("site:")):
+         domain_match = re.match(r"site:([^\s]+)", query)
+         source = MARKETPLACE_SOURCES.get(domain_match.group(1), "generic_web") if domain_match else "generic_web"
+-        _collect_from_adapter(site_adapter, req, source, query, 6, collection, seen_urls)
++        run_source_step(
++            source, query,
++            lambda source=source, query=query: _collect_from_adapter(site_adapter, req, source, query, 6, collection, seen_urls),
++        )
+ 
+     if settings.DIRECT_RETAIL_ENABLED:
+         direct_query = (req.clean_search_query or "").strip() or wb_query
+-        _collect_from_direct_retail(req, direct_query, collection, seen_urls)
++        run_source_step(
++            "direct_retail", direct_query,
++            lambda: _collect_from_direct_retail(req, direct_query, collection, seen_urls),
++        )
+         if _is_headphones_request(req) and (_budget_value(req) or 0) >= 3_000:
+             for brand_query in _headphone_brand_queries(str(req.budget or "").strip())[:2]:
+-                _collect_from_direct_retail(req, brand_query, collection, seen_urls)
++                run_source_step(
++                    "direct_retail", brand_query,
++                    lambda brand_query=brand_query: _collect_from_direct_retail(req, brand_query, collection, seen_urls),
++                )
+ 
+     if settings.SEARCHAPI_ENABLED:
+         searchapi_query = (req.clean_search_query or "").strip() or wb_query
+-        _collect_from_searchapi(req, searchapi_query, collection, seen_urls)
++        run_source_step(
++            SEARCHAPI_SOURCE, searchapi_query,
++            lambda: _collect_from_searchapi(req, searchapi_query, collection, seen_urls),
++        )
+ 
+     if settings.SERPAPI_ENABLED:
+         serpapi_query = (req.clean_search_query or "").strip() or wb_query
+-        _collect_from_serpapi(req, serpapi_query, collection, seen_urls)
++        run_source_step(
++            SERPAPI_SOURCE, serpapi_query,
++            lambda: _collect_from_serpapi(req, serpapi_query, collection, seen_urls),
++        )
+ 
+-    _apply_verification(collection, req)
++    emit_stage("normalize_dedupe", candidate_count=len(collection.raw_candidates))
++    _apply_verification(collection, req, verification_mode=verification_mode)
++    emit_stage("verify_and_policy", verification_mode=verification_mode, candidate_count=len(collection.candidates))
+     collection.candidates = collection.candidates[:min(max_results, 10)]
+     collection.verify_stats["saved"] = len(collection.candidates)
+     collection.quality_stats["saved"] = len(collection.candidates)
+@@ -2189,6 +2335,7 @@ def collect_product_candidates(req: Request, max_results: int = 15) -> SearchCol
+         )
+         collection.attempts.append(SearchAttemptData("manual_fallback", wb_query, "OK", len(collection.manual_links), 0,
+                                                      "Проверенных вариантов мало или нет; сохранены ручные поисковые ссылки."))
++    emit_stage("final_snapshot", candidate_count=len(collection.candidates), raw_candidate_count=len(collection.raw_candidates))
+     return collection
+ 
+ 
+diff --git a/app/search_cache.py b/app/search_cache.py
+index e0e80b7..b967c24 100644
+--- a/app/search_cache.py
++++ b/app/search_cache.py
+@@ -16,7 +16,7 @@ from typing import Any, Callable, TypeVar
+ from uuid import uuid4
+ 
+ 
+-CACHE_VERSION = "search-cache-v1"
++CACHE_VERSION = "search-cache-v2"
+ DEFAULT_SUCCESS_TTL_SECONDS = 2 * 60 * 60
+ DEFAULT_EMPTY_TTL_SECONDS = 20 * 60
+ DEFAULT_NEGATIVE_TTL_SECONDS = 10 * 60
+@@ -213,20 +213,36 @@ class SearchCache:
+ 
+         return self._run(operation)
+ 
+-    def cache_stats(self) -> dict[str, int]:
++    def cache_stats(self) -> dict[str, Any]:
+         now = int(time.time())
+ 
+-        def operation(conn: sqlite3.Connection) -> dict[str, int]:
++        def operation(conn: sqlite3.Connection) -> dict[str, Any]:
+             total = int(conn.execute("SELECT COUNT(*) FROM cache_entries").fetchone()[0])
+             expired = int(conn.execute("SELECT COUNT(*) FROM cache_entries WHERE expires_at <= ?", (now,)).fetchone()[0])
+             runs = int(conn.execute("SELECT COUNT(*) FROM benchmark_runs").fetchone()[0])
+             cases = int(conn.execute("SELECT COUNT(*) FROM benchmark_cases").fetchone()[0])
++            source_entries = int(conn.execute("SELECT COUNT(*) FROM cache_entries WHERE stage = 'source'").fetchone()[0])
++            snapshots = int(conn.execute("SELECT COUNT(*) FROM cache_entries WHERE stage = 'benchmark_snapshot'").fetchone()[0])
++            cache_rows = conn.execute("SELECT status, COUNT(*) AS count FROM cache_entries GROUP BY status").fetchall()
++            case_rows = conn.execute("SELECT status, COUNT(*) AS count FROM benchmark_cases GROUP BY status").fetchall()
++            run_rows = conn.execute(
++                "SELECT run_id, COUNT(*) AS count FROM benchmark_cases GROUP BY run_id ORDER BY MAX(finished_at) DESC"
++            ).fetchall()
++            last_run = conn.execute("SELECT run_id FROM benchmark_runs ORDER BY started_at DESC LIMIT 1").fetchone()
++            grouped_cache = {str(row["status"]): int(row["count"]) for row in cache_rows}
++            grouped_cases = {str(row["status"]): int(row["count"]) for row in case_rows}
+             return {
+                 "entries": total,
+                 "fresh_entries": total - expired,
+                 "expired_entries": expired,
+                 "benchmark_runs": runs,
+                 "benchmark_cases": cases,
++                "source_cache_entries": source_entries,
++                "benchmark_snapshots": snapshots,
++                "cache_entry_statuses": grouped_cache,
++                "benchmark_case_statuses": grouped_cases,
++                "benchmark_cases_by_run": {str(row["run_id"]): int(row["count"]) for row in run_rows},
++                "last_run_id": str(last_run["run_id"]) if last_run else "",
+                 "size_bytes": self.path.stat().st_size if self.path.exists() else 0,
+             }
+ 
+diff --git a/tools/search_benchmark.py b/tools/search_benchmark.py
+index 78aa0cf..f6390ca 100644
+--- a/tools/search_benchmark.py
++++ b/tools/search_benchmark.py
+@@ -77,9 +77,13 @@ SMOKE_CASES = (
+     BenchmarkCase("smoke_monitor_27", "Нужен монитор 27 дюймов 144 Гц до 30к"),
+     BenchmarkCase("smoke_microwave", "Нужна микроволновка до 12к"),
+ )
+-ALL_CASES = {case.case_id: case for case in (*EXTENDED_CASES, *SMOKE_CASES)}
++EXTRA_CASES = (
++    BenchmarkCase("coffee_machine", "Нужна кофемашина с капучинатором до 35к"),
++)
++ALL_CASES = {case.case_id: case for case in (*EXTENDED_CASES, *SMOKE_CASES, *EXTRA_CASES)}
+ CACHE_STAGE = "benchmark_snapshot"
+ CACHE_SOURCE = "search_benchmark"
++SNAPSHOT_STATUS_PRIORITY = ("SUCCESS", "PARTIAL_SUCCESS", "CASE_TIMEOUT", "ERROR", "EMPTY")
+ 
+ 
+ def _budget_value(parsed: dict[str, Any]) -> int | None:
+@@ -455,7 +459,14 @@ def _candidate_snapshot(candidate: Any) -> dict[str, Any]:
+     return {field: getattr(candidate, field, None) for field in fields if getattr(candidate, field, None) is not None}
+ 
+ 
+-def _snapshot_collection(collection: Any, parsed: dict[str, Any], category: str) -> dict[str, Any]:
++def _snapshot_collection(
++    collection: Any,
++    parsed: dict[str, Any],
++    category: str,
++    *,
++    stages: list[dict[str, Any]] | None = None,
++    snapshot_status: str = "",
++) -> dict[str, Any]:
+     now = int(time.time())
+     attempts = [
+         {
+@@ -468,6 +479,17 @@ def _snapshot_collection(collection: Any, parsed: dict[str, Any], category: str)
+         }
+         for item in getattr(collection, "attempts", [])
+     ]
++    source_attempts = [item for item in attempts if item["source"] not in {"quality_filter", "candidate_verifier", "manual_fallback"}]
++    completed_sources = sorted({
++        str(item["source"])
++        for item in source_attempts
++        if str(item["status"]).upper() in {"OK", "EMPTY"} and int(item.get("found_count") or 0) > 0
++    })
++    failed_sources = sorted({
++        str(item["source"])
++        for item in source_attempts
++        if str(item["status"]).upper() not in {"OK", "EMPTY"}
++    })
+     return {
+         "parsed": parsed,
+         "category": category,
+@@ -476,6 +498,10 @@ def _snapshot_collection(collection: Any, parsed: dict[str, Any], category: str)
+         "verify_stats": dict(getattr(collection, "verify_stats", {}) or {}),
+         "quality_stats": dict(getattr(collection, "quality_stats", {}) or {}),
+         "attempts": attempts,
++        "stages": stages or [],
++        "snapshot_status": snapshot_status,
++        "completed_sources": completed_sources,
++        "failed_sources": failed_sources,
+         "source_data_timestamp": now,
+     }
+ 
+@@ -491,10 +517,15 @@ def _hydrate_collection(snapshot: dict[str, Any]) -> Any:
+     )
+ 
+ 
+-def _snapshot_key(cache: SearchCache, request: Request, parsed: dict[str, Any]) -> str:
++def _snapshot_key(
++    cache: SearchCache,
++    request: Request,
++    parsed: dict[str, Any],
++    snapshot_status: str = "SUCCESS",
++) -> str:
+     return cache.make_cache_key(
+         stage=CACHE_STAGE,
+-        source=CACHE_SOURCE,
++        source=f"{CACHE_SOURCE}:{snapshot_status.lower()}",
+         query=request.clean_search_query or request.original_query or request.product_name or request.product,
+         category=detect_product_category(request),
+         city=request.city,
+@@ -509,6 +540,24 @@ def cached_snapshot_only(cache: SearchCache, cache_key: str) -> CacheLookup:
+     return cache.get(cache_key)
+ 
+ 
++def preferred_snapshot(
++    cache: SearchCache,
++    request: Request,
++    parsed: dict[str, Any],
++) -> tuple[str, CacheLookup, str]:
++    """Return fresh snapshots in quality order, never letting a timeout hide success."""
++    last_lookup = CacheLookup("CACHE_MISS")
++    last_key = ""
++    for status in SNAPSHOT_STATUS_PRIORITY:
++        key = _snapshot_key(cache, request, parsed, status)
++        lookup = cached_snapshot_only(cache, key)
++        if lookup.state == "HIT":
++            return status, lookup, key
++        if lookup.state != "CACHE_MISS":
++            last_lookup, last_key = lookup, key
++    return "", last_lookup, last_key
++
++
+ def snapshot_or_load(
+     cache: SearchCache,
+     cache_key: str,
+@@ -525,20 +574,168 @@ def snapshot_or_load(
+     return "LIVE_REQUIRED", loader(), lookup
+ 
+ 
+-def _live_case_worker(case_id: str, query: str, sequence: int, output: Any) -> None:
++def _cache_source_event(
++    cache: SearchCache,
++    request: Request,
++    category: str,
++    attempt: Any,
++    candidates: list[Any],
++) -> None:
++    source = str(getattr(attempt, "source", "") or "unknown")
++    query = str(getattr(attempt, "query", "") or request.clean_search_query or request.original_query)
++    status = str(getattr(attempt, "status", "ERROR") or "ERROR")
++    error_text = str(getattr(attempt, "error_text", "") or "")
++    key = cache.make_cache_key(
++        stage="source",
++        source=source,
++        query=query,
++        category=category,
++        city=request.city,
++        budget=request.budget,
++        use_case=request.use_case or request.purpose,
++        is_used_allowed=request.is_used_allowed,
++    )
++    payload = {
++        "candidates": [_candidate_snapshot(item) for item in candidates],
++        "attempt": {
++            "source": source,
++            "query": query,
++            "status": status,
++            "found_count": getattr(attempt, "found_count", 0),
++            "kept_count": getattr(attempt, "kept_count", 0),
++            "error_text": error_text,
++        },
++        "source_data_timestamp": int(time.time()),
++    }
++    cache.put(
++        cache_key=key,
++        stage="source",
++        query=query,
++        source=source,
++        payload=payload,
++        status=status,
++        error_text=error_text,
++    )
++    duration = getattr(attempt, "duration_ms", None)
++    if status.upper() in {"OK", "EMPTY"}:
++        print(f"SOURCE DONE {source} {duration or 0}ms rows={len(candidates)}", flush=True)
++    else:
++        print(f"SOURCE ERROR {source} {duration or 0}ms {error_text or status}", flush=True)
++    print(f"SOURCE CACHED {source} {key}", flush=True)
++
++
++def _write_partial_snapshot(
++    cache: SearchCache,
++    request: Request,
++    parsed: dict[str, Any],
++    snapshot: dict[str, Any],
++) -> None:
++    if not snapshot.get("raw_candidates"):
++        return
++    key = _snapshot_key(cache, request, parsed, "PARTIAL_SUCCESS")
++    cache.put(
++        cache_key=key,
++        stage=CACHE_STAGE,
++        query=request.clean_search_query or request.original_query,
++        source=f"{CACHE_SOURCE}:partial_success",
++        payload=snapshot,
++        status="PARTIAL_SUCCESS",
++    )
++
++
++def _live_case_worker(
++    case_id: str,
++    query: str,
++    sequence: int,
++    cache_path: str,
++    verification_mode: str,
++    source_timeout_seconds: int,
++    output: Any,
++) -> None:
+     try:
++        cache = SearchCache(cache_path)
+         request, parsed = _make_request(query, sequence)
+         category = detect_product_category(request)
+-        collection = collect_product_candidates(request, max_results=15)
+-        output.put({"ok": True, "case_id": case_id, "snapshot": _snapshot_collection(collection, parsed, category)})
++        stage_records: list[dict[str, Any]] = []
++
++        def source_observer(attempt: Any, candidates: list[Any]) -> None:
++            _cache_source_event(cache, request, category, attempt, candidates)
++
++        def stage_observer(stage: str, collection: Any, details: dict[str, Any]) -> None:
++            now = int(time.time())
++            stage_records.append({
++                "stage": stage,
++                "status": str(details.get("status") or "DONE"),
++                "started_at": now,
++                "finished_at": now,
++                "duration_ms": int(details.get("duration_ms") or 0),
++                "details": details,
++                "error_text": str(details.get("error_text") or ""),
++            })
++            if stage == "source_start":
++                print(f"SOURCE START {details.get('source', '')} {details.get('query', '')}", flush=True)
++                return
++            snapshot = _snapshot_collection(
++                collection,
++                parsed,
++                category,
++                stages=stage_records,
++                snapshot_status="PARTIAL_SUCCESS",
++            )
++            _write_partial_snapshot(cache, request, parsed, snapshot)
++
++        collection = collect_product_candidates(
++            request,
++            max_results=15,
++            verification_mode=verification_mode,
++            source_timeout_seconds=source_timeout_seconds,
++            source_observer=source_observer,
++            stage_observer=stage_observer,
++        )
++        final_status = "SUCCESS" if collection.raw_candidates else "EMPTY"
++        snapshot = _snapshot_collection(
++            collection,
++            parsed,
++            category,
++            stages=stage_records,
++            snapshot_status=final_status,
++        )
++        cache.put(
++            cache_key=_snapshot_key(cache, request, parsed, final_status),
++            stage=CACHE_STAGE,
++            query=request.clean_search_query or query,
++            source=f"{CACHE_SOURCE}:{final_status.lower()}",
++            payload=snapshot,
++            status=final_status,
++        )
++        output.put({"ok": True, "case_id": case_id, "snapshot": snapshot, "status": final_status})
+     except Exception as exc:  # pragma: no cover - exercised through parent orchestration
+         output.put({"ok": False, "case_id": case_id, "error": f"{type(exc).__name__}: {exc}"})
+ 
+ 
+-def _run_live_case(case: BenchmarkCase, sequence: int, timeout_seconds: int) -> tuple[str, dict[str, Any] | None, str]:
++def _run_live_case(
++    case: BenchmarkCase,
++    sequence: int,
++    timeout_seconds: int,
++    *,
++    cache_path: str,
++    verification_mode: str,
++    source_timeout_seconds: int,
++) -> tuple[str, dict[str, Any] | None, str]:
+     context = mp.get_context("spawn")
+     output = context.Queue(maxsize=1)
+-    process = context.Process(target=_live_case_worker, args=(case.case_id, case.query, sequence, output))
++    process = context.Process(
++        target=_live_case_worker,
++        args=(
++            case.case_id,
++            case.query,
++            sequence,
++            cache_path,
++            verification_mode,
++            source_timeout_seconds,
++            output,
++        ),
++    )
+     process.start()
+     process.join(max(1, timeout_seconds))
+     if process.is_alive():
+@@ -556,7 +753,7 @@ def _run_live_case(case: BenchmarkCase, sequence: int, timeout_seconds: int) ->
+         output.join_thread()
+     if not message.get("ok"):
+         return "ERROR", None, str(message.get("error") or "live worker failed")
+-    return "DONE", message["snapshot"], ""
++    return str(message.get("status") or "SUCCESS"), message["snapshot"], ""
+ 
+ 
+ def _store_source_entries(cache: SearchCache, snapshot: dict[str, Any], request: Request) -> None:
+diff --git a/tools/test_search.py b/tools/test_search.py
+index d9f085f..ef156dd 100644
+--- a/tools/test_search.py
++++ b/tools/test_search.py
+@@ -20,10 +20,13 @@ from app.product_search import collect_product_candidates, generate_search_queri
+ from app.candidate_verifier import (
+     BAD_ENCODING,
+     NEED_MANUAL_CHECK,
++    OVER_BUDGET_HARD,
++    OVER_BUDGET_SOFT,
+     PRICE_MISSING,
+     REMOVED_LISTING,
+     UNAVAILABLE,
+     VERIFY_BLOCKED,
++    WRONG_PRODUCT,
+ )
+ 
+ 
+@@ -57,6 +60,17 @@ def main() -> int:
+     verify_stats = collection.verify_stats
+     raw_candidates = collection.raw_candidates
+     saved_candidates = collection.candidates
++    saved_verified_good = sum(1 for item in saved_candidates if getattr(item, "verify_status", item.quality) == "VERIFIED_GOOD")
++    saved_verified_ok = sum(1 for item in saved_candidates if getattr(item, "verify_status", item.quality) == "VERIFIED_OK")
++    saved_need_manual = sum(1 for item in saved_candidates if getattr(item, "verify_status", item.quality) == NEED_MANUAL_CHECK)
++    saved_verify_blocked = sum(1 for item in saved_candidates if getattr(item, "verify_status", item.quality) == VERIFY_BLOCKED)
++    weak_status_count = sum(
++        1 for item in saved_candidates
++        if getattr(item, "verify_status", item.quality) in {
++            NEED_MANUAL_CHECK, VERIFY_BLOCKED, PRICE_MISSING, UNAVAILABLE,
++            WRONG_PRODUCT, OVER_BUDGET_SOFT, OVER_BUDGET_HARD,
++        }
++    )
+     trash = [item for item in raw_candidates if item.quality == "TRASH"]
+     good = [item for item in raw_candidates if item.quality == "GOOD"]
+     ok = [item for item in raw_candidates if item.quality == "OK"]
+@@ -77,7 +91,16 @@ def main() -> int:
+     print("УПАЛИ ИСТОЧНИКИ: " + (", ".join(failed_sources) if failed_sources else "нет"))
+     print("GOOD/OK ДАЛИ: " + (", ".join(productive_sources) if productive_sources else "нет"))
+     print(
+-        "\nВЕРИФИКАЦИЯ СТРАНИЦ: "
++        "\nСОХРАНЕНО ДЛЯ АДМИНА: "
++        f"saved_for_admin={len(saved_candidates)}; "
++        f"VERIFIED_GOOD={saved_verified_good}; "
++        f"VERIFIED_OK={saved_verified_ok}; "
++        f"NEED_MANUAL_CHECK={saved_need_manual}; "
++        f"VERIFY_BLOCKED={saved_verify_blocked}; "
++        f"WEAK/PRICE_MISSING/WRONG/UNAVAILABLE/OVER_BUDGET={weak_status_count}"
++    )
++    print(
++        "ВЕРИФИКАЦИЯ СТРАНИЦ (checked): "
+         f"checked={verify_stats.get('checked', 0)}; "
+         f"verified_good={verify_stats.get('VERIFIED_GOOD', 0)}; "
+         f"verified_ok={verify_stats.get('VERIFIED_OK', 0)}; "
+@@ -103,7 +126,7 @@ def main() -> int:
+     print(f"\nОсновные кандидаты для админа: {len(saved_candidates)}")
+     if budget:
+         print(f"Среди RAW — в бюджете: {in_budget}; сильно выше бюджета: {strongly_over_budget}")
+-    if verify_stats.get("VERIFIED_GOOD", 0) + verify_stats.get("VERIFIED_OK", 0) < 3:
++    if saved_verified_good < 3:
+         print("Нормальных проверенных вариантов мало. Нужно ручное уточнение / Алиса / Gemini.")
+     for index, item in enumerate(saved_candidates, 1):
+         price = f"{item.price} ₽" if item.price else "цена не найдена"
+@@ -135,19 +158,46 @@ def main() -> int:
+             f"why_not_verified_good={getattr(item, 'why_not_verified_good', '-') or '-'}"
+         )
+         if facts:
+-            print(
+-                "   facts: "
+-                f"model_key={facts.get('model_key') or '-'}; "
+-                f"price={facts.get('price')}; "
++            category = facts.get("category") or "unknown"
++            common = (
++                f"category={category}; price={facts.get('price')}; "
+                 f"budget_status={facts.get('budget_status') or '-'}; "
+-                f"availability={facts.get('availability_text') or '-'}; "
+-                f"diagonal={facts.get('diagonal') or '-'}; "
+-                f"resolution={facts.get('resolution') or '-'}; "
+-                f"refresh_rate={facts.get('refresh_rate') or '-'}; "
+-                f"matrix_type={facts.get('matrix_type') or '-'}; "
+-                f"ps5_flags={facts.get('ps5_flags') or []}; "
+-                f"warnings={facts.get('warnings') or []}"
++                f"availability={facts.get('availability_text') or '-'}"
+             )
++            if category == "phone":
++                detail = (
++                    f"model={facts.get('model') or '-'}; memory={facts.get('memory') or '-'}; "
++                    f"color={facts.get('color') or '-'}; condition={facts.get('condition') or '-'}"
++                )
++            elif category == "tv":
++                detail = (
++                    f"model_key={facts.get('model_key') or '-'}; diagonal={facts.get('diagonal') or '-'}; "
++                    f"resolution={facts.get('resolution') or '-'}; refresh_rate={facts.get('refresh_rate') or '-'}; "
++                    f"hdmi={facts.get('hdmi') or '-'}; matrix_type={facts.get('matrix_type') or '-'}; "
++                    f"ps5_flags={facts.get('ps5_flags') or []}; warnings={facts.get('warnings') or []}"
++                )
++            elif category == "laptop":
++                detail = (
++                    f"brand={facts.get('brand') or '-'}; cpu={facts.get('cpu') or '-'}; "
++                    f"ram={facts.get('ram') or '-'}; ssd={facts.get('ssd') or '-'}; "
++                    f"screen={facts.get('screen') or '-'}"
++                )
++            elif category == "headphones":
++                detail = (
++                    f"brand={facts.get('brand') or '-'}; type={facts.get('headphone_type') or '-'}; "
++                    f"anc={facts.get('anc') or '-'}; model={facts.get('model') or '-'}"
++                )
++            elif category == "chair":
++                detail = (
++                    f"ergonomics={facts.get('ergonomics') or '-'}; "
++                    f"lumbar_support={facts.get('lumbar_support') or '-'}; "
++                    f"adjustments={facts.get('adjustments') or []}; "
++                    f"headrest={facts.get('headrest') or '-'}; "
++                    f"load_capacity={facts.get('load_capacity') or '-'}"
++                )
++            else:
++                detail = "факты не подтверждены"
++            print(f"   facts: {common}; {detail}")
+ 
+     if collection.verified_rejections:
+         print("\nDEBUG ОТБРАКОВКИ VERIFY")

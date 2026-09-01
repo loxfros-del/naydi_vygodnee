@@ -12,6 +12,8 @@ class AvitoAdapter(SiteExactSearchBridge):
         kind="discovery",
         supports_city=True,
         supports_condition=True,
+        supports_category_filter=True,
+        requires_page_verification=True,
     )
 
     def __init__(self, search_callable=None) -> None:

@@ -9,7 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.search_v2.market_analysis import analyze_market, analyze_product_groups, classify_price  # noqa: E402
+from app.search_v2.market_analysis import (  # noqa: E402
+    analyze_market, analyze_product_groups, classify_price, is_extreme_price_outlier,
+)
 from app.search_v2.models import (  # noqa: E402
     AvailabilityInfo, AvailabilityStatus, ExactMatchResult, Offer, PriceClass, ProductGroup,
 )
@@ -53,6 +55,14 @@ class SearchV2MarketAnalysisTests(unittest.TestCase):
         self.assertEqual(len(analyzed), 2)
         self.assertEqual(analyzed[0].market_stats.median, 15)
         self.assertEqual(analyzed[1].market_stats.median, 100)
+
+    def test_extreme_price_outlier_is_not_a_discount(self) -> None:
+        cheap = priced("fake-accessory", 2_110)
+        normal = priced("normal", 22_990)
+        higher = priced("higher", 24_849)
+        stats = analyze_market([cheap, normal, higher])
+        self.assertTrue(is_extreme_price_outlier(cheap, stats))
+        self.assertFalse(is_extreme_price_outlier(normal, stats))
 
 
 if __name__ == "__main__":

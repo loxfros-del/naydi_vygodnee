@@ -66,6 +66,7 @@ from app.ui_keyboards import (
     CB_WIZARD_CONFIRM,
     CB_WIZARD_EDIT,
     CB_WIZARD_EDIT_PREFIX,
+    CB_WIZARD_SKIP,
     category_keyboard,
     condition_keyboard,
     feedback_keyboard,
@@ -154,7 +155,11 @@ def _wizard_markup(wizard: RequestWizard):
         return condition_keyboard()
     if wizard.current_step is WizardStep.PRIORITY:
         return priority_keyboard()
-    return wizard_navigation_keyboard(show_back=wizard.position > 0)
+    question = wizard.current_question
+    return wizard_navigation_keyboard(
+        show_back=wizard.position > 0,
+        show_skip=bool(question and not question.required),
+    )
 
 
 async def _show_wizard_step(message: Message, state: FSMContext, wizard: RequestWizard) -> None:
@@ -281,6 +286,18 @@ async def wizard_back(callback: CallbackQuery, state: FSMContext):
     else:
         await _save_wizard(state, wizard, wizard_edit_return=False)
         await _show_wizard_step(callback.message, state, wizard)
+    await callback.answer()
+
+
+@router.callback_query(F.data == CB_WIZARD_SKIP)
+async def wizard_skip(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    wizard = _wizard_from_data(data)
+    question = wizard.current_question
+    if question is None or question.required:
+        await callback.answer("Этот шаг нужно заполнить", show_alert=True)
+        return
+    await _apply_wizard_answer(callback.message, state, "не важно")
     await callback.answer()
 
 

@@ -7,7 +7,11 @@ import inspect
 import json
 from typing import Any, Awaitable, Callable, Iterable
 
-from app.search_v2.feature_flags import SearchEngineMode, get_search_engine_mode
+from app.search_v2.feature_flags import (
+    SearchEngineMode,
+    get_search_engine_mode,
+    resolve_search_engine_mode,
+)
 from app.search_v2.models import RecommendationRole, SearchResultStatus, SearchResultV2
 from app.search_v2.serialization import to_jsonable
 from app.search_v2.shadow_compare import build_shadow_comparison
@@ -41,9 +45,23 @@ def _default_candidate_loader(request_id: int) -> Iterable[Any]:
 
 
 def _default_v2_service() -> Any:
+    from app.search_v2.external_page_verifier import (
+        ExternalProductPageVerifier,
+        verify_external_offer_if_needed,
+    )
+    from app.search_v2.market_history import MarketHistoryStore
     from app.search_v2.service import SearchServiceV2
 
-    return SearchServiceV2()
+    verifier = ExternalProductPageVerifier(timeout=6.0)
+    # The history store is deliberately separate from bot.db and is
+    # best-effort inside V2, so an unavailable file cannot break the bot.
+    return SearchServiceV2(
+        market_history_store=MarketHistoryStore(),
+        page_verifier=lambda offer: verify_external_offer_if_needed(offer, verifier),
+        web_discovery_sources=("yandex_web", "wildberries"),
+        page_verification_limit=6,
+        page_verification_timeout=6.0,
+    )
 
 
 async def _call(value: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -221,7 +239,8 @@ class SearchEngineBridge:
         return value
 
     async def execute(self, request: Any, *, mode: str | SearchEngineMode | None = None) -> SearchEngineExecution:
-        resolved = mode if isinstance(mode, SearchEngineMode) else get_search_engine_mode(mode)
+        configured = mode if isinstance(mode, SearchEngineMode) else get_search_engine_mode(mode)
+        resolved = resolve_search_engine_mode(configured, request_id=_request_id(request))
         if resolved is SearchEngineMode.LEGACY:
             return SearchEngineExecution(resolved, await self._legacy(request))
 

@@ -83,8 +83,34 @@ def analyze_market(offers: Iterable[Offer]) -> MarketStats:
     )
 
 
+def is_extreme_price_outlier(offer: Offer, market_stats: MarketStats | None) -> bool:
+    """Reject a price that can only be explained by a bad product card.
+
+    A real discount may be below the median, but it should not be 75% below
+    the observed high end of several direct, exact offers.  This protects the
+    recommendation path from accessories and misleading marketplace cards
+    that repeat an expensive model name in their title.
+    """
+    if (
+        market_stats is None
+        or market_stats.verified_offer_count < 3
+        or not offer.price
+        or offer.exact_match not in {ExactMatchResult.EXACT, ExactMatchResult.COMPATIBLE_VARIANT}
+    ):
+        return False
+    # The check is deliberately a hard safety boundary, not a new way to
+    # label normal discounts. It is only active after three direct matches.
+    reference = market_stats.maximum
+    if not reference or reference <= 0:
+        return False
+    return float(offer.price) < float(reference) * 0.25
+
+
 def analyze_product_groups(groups: Iterable[ProductGroup]) -> list[ProductGroup]:
     return [replace(group, market_stats=analyze_market(group.offers)) for group in groups]
 
 
-__all__ = ["analyze_market", "analyze_product_groups", "classify_price", "is_comparable_offer"]
+__all__ = [
+    "analyze_market", "analyze_product_groups", "classify_price",
+    "is_comparable_offer", "is_extreme_price_outlier",
+]

@@ -128,6 +128,8 @@ _CLIENT_TECH_MARKERS = (
     "weak_candidate", "verified_good", "verified_ok", "verify_blocked",
     "exact_match", "confidence", "evidence", "score", "browser", "proxy",
     "captcha", "403", "401", "429", "http ", "network block", "raw status",
+    "страница заблокировала", "сайт заблокировал", "не подтверждена прямая",
+    "классификация:", "price mismatch", "bad encoding",
 )
 _PROMOTIONAL_MARKERS = (
     "успейте", "купите", "закажите", "акция", "промокод", "реклама",

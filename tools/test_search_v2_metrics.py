@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,7 +11,7 @@ if str(ROOT) not in sys.path:
 
 from app.search_v2.metrics import build_search_metrics
 from app.search_v2.models import (
-    AvailabilityInfo, AvailabilityStatus, ExactMatchResult, Offer, ProductGroup,
+    AvailabilityInfo, AvailabilityStatus, ExactMatchResult, MarketStats, Offer, ProductGroup,
     Recommendation, RecommendationRole, SourceAttempt, SourceStatus,
 )
 
@@ -20,14 +21,21 @@ class SearchV2MetricsTests(unittest.TestCase):
         good = Offer(
             offer_id="a", source="ozon", title="Exact", price=100,
             exact_match=ExactMatchResult.EXACT,
+            price_confidence=0.9,
             availability=AvailabilityInfo(status=AvailabilityStatus.IN_STOCK, available=True),
         )
         second = Offer(
             offer_id="b", source="dns", title="Variant", price=110,
             exact_match=ExactMatchResult.COMPATIBLE_VARIANT,
+            price_confidence=0.9,
             availability=AvailabilityInfo(status=AvailabilityStatus.IN_STOCK, available=True),
         )
         wrong = Offer(offer_id="c", exact_match=ExactMatchResult.MODEL_MISMATCH)
+        now = datetime(2026, 8, 13, 12, tzinfo=timezone.utc)
+        good.retrieved_at = now - timedelta(hours=2)
+        second.retrieved_at = now - timedelta(hours=40)
+        group = ProductGroup(group_id="g", offers=[good, second])
+        group.market_stats = MarketStats(minimum=100, median=105, maximum=110)
         metrics = build_search_metrics(
             attempts=[
                 SourceAttempt(source="ozon", status=SourceStatus.SUCCESS, cache_hit=True),
@@ -37,14 +45,17 @@ class SearchV2MetricsTests(unittest.TestCase):
             raw_offer_count=3,
             offers=[good, second],
             rejected_offers=[wrong],
-            groups=[ProductGroup(group_id="g")],
+            groups=[group],
             recommendations=[
                 Recommendation(role=RecommendationRole.BEST_OVERALL, offer_id="a", offer=good),
                 Recommendation(role=RecommendationRole.RELIABLE, offer_id="b", offer=second),
             ],
             duration_ms=321,
             manual_review_required=True,
+            now=now,
         )
+        self.assertEqual(metrics.attempted_source_count, 3)
+        self.assertEqual(metrics.successful_source_count, 1)
         self.assertAlmostEqual(metrics.source_success_rate, 1 / 3, places=4)
         self.assertAlmostEqual(metrics.source_timeout_rate, 1 / 3, places=4)
         self.assertAlmostEqual(metrics.blocked_rate, 1 / 3, places=4)
@@ -52,7 +63,13 @@ class SearchV2MetricsTests(unittest.TestCase):
         self.assertEqual(metrics.exact_offer_count, 1)
         self.assertEqual(metrics.wrong_model_rejection_count, 1)
         self.assertEqual(metrics.valid_price_rate, 1.0)
+        self.assertEqual(metrics.priced_exact_source_count, 2)
+        self.assertEqual(metrics.comparable_offer_count, 2)
+        self.assertEqual(metrics.fresh_comparable_offer_count, 1)
+        self.assertEqual(metrics.stale_comparable_offer_count, 1)
         self.assertEqual(metrics.product_group_count, 1)
+        self.assertEqual(metrics.market_median_group_count, 1)
+        self.assertEqual(metrics.reference_price_span_percent, 9.52)
         self.assertEqual(metrics.recommendation_count, 2)
         self.assertTrue(metrics.top1_exact)
         self.assertEqual(metrics.top3_useful, 2)
@@ -68,6 +85,8 @@ class SearchV2MetricsTests(unittest.TestCase):
             recommendations=[], duration_ms=-1,
         )
         self.assertEqual(metrics.source_success_rate, 0)
+        self.assertEqual(metrics.attempted_source_count, 0)
+        self.assertEqual(metrics.comparable_offer_count, 0)
         self.assertEqual(metrics.valid_price_rate, 0)
         self.assertEqual(metrics.duplicate_rate, 0)
         self.assertFalse(metrics.top1_exact)

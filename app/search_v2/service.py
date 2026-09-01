@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import re
 import time
 from typing import Any, Awaitable, Callable, Iterable
@@ -10,12 +11,15 @@ from typing import Any, Awaitable, Callable, Iterable
 from .exact_match import is_hard_mismatch
 from .grouping import group_offers
 from .manual_verification import resolve_final_verification
-from .market_analysis import analyze_product_groups
+from .market_analysis import analyze_product_groups, is_comparable_offer, is_extreme_price_outlier
+from .market_history import ComparableMarketOffer, MarketLane, NullMarketHistoryStore, canonical_hash
 from .metrics import build_search_metrics
 from .models import (
     AvailabilityStatus,
     ExactMatchResult,
     Offer,
+    PlatformTrust,
+    ProductCondition,
     ProductGroup,
     QueryPlan,
     RawOffer,
@@ -26,7 +30,7 @@ from .models import (
     SourceStatus,
     VerificationAccess,
 )
-from .normalization import normalize_raw_offer
+from .normalization import is_product_page_url, normalize_raw_offer
 from .orchestrator import OrchestrationResult, PartialSnapshot, SearchSourceOrchestrator
 from .query_planner import QueryPlannerV2
 from .recommendations import select_recommendations
@@ -37,6 +41,7 @@ from .verification import verify_offer_pages
 
 SnapshotCallback = Callable[[str, PartialSnapshot], Any | Awaitable[Any]]
 _SECRET_RE = re.compile(r"(?i)(token|secret|api[_-]?key|authorization|cookie|password)\s*[=:]\s*[^\s;&]+")
+_MARKET_HISTORY_MAX_AGE = timedelta(hours=36)
 
 
 def _safe_error(value: Any) -> str:
@@ -90,12 +95,186 @@ def _manual_required(offer: Offer) -> bool:
     )
 
 
+def _page_verification_priority(offer: Offer) -> tuple[int, int, float, str]:
+    """Verify the most promising exact direct links before weaker rows."""
+    exact_rank = {
+        ExactMatchResult.EXACT: 0,
+        ExactMatchResult.COMPATIBLE_VARIANT: 1,
+        ExactMatchResult.GENERIC_MATCH: 2,
+        ExactMatchResult.UNKNOWN: 3,
+    }.get(offer.exact_match, 4)
+    missing_price = 0 if offer.price and offer.price > 0 else 1
+    return exact_rank, missing_price, float(offer.price or 10**18), str(offer.offer_id)
+
+
+def _priced_exact_sources(offers: Iterable[Offer]) -> set[str]:
+    """Sources that can actually establish a comparable market price."""
+    return {
+        str(offer.source or offer.platform).casefold()
+        for offer in offers
+        if (
+            offer.exact_match in {ExactMatchResult.EXACT, ExactMatchResult.COMPATIBLE_VARIANT}
+            and bool(offer.price and offer.price > 0)
+            and str(offer.source or offer.platform).strip()
+        )
+    }
+
+
+def _priced_comparable_offer_count(offers: Iterable[Offer]) -> int:
+    """Count usable comparable prices without confusing snippets with offers."""
+    return sum(
+        1
+        for offer in offers
+        if (
+            offer.exact_match in {ExactMatchResult.EXACT, ExactMatchResult.COMPATIBLE_VARIANT}
+            and bool(offer.price and offer.price > 0)
+            and bool(offer.url)
+        )
+    )
+
+
+def _refresh_verified_external_offer(offer: Offer, request: SearchRequestV2) -> Offer:
+    """Re-run identity matching after a web page replaces a search snippet.
+
+    Web discovery starts with a result title only.  A verified page can reveal
+    a different memory/SIM variant, so the final title and price must pass the
+    normal exact-match boundary a second time before recommendation.
+    """
+    metadata = dict(offer.raw_metadata) if isinstance(offer.raw_metadata, dict) else {}
+    verification = metadata.get("external_page_verification")
+    if not (
+        bool(metadata.get("external_page_verified"))
+        and isinstance(verification, dict)
+        and verification.get("verified") is True
+    ):
+        return offer
+    raw = RawOffer(
+        source=offer.source,
+        platform=offer.platform,
+        title=offer.title,
+        url=offer.url,
+        product_id=offer.product_id,
+        seller_name=offer.seller.name,
+        price=offer.price,
+        old_price=offer.old_price,
+        currency=offer.currency,
+        availability_text=offer.availability.source_text,
+        condition=offer.condition,
+        city=offer.city,
+        delivery=offer.delivery,
+        image_url=offer.image_url,
+        raw_metadata=metadata,
+        retrieved_at=offer.retrieved_at,
+    )
+    refreshed = normalize_raw_offer(raw, request)
+    return replace(refreshed, cache_age=offer.cache_age)
+
+
 def _risk_groups(groups: Iterable[ProductGroup]) -> list[ProductGroup]:
     result: list[ProductGroup] = []
     for group in groups:
         offers = [resolve_final_verification(apply_risks(offer, group.market_stats)) for offer in group.offers]
         result.append(replace(group, offers=offers))
     return result
+
+
+def _market_history_condition(offer: Offer) -> ProductCondition:
+    """Use the normalized condition without mixing new, used and refurbished."""
+    if offer.condition is not ProductCondition.UNKNOWN:
+        return offer.condition
+    if offer.identity is not None:
+        return offer.identity.condition
+    return ProductCondition.UNKNOWN
+
+
+def _market_history_lane(offer: Offer) -> MarketLane | None:
+    """Choose a non-interchangeable market lane, or skip uncertain offers."""
+    condition = _market_history_condition(offer)
+    if condition is ProductCondition.REFURBISHED:
+        return MarketLane.REFURBISHED
+    if condition is ProductCondition.USED:
+        return MarketLane.USED
+    if condition is not ProductCondition.NEW:
+        return None
+    if offer.platform_trust is PlatformTrust.HIGH_RETAIL:
+        return MarketLane.NEW_RETAIL
+    if offer.platform_trust is PlatformTrust.HIGH_MARKETPLACE:
+        return MarketLane.NEW_MARKETPLACE
+    if (
+        offer.platform_trust is PlatformTrust.CLASSIFIED
+        or str(offer.seller.seller_type or "").casefold() == "private"
+    ):
+        return MarketLane.NEW_PRIVATE
+    return None
+
+
+def _is_current_market_history_offer(offer: Offer, now: datetime) -> bool:
+    """Keep history as strict as the current-price evidence boundary."""
+    timestamp = offer.retrieved_at
+    if not isinstance(timestamp, datetime):
+        return False
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    age = now - timestamp.astimezone(timezone.utc)
+    if not timedelta(minutes=-5) <= age <= _MARKET_HISTORY_MAX_AGE:
+        return False
+    return offer.cache_age is None or 0 <= offer.cache_age <= _MARKET_HISTORY_MAX_AGE.total_seconds()
+
+
+def _is_market_history_eligible(offer: Offer, now: datetime) -> bool:
+    """History only sees current, direct, exact comparable product pages."""
+    return bool(
+        is_comparable_offer(offer)
+        and offer.availability.status is AvailabilityStatus.IN_STOCK
+        and is_product_page_url(offer.url)
+        and _is_current_market_history_offer(offer, now)
+    )
+
+
+def _market_history_identity(identity: Any) -> dict[str, Any] | None:
+    """Return a hash-only input; no title, link, seller or query is persisted."""
+    if identity is None:
+        return None
+    category = str(getattr(identity, "category", "") or "").strip()
+    model = str(getattr(identity, "canonical_model", "") or "").strip()
+    if not category or not model:
+        return None
+    return {
+        "category": category,
+        "brand": str(getattr(identity, "brand", "") or ""),
+        "model": model,
+        "modifiers": list(getattr(identity, "modifiers", ()) or ()),
+        "storage": getattr(identity, "storage", None),
+        "size": getattr(identity, "size", None),
+        "diagonal": getattr(identity, "diagonal", None),
+        "refresh_rate": getattr(identity, "refresh_rate", None),
+        "configuration": dict(getattr(identity, "key_configuration", {}) or {}),
+        "condition": _market_history_condition_value(getattr(identity, "condition", None)),
+        "region_or_sim_variant": str(getattr(identity, "region_or_sim_variant", "") or ""),
+    }
+
+
+def _market_history_condition_value(value: Any) -> str:
+    return str(getattr(value, "value", value) or ProductCondition.UNKNOWN.value)
+
+
+def _market_history_scope(request: SearchRequestV2, offer: Offer) -> dict[str, str]:
+    """Keep raw locality out of even the injected history-store contract."""
+    metadata = offer.raw_metadata if isinstance(offer.raw_metadata, dict) else {}
+    source_confirmed_city = bool(metadata.get("region_scope_confirmed"))
+    city = str(
+        offer.city
+        or offer.availability.city
+        or offer.seller.city
+        or (request.city if source_confirmed_city else "")
+        or ""
+    ).strip()
+    delivery = str(offer.delivery or offer.availability.delivery or "").strip()
+    return {
+        "city_hash": canonical_hash(city or "unknown", namespace="market-city"),
+        "coverage": "local" if city else ("delivery" if delivery else "unknown"),
+        "currency": str(offer.currency or "RUB").upper(),
+    }
 
 
 class SearchServiceV2:
@@ -107,10 +286,15 @@ class SearchServiceV2:
         normalizer: Callable[[Any], SearchRequestV2] = normalize_legacy_request,
         planner: QueryPlannerV2 | None = None,
         orchestrator: SearchSourceOrchestrator | None = None,
+        market_history_store: Any | None = None,
         page_verifier: Callable[[Offer], Any] | None = None,
+        page_verification_limit: int = 6,
+        web_discovery_sources: Iterable[str] = (),
         discovery_sources: Iterable[str] = ("yandex_market", "ozon", "avito"),
         anchor_sources: Iterable[str] = ("dns",),
         generic_sources: Iterable[str] = ("generic_search",),
+        minimum_exact_sources_before_fallback: int = 2,
+        minimum_comparable_offers_before_fallback: int = 3,
         overall_timeout: float = 45.0,
         page_verification_timeout: float = 8.0,
     ) -> None:
@@ -127,12 +311,84 @@ class SearchServiceV2:
                 case_timeout=min(30.0, max(1.0, overall_timeout)),
             )
         self.orchestrator = orchestrator
+        self.market_history_store = market_history_store if market_history_store is not None else NullMarketHistoryStore()
         self.page_verifier = page_verifier
+        self.page_verification_limit = max(1, min(int(page_verification_limit or 6), 10))
+        self.web_discovery_sources = tuple(web_discovery_sources)
         self.discovery_sources = tuple(discovery_sources)
         self.anchor_sources = tuple(anchor_sources)
         self.generic_sources = tuple(generic_sources)
+        self.minimum_exact_sources_before_fallback = max(1, int(minimum_exact_sources_before_fallback))
+        self.minimum_comparable_offers_before_fallback = max(1, int(minimum_comparable_offers_before_fallback))
         self.overall_timeout = max(1.0, float(overall_timeout))
         self.page_verification_timeout = max(0.1, float(page_verification_timeout))
+
+    def _can_verify_flagged_page(self, offer: Offer) -> bool:
+        """Allow an unknown direct URL shape only through the bounded verifier."""
+        if self.page_verifier is None:
+            return False
+        metadata = offer.raw_metadata if isinstance(offer.raw_metadata, dict) else {}
+        if bool(metadata.get("page_verification_required")):
+            return True
+        registry = getattr(self.orchestrator, "registry", None)
+        adapter = registry.get(offer.source) if registry is not None else None
+        capabilities = getattr(adapter, "capabilities", None)
+        return bool(getattr(capabilities, "requires_page_verification", False))
+
+    def _capture_market_history(
+        self,
+        request: SearchRequestV2,
+        groups: Iterable[ProductGroup],
+    ) -> None:
+        """Best-effort snapshot capture outside ranking and client output.
+
+        The durable store receives an identity and a scope only to hash them.
+        It never receives titles, queries, URLs, sellers, or raw locality data
+        for storage. Any failure is intentionally invisible to the search.
+        """
+        now = datetime.now(timezone.utc)
+        try:
+            for group in groups:
+                canonical_identity = _market_history_identity(group.identity)
+                if canonical_identity is None:
+                    continue
+                buckets: dict[tuple[MarketLane, str, str, str], tuple[dict[str, str], list[ComparableMarketOffer]]] = {}
+                for offer in group.offers:
+                    if not _is_market_history_eligible(offer, now):
+                        continue
+                    lane = _market_history_lane(offer)
+                    if lane is None:
+                        continue
+                    scope = _market_history_scope(request, offer)
+                    key = (lane, scope["city_hash"], scope["coverage"], scope["currency"])
+                    entry = buckets.get(key)
+                    if entry is None:
+                        entry = (scope, [])
+                        buckets[key] = entry
+                    entry[1].append(
+                        ComparableMarketOffer(
+                            price=offer.price,
+                            source=str(offer.source or offer.platform or ""),
+                            comparable=True,
+                            current=True,
+                            observed_at=offer.retrieved_at,
+                        )
+                    )
+                for (lane, _city_hash, _coverage, _currency), (scope, offers) in buckets.items():
+                    try:
+                        self.market_history_store.capture(
+                            canonical_identity=canonical_identity,
+                            scope=scope,
+                            lane=lane,
+                            offers=offers,
+                            observed_on=now,
+                        )
+                    except Exception:
+                        # A history snapshot is never allowed to degrade search.
+                        continue
+        except Exception:
+            # Keep a misconfigured optional dependency outside the result path.
+            return
 
     async def _stage(
         self,
@@ -144,10 +400,17 @@ class SearchServiceV2:
         include_over_budget: bool,
         on_snapshot: SnapshotCallback | None,
     ) -> tuple[QueryPlan, OrchestrationResult | None, str]:
+        source_capabilities = {}
+        registry = getattr(self.orchestrator, "registry", None)
+        for source in sources:
+            adapter = registry.get(source) if registry is not None else None
+            if adapter is not None:
+                source_capabilities[source] = getattr(adapter, "capabilities", None)
         plan = self.planner.plan(
             request,
             sources=sources,
             include_over_budget=include_over_budget,
+            source_capabilities=source_capabilities,
         )
         if not plan.source_queries:
             return plan, None, ""
@@ -226,7 +489,16 @@ class SearchServiceV2:
         results: list[OrchestrationResult] = []
         errors: list[str] = []
 
-        for stage, sources in (("discovery", self.discovery_sources), ("anchor", self.anchor_sources)):
+        # Start with the primary marketplace scan. Optional web discovery can
+        # be slow or temporarily unavailable, so it must never consume the
+        # first time window and prevent the core sources from producing a
+        # usable result. Its links are still fail-closed later by the direct
+        # page verifier.
+        for stage, sources in (
+            ("discovery", self.discovery_sources),
+            ("web_discovery", self.web_discovery_sources),
+            ("anchor", self.anchor_sources),
+        ):
             if not sources:
                 continue
             plan, result, error = await self._stage(
@@ -246,8 +518,13 @@ class SearchServiceV2:
         raw_offers = _dedupe_raw_offers(raw for result in results for raw in result.raw_offers)
         preview, preview_errors = self._normalize(raw_offers, normalized_request)
         errors.extend(preview_errors)
-        has_exact = any(offer.exact_match in {ExactMatchResult.EXACT, ExactMatchResult.COMPATIBLE_VARIANT} for offer in preview)
-        if not has_exact and self.generic_sources and time.monotonic() < deadline:
+        exact_price_sources = _priced_exact_sources(preview)
+        comparable_price_count = _priced_comparable_offer_count(preview)
+        needs_broad_coverage = (
+            len(exact_price_sources) < self.minimum_exact_sources_before_fallback
+            or comparable_price_count < self.minimum_comparable_offers_before_fallback
+        )
+        if needs_broad_coverage and self.generic_sources and time.monotonic() < deadline:
             plan, result, error = await self._stage(
                 stage="generic_fallback",
                 request=normalized_request,
@@ -265,17 +542,47 @@ class SearchServiceV2:
 
         offers, normalization_errors = self._normalize(raw_offers, normalized_request)
         errors.extend(normalization_errors)
-        if self.page_verifier and offers:
-            offers = await verify_offer_pages(
-                offers,
+
+        # Reject obvious wrong models and non-product links before opening any
+        # external page.  This keeps web verification bounded and prevents a
+        # broad Yandex result page from consuming the product-page budget.
+        rejected: list[Offer] = []
+        verification_pool: list[Offer] = []
+        for offer in offers:
+            if (
+                is_hard_mismatch(offer.exact_match)
+                or offer.availability.status is AvailabilityStatus.OUT_OF_STOCK
+                or (
+                    bool(offer.raw_metadata.get("not_product_page"))
+                    and not self._can_verify_flagged_page(offer)
+                )
+            ):
+                rejected.append(apply_risks(offer))
+            else:
+                verification_pool.append(offer)
+
+        if self.page_verifier and verification_pool:
+            selected = sorted(verification_pool, key=_page_verification_priority)[: self.page_verification_limit]
+            selected_ids = {offer.offer_id for offer in selected}
+            verified = await verify_offer_pages(
+                selected,
                 self.page_verifier,
                 max_concurrency=2,
                 timeout=self.page_verification_timeout,
             )
+            refreshed = [
+                _refresh_verified_external_offer(offer, normalized_request)
+                for offer in verified
+            ]
+            refreshed_by_id = {offer.offer_id: offer for offer in refreshed}
+            verification_pool = [
+                refreshed_by_id.get(offer.offer_id, offer)
+                if offer.offer_id in selected_ids else offer
+                for offer in verification_pool
+            ]
 
-        rejected: list[Offer] = []
         retained: list[Offer] = []
-        for offer in offers:
+        for offer in verification_pool:
             if (
                 is_hard_mismatch(offer.exact_match)
                 or offer.availability.status is AvailabilityStatus.OUT_OF_STOCK
@@ -290,7 +597,27 @@ class SearchServiceV2:
             if offer.exact_match in {ExactMatchResult.EXACT, ExactMatchResult.COMPATIBLE_VARIANT}
             and bool(offer.url)
         ]
+        initial_groups = analyze_product_groups(group_offers(comparable))
+        price_outliers = {
+            offer.offer_id
+            for group in initial_groups
+            for offer in group.offers
+            if is_extreme_price_outlier(offer, group.market_stats)
+        }
+        if price_outliers:
+            # A title is not enough to override a price that is wildly below
+            # several direct offers of the same model.  Do not expose these
+            # rows as "cheap with caveats": they are usually accessories,
+            # broken listings or misleading marketplace cards.
+            for offer in retained:
+                if offer.offer_id in price_outliers:
+                    metadata = dict(offer.raw_metadata) if isinstance(offer.raw_metadata, dict) else {}
+                    metadata["price_outlier_rejected"] = True
+                    rejected.append(apply_risks(replace(offer, raw_metadata=metadata)))
+            retained = [offer for offer in retained if offer.offer_id not in price_outliers]
+            comparable = [offer for offer in comparable if offer.offer_id not in price_outliers]
         groups = _risk_groups(analyze_product_groups(group_offers(comparable)))
+        self._capture_market_history(normalized_request, groups)
         by_id = {offer.offer_id: offer for group in groups for offer in group.offers}
         normalized_offers = [by_id.get(offer.offer_id, apply_risks(offer)) for offer in retained]
 
@@ -306,7 +633,7 @@ class SearchServiceV2:
                     for group in groups
                 ]
                 recommendation_groups = [group for group in recommendation_groups if group.offers]
-        recommendations = select_recommendations(recommendation_groups)
+        recommendations = select_recommendations(recommendation_groups, request=normalized_request)
         manual_candidates = _dedupe_offers(offer for offer in normalized_offers if _manual_required(offer))
 
         attempts: list[SourceAttempt] = [

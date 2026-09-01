@@ -13,7 +13,11 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("BOT_TOKEN", "test:token")
 os.environ.setdefault("ADMIN_IDS", "1")
 
-from app.ai_cards_service import assign_candidate_roles, build_fallback_ai_cards  # noqa: E402
+from app.ai_cards_service import (  # noqa: E402
+    assign_candidate_roles,
+    build_fallback_ai_cards,
+    select_verified_ai_card_candidates,
+)
 from app.db import Request, SearchResult  # noqa: E402
 
 
@@ -146,6 +150,16 @@ class AIRolePlannerTests(unittest.TestCase):
         cards = build_fallback_ai_cards(self.req, [marketplace, avito])
         self.assertEqual([item["role"] for item in cards], ["BEST", "BUDGET"])
         self.assertEqual(len({item["candidate_id"] for item in cards}), len(cards))
+
+    def test_verified_candidates_are_auto_approved_cards(self) -> None:
+        verified = candidate(1)
+        cards = build_fallback_ai_cards(self.req, select_verified_ai_card_candidates([verified]))
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["ai_card_status"], "APPROVED")
+        self.assertEqual(cards[0]["manual_check"], [])
+
+        incomplete = candidate(2, seller_verified=False)
+        self.assertEqual(select_verified_ai_card_candidates([incomplete]), [])
 
 
 if __name__ == "__main__":

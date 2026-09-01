@@ -23,7 +23,7 @@ from app.product_config import (  # noqa: E402
 from app.ui_formatters import chunk_html, escape_html, format_pricing, format_progress, source_display_name  # noqa: E402
 from app.ui_keyboards import callback_data_values, main_menu_keyboard, category_keyboard  # noqa: E402
 from app.ui_texts import (  # noqa: E402
-    BTN_COMPARE_LINKS, BTN_MY_REQUESTS, BTN_PRICING, BTN_SELECT_PRODUCT, BTN_SUPPORT,
+    BTN_COMPARE_LINKS, BTN_MY_REQUESTS, BTN_OPEN_NOVA, BTN_PRICING, BTN_SELECT_PRODUCT, BTN_SUPPORT,
 )
 
 
@@ -53,12 +53,26 @@ class ProductUITests(unittest.TestCase):
             self.assertIn(label, labels)
         self.assertNotIn("Админ", " ".join(labels))
 
-    def test_packages_are_configured_and_unset_price_is_honest(self):
-        packages = get_service_packages({"QUICK_SELECTION_PRICE_RUB": "499", "DEEP_SELECTION_PRICE_RUB": ""})
-        self.assertEqual(packages[0].price_rub, 499)
+    def test_miniapp_button_requires_public_https_url(self):
+        missing = [button.text for row in main_menu_keyboard(miniapp_url="http://localhost:8080").keyboard for button in row]
+        self.assertNotIn(BTN_OPEN_NOVA, missing)
+
+        keyboard = main_menu_keyboard(miniapp_url="https://nova.example/app")
+        button = next(button for row in keyboard.keyboard for button in row if button.text == BTN_OPEN_NOVA)
+        self.assertEqual(button.web_app.url, "https://nova.example/app")
+
+    def test_free_mode_overrides_old_package_price_variables(self):
+        free_packages = get_service_packages()
+        self.assertTrue(all(package.price_rub == 0 for package in free_packages))
+        self.assertIn("Бесплатно", format_pricing(free_packages))
+
+        packages = get_service_packages({
+            "QUICK_SELECTION_PRICE_RUB": "499",
+            "DEEP_SELECTION_PRICE_RUB": "",
+        })
+        self.assertTrue(all(package.price_rub == 0 for package in packages))
         text = format_pricing(packages)
-        self.assertIn("499 ₽", text)
-        self.assertIn("Стоимость уточняется", text)
+        self.assertIn("Бесплатно", text)
         self.assertNotIn("149–299", text)
 
     def test_six_supported_categories_and_gate(self):

@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     SERPAPI_LOCATION: str = "Russia"
     SERPAPI_MAX_RESULTS: int = 5
     SERPAPI_TIMEOUT_SECONDS: int = 15
+    YANDEX_SEARCH_API_ENABLED: bool = False
+    YANDEX_SEARCH_API_KEY: str = ""
+    YANDEX_SEARCH_FOLDER_ID: str = ""
+    YANDEX_SEARCH_MAX_RESULTS: int = 15
+    YANDEX_SEARCH_TIMEOUT_SECONDS: int = 15
+    MINI_APP_URL: str = ""
     DIRECT_RETAIL_ENABLED: bool = True
     DIRECT_RETAIL_MAX_RESULTS: int = 5
     DIRECT_RETAIL_TIMEOUT_SECONDS: int = 15
@@ -133,6 +139,12 @@ class Settings(BaseSettings):
             SERPAPI_LOCATION=os.getenv("SERPAPI_LOCATION", "Russia").strip(),
             SERPAPI_MAX_RESULTS=_env_int("SERPAPI_MAX_RESULTS", 5),
             SERPAPI_TIMEOUT_SECONDS=_env_int("SERPAPI_TIMEOUT_SECONDS", 15),
+            YANDEX_SEARCH_API_ENABLED=_env_bool("YANDEX_SEARCH_API_ENABLED", False),
+            YANDEX_SEARCH_API_KEY=os.getenv("YANDEX_SEARCH_API_KEY", "").strip(),
+            YANDEX_SEARCH_FOLDER_ID=os.getenv("YANDEX_SEARCH_FOLDER_ID", "").strip(),
+            YANDEX_SEARCH_MAX_RESULTS=_env_int("YANDEX_SEARCH_MAX_RESULTS", 15),
+            YANDEX_SEARCH_TIMEOUT_SECONDS=_env_int("YANDEX_SEARCH_TIMEOUT_SECONDS", 15),
+            MINI_APP_URL=os.getenv("MINI_APP_URL", "").strip(),
             DIRECT_RETAIL_ENABLED=_env_bool("DIRECT_RETAIL_ENABLED", True),
             DIRECT_RETAIL_MAX_RESULTS=_env_int("DIRECT_RETAIL_MAX_RESULTS", 5),
             DIRECT_RETAIL_TIMEOUT_SECONDS=_env_int("DIRECT_RETAIL_TIMEOUT_SECONDS", 15),

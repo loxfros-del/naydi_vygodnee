@@ -13,6 +13,7 @@ from .mvideo import MVideoAdapter
 from .ozon import OzonAdapter
 from .wildberries import WildberriesAdapterV2
 from .yandex_market import YandexMarketAdapter
+from .yandex_web import YandexWebDiscoveryAdapter
 
 __all__ = [
     "AvitoAdapter",
@@ -27,4 +28,5 @@ __all__ = [
     "SourceResult",
     "WildberriesAdapterV2",
     "YandexMarketAdapter",
+    "YandexWebDiscoveryAdapter",
 ]

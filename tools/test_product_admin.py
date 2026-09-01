@@ -57,7 +57,7 @@ class ProductAdminTests(unittest.TestCase):
         callbacks = [button.callback_data for row in kb_admin_request(1, "PAID").inline_keyboard for button in row]
         self.assertIn("markready_1", callbacks)
         self.assertNotIn("sendwithoutpay_1", callbacks)
-        self.assertIn("debugsearch_1", callbacks)
+        self.assertNotIn("debugsearch_1", callbacks)
         self.assertIs(SearchOrchestrationService.route(db.Request(id=99, user_id=1, product_name="автомобиль")), SearchMode.MANUAL)
         self.assertIs(SearchOrchestrationService.route(db.Request(id=100, user_id=1, product_name="ноутбук")), SearchMode.AUTO)
 

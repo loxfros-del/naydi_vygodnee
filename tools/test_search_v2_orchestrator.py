@@ -319,6 +319,7 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(first.raw_offers), 1)
         self.assertEqual(len(second.raw_offers), 1)
         self.assertEqual(second.source_results["source"].cache_info["hits"], 1)
+        self.assertTrue(second.attempts[0].cache_hit)
 
         other_model = replace(
             make_request(),

@@ -55,6 +55,23 @@ class StateMachineTests(unittest.TestCase):
         transition_request(request_id, "WAITING_PAYMENT")
         self.assertEqual(db.get_user_active_request(9).id, request_id)
 
+    def test_same_status_transition_is_idempotent(self):
+        request_id = db.create_request(user_id=10, product_name="Наушники")
+        transition_request(request_id, "SEARCHING", actor="test", reason="first")
+        before = db.get_request_transitions(request_id)
+
+        repeated = transition_request(
+            request_id,
+            "SEARCHING",
+            actor="test",
+            reason="retry",
+            extra_fields={"admin_note": "повторный запуск"},
+        )
+
+        self.assertEqual(repeated.status, "SEARCHING")
+        self.assertEqual(repeated.admin_note, "повторный запуск")
+        self.assertEqual(len(db.get_request_transitions(request_id)), len(before))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

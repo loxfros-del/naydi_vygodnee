@@ -11,7 +11,13 @@ if str(ROOT) not in sys.path:
 
 from app.db import Request
 from app.query_planner import plan_search_queries
-from app.request_parser import full_parse, parse_budget, parse_request_details
+from app.request_parser import (
+    build_request_search_query,
+    full_parse,
+    normalize_request_data,
+    parse_budget,
+    parse_request_details,
+)
 
 
 CASES = (
@@ -108,6 +114,22 @@ class RequestParserCases(unittest.TestCase):
         )
         combined = " | ".join(item.text.lower() for item in plan_search_queries(request))
         self.assertNotIn("xiaomi dreame roborock", combined)
+
+    def test_06_saved_headphone_category_stays_in_hyperx_query(self) -> None:
+        request = Request(
+            id=0,
+            user_id=0,
+            product="HyperX игровые",
+            product_name="HyperX игровые",
+            category="headphones",
+            budget="15000",
+            city="Москва",
+            original_query="HyperX игровые до 15000 Москва",
+        )
+        query = build_request_search_query(request).casefold()
+        self.assertIn("hyperx", query)
+        self.assertIn("наушник", query)
+        self.assertEqual(normalize_request_data(request)["brand"], "HyperX")
 
 
 if __name__ == "__main__":

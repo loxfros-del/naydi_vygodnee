@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import inspect
 import time
 from types import MappingProxyType
@@ -138,7 +138,15 @@ class SearchSourceOrchestrator:
                 )
                 cached = self.cache.get(key)
                 if cached is not None:
-                    query_results.append(cached)
+                    # ``SourceResult`` records cache metadata, but the public
+                    # quality metrics count hits from individual attempts.
+                    # Preserve every original attempt while marking it as a
+                    # cache-served one; this is observational only and must
+                    # never change offer contents or result status.
+                    query_results.append(replace(
+                        cached,
+                        attempts=tuple(replace(attempt, cache_hit=True) for attempt in cached.attempts),
+                    ))
                     continue
                 try:
                     result = await asyncio.wait_for(

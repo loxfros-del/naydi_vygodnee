@@ -18,6 +18,7 @@ from typing import Mapping
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WELCOME_IMAGE_PATH = Path("assets") / "welcome.png"
 PRICE_UNSET_LABEL = "Стоимость уточняется"
+PUBLIC_LAUNCH_IS_FREE = True
 
 
 class SearchMode(str, Enum):
@@ -59,6 +60,7 @@ QUICK_SELECTION = ServicePackage(
         "проверка основных рисков",
         "короткий итоговый отчёт",
     ),
+    price_rub=0,
 )
 
 DEEP_SELECTION = ServicePackage(
@@ -70,6 +72,7 @@ DEEP_SELECTION = ServicePackage(
         "проверка продавцов и рыночной цены",
         "подробные риски и ручная проверка",
     ),
+    price_rub=0,
 )
 
 LINK_COMPARISON = ServicePackage(
@@ -81,6 +84,7 @@ LINK_COMPARISON = ServicePackage(
         "сравнение цен и продавцов",
         "выбор наиболее удачного варианта",
     ),
+    price_rub=0,
 )
 
 SERVICE_PACKAGE_TEMPLATES: tuple[ServicePackage, ...] = (
@@ -192,7 +196,9 @@ class WelcomeImageSource:
 
 
 def _optional_price(value: object) -> int | None:
-    text = str(value or "").strip().replace(" ", "")
+    if value is None:
+        return None
+    text = str(value).strip().replace(" ", "")
     if not text:
         return None
     try:
@@ -208,20 +214,36 @@ def _env_bool(value: object, default: bool = True) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def is_free_search_mode(env: Mapping[str, object] | None = None) -> bool:
+    """Return whether the current public launch is free for every package.
+
+    The decision is intentionally code-owned while the search is being tested,
+    so existing environment values cannot accidentally show a paywall. A future
+    paid launch will change this one public-launch flag together with its tests.
+    """
+
+    del env
+    return PUBLIC_LAUNCH_IS_FREE
+
+
 def get_service_packages(env: Mapping[str, object] | None = None) -> tuple[ServicePackage, ...]:
     """Return all package definitions with optional environment overrides.
 
-    Accepted price variables are ``<CODE>_PRICE_RUB`` and the shorter
-    ``<CODE>_PRICE``. Availability uses ``<CODE>_ENABLED`` and defaults to true.
-    Missing or invalid prices stay unset; the UI must never invent a number.
+    The public launch is free by default, so every active package costs zero.
+    A future paid launch will turn off the public-launch flag; only then do
+    package price variables apply. Availability variables still default to true.
     """
 
     values = os.environ if env is None else env
+    free_mode = is_free_search_mode(values)
     packages: list[ServicePackage] = []
     for template in SERVICE_PACKAGE_TEMPLATES:
-        raw_price = values.get(f"{template.code}_PRICE_RUB")
-        if raw_price is None:
-            raw_price = values.get(f"{template.code}_PRICE")
+        if free_mode:
+            raw_price = 0
+        else:
+            raw_price = values.get(f"{template.code}_PRICE_RUB")
+            if raw_price is None:
+                raw_price = values.get(f"{template.code}_PRICE")
         packages.append(
             replace(
                 template,
@@ -368,6 +390,7 @@ def resolve_welcome_image(
 
 WELCOME_IMAGE_FILE_ID = os.getenv("WELCOME_IMAGE_FILE_ID", "").strip()
 WELCOME_IMAGE_PATH = os.getenv("WELCOME_IMAGE_PATH", "").strip()
+FREE_SEARCH_MODE = is_free_search_mode()
 SERVICE_PACKAGES = get_service_packages()
 
 
@@ -377,9 +400,11 @@ __all__ = [
     "CategoryConfig",
     "CategoryDecision",
     "DEFAULT_WELCOME_IMAGE_PATH",
+    "FREE_SEARCH_MODE",
     "DEEP_SELECTION",
     "LINK_COMPARISON",
     "PRICE_UNSET_LABEL",
+    "PUBLIC_LAUNCH_IS_FREE",
     "PROJECT_ROOT",
     "QUICK_SELECTION",
     "SERVICE_PACKAGES",
@@ -395,6 +420,7 @@ __all__ = [
     "get_service_package",
     "get_service_packages",
     "is_supported_auto_category",
+    "is_free_search_mode",
     "resolve_welcome_image",
     "resolve_welcome_image_path",
 ]

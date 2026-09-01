@@ -15,7 +15,15 @@ from app.db import Request, SearchResult
 from app.handlers.admin import _facts_detail_lines, _telegram_chunks, format_search_result_card
 from app.price_extractor import extract_price
 from app.product_quality import final_product_quality_level, has_model_mismatch
-from app.product_search import ProductCandidate, _apply_final_search_policy, _verification_rank
+from app.product_search import (
+    ProductCandidate,
+    _apply_final_search_policy,
+    _verification_rank,
+    classify_candidate,
+    extract_model_key,
+    is_wrong_product_type,
+)
+from app.sources.direct_retail_source import DNS_DIRECT_SOURCE, _is_direct_product_url
 from app.search_policy import (
     is_normal_candidate,
     normalize_for_admin_save,
@@ -180,10 +188,44 @@ class SearchInvariantTests(unittest.TestCase):
         wired.verify_status = "VERIFIED_GOOD"
         self.assertLess(_verification_rank(req, wireless), _verification_rank(req, wired))
 
+    def test_hyperx_headphone_search_rejects_keyboard_and_keeps_model(self) -> None:
+        req = Request(
+            id=0,
+            user_id=0,
+            product="HyperX игровые",
+            product_name="HyperX игровые",
+            category="headphones",
+            budget="15000",
+        )
+        keyboard = ProductCandidate(
+            title="Клавиатура HyperX Alloy Core RGB",
+            url="https://www.dns-shop.ru/product/keyboard/",
+        )
+        self.assertTrue(is_wrong_product_type(keyboard, req))
+        self.assertEqual(
+            extract_model_key("Беспроводные наушники HyperX Cloud III S WL черный 2025"),
+            "HyperX Cloud III S WL",
+        )
+
+    def test_dns_direct_product_url_is_accepted(self) -> None:
+        self.assertTrue(_is_direct_product_url(
+            "https://www.dns-shop.ru/product/abcdef/hyperx-cloud-iii/",
+            DNS_DIRECT_SOURCE,
+        ))
+
     def test_laptop_n95_is_not_good(self) -> None:
         candidate = ProductCandidate(title="LUNNEN N95 16GB SSD 512GB", url=PRODUCT_URL, price=40_000)
         level, _ = final_product_quality_level(candidate, is_laptop=True)
         self.assertEqual(level, "weak")
+
+    def test_gaming_laptop_requires_current_config(self) -> None:
+        req = request("игровой ноутбук", budget="85000", original_query="игровой ноутбук до 85к")
+        outdated = ProductCandidate(title="Игровой ноутбук i7-6700HQ GTX1060 32GB", url=PRODUCT_URL, price=52_000)
+        weak_ram = ProductCandidate(title="ASUS TUF Gaming A15 Ryzen 7 8845HS 8/512GB", url=PRODUCT_URL, price=77_000)
+        suitable = ProductCandidate(title="ASUS TUF Gaming A15 Ryzen 7 8845HS RTX 4060 16/512GB FA507", url=PRODUCT_URL, price=84_000)
+        self.assertEqual(classify_candidate(outdated, req)[0], "TRASH")
+        self.assertEqual(classify_candidate(weak_ram, req)[0], "WEAK")
+        self.assertNotEqual(classify_candidate(suitable, req)[0], "TRASH")
 
     def test_ps5_tv_without_4k_is_not_good(self) -> None:
         candidate = ProductCandidate(title="TCL 55 Full HD телевизор", url=PRODUCT_URL, price=30_000)

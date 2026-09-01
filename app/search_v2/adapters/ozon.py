@@ -8,7 +8,11 @@ class OzonAdapter(SiteExactSearchBridge):
     platform = "Ozon"
     domain = "ozon.ru/product"
     version = "legacy-exact-1"
-    capabilities = SourceCapabilities(kind="discovery", supports_city=False)
+    capabilities = SourceCapabilities(
+        kind="discovery",
+        supports_category_filter=True,
+        requires_page_verification=True,
+    )
 
     def __init__(self, search_callable=None) -> None:
         super().__init__(search_callable or generic_web_legacy_search)

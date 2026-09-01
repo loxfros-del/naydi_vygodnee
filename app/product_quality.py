@@ -25,7 +25,7 @@ OVER_BUDGET_RISK = "товар выше бюджета"
 WRONG_MODEL_RISK = "не та модель товара"
 
 KNOWN_GOOD_HEADPHONE_BRANDS = (
-    "sony", "jbl", "anker", "soundcore", "xiaomi", "qcy", "baseus",
+    "sony", "jbl", "hyperx", "anker", "soundcore", "xiaomi", "qcy", "baseus",
     "samsung", "huawei", "honor", "marshall", "sennheiser",
     "audio-technica", "audio technica", "edifier", "oneplus",
     "nothing", "realme",

@@ -125,8 +125,9 @@ def check_readiness(req: Request) -> ReadinessResult:
     elif percent >= 75:
         level = "yellow"
 
-    # Блокируем отправку, если ТОП-1 не проверен
-    can_send = top_verified and top_in_budget and percent >= 75
+    # Обязательный шлюз — один полностью проверенный ТОП-1 в бюджете. Остальные
+    # пункты показывают качество подборки, но не создают искусственный тупик.
+    can_send = top_verified and top_in_budget
 
     return ReadinessResult(percent=percent, items=items, level=level, can_send=can_send)
 

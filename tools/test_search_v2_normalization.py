@@ -14,7 +14,8 @@ from app.search_v2.models import (  # noqa: E402
     SearchRequestV2, SellerTrust,
 )
 from app.search_v2.normalization import (  # noqa: E402
-    extract_storage, normalize_offers, normalize_raw_offer,
+    extract_compact_memory_config, extract_storage, is_product_page_url, normalize_offers,
+    normalize_raw_offer,
 )
 
 
@@ -76,6 +77,145 @@ class SearchV2NormalizationTests(unittest.TestCase):
         offers = normalize_offers(raws, self.request)
         self.assertEqual(len(offers), 3)
         self.assertEqual([offer.price for offer in offers], [70_000, 70_001, 70_002])
+
+    def test_product_family_does_not_merge_different_skus(self) -> None:
+        request = SearchRequestV2(
+            category="coffee_machine",
+            canonical_model="Кофемашина DeLonghi Magnifica",
+            supported_category=True,
+        )
+        start = normalize_raw_offer(RawOffer(
+            source="yandex_market",
+            platform="Яндекс Маркет",
+            title="Автоматическая кофемашина DeLonghi Magnifica Start ECAM220.22.GB",
+            url="https://market.yandex.ru/product--magnifica-start/123456",
+            price=28_998,
+        ), request)
+        magnifica_s = normalize_raw_offer(RawOffer(
+            source="wildberries",
+            platform="Wildberries",
+            title="Кофемашина DeLonghi Magnifica S ECAM21.117.SB",
+            url="https://www.wildberries.ru/catalog/12345678/detail.aspx",
+            price=27_344,
+        ), request)
+
+        self.assertNotEqual(start.identity.canonical_model, request.canonical_model)
+        self.assertNotEqual(magnifica_s.identity.canonical_model, request.canonical_model)
+        self.assertNotEqual(start.identity.canonical_key, magnifica_s.identity.canonical_key)
+
+    def test_macbook_variants_match_generation_but_keep_configuration_separate(self) -> None:
+        broad_request = SearchRequestV2(
+            category="laptop",
+            brand="Apple",
+            canonical_model="Ноутбук MacBook M4",
+            model_modifiers=["Air"],
+            supported_category=True,
+        )
+        specific_request = SearchRequestV2(
+            category="laptop",
+            brand="Apple",
+            canonical_model="Ноутбук MacBook M4",
+            model_modifiers=["Air"],
+            required_specs={"ram_gb": 16, "storage_gb": 256},
+            supported_category=True,
+        )
+        compact_256 = RawOffer(
+            source="yandex_market",
+            platform="Яндекс Маркет",
+            title="Apple MacBook Air 13 M4 16/256GB",
+            url="https://market.yandex.ru/product--macbook-air-13/123456",
+            price=77_199,
+        )
+        compact_512 = RawOffer(
+            source="yandex_market",
+            platform="Яндекс Маркет",
+            title="Ноутбук Apple MacBook Air 15 M4 16/512GB",
+            url="https://market.yandex.ru/product--macbook-air-15/123457",
+            price=127_285,
+        )
+
+        alternative_256 = normalize_raw_offer(compact_256, broad_request)
+        alternative_512 = normalize_raw_offer(compact_512, broad_request)
+        exact_256 = normalize_raw_offer(compact_256, specific_request)
+        wrong_512 = normalize_raw_offer(compact_512, specific_request)
+
+        self.assertEqual(extract_compact_memory_config(compact_256.title), (16, 256))
+        self.assertEqual(extract_compact_memory_config("MacBook Air M4 16 ГБ / 512 ГБ SSD"), (16, 512))
+        self.assertEqual(alternative_256.exact_match, ExactMatchResult.COMPATIBLE_VARIANT)
+        self.assertEqual(alternative_512.exact_match, ExactMatchResult.COMPATIBLE_VARIANT)
+        self.assertNotEqual(alternative_256.identity.canonical_key, alternative_512.identity.canonical_key)
+        self.assertEqual(alternative_256.identity.storage, 256)
+        self.assertEqual(alternative_512.identity.storage, 512)
+        self.assertEqual(alternative_256.identity.diagonal, 13)
+        self.assertEqual(alternative_512.identity.diagonal, 15)
+        self.assertEqual(exact_256.exact_match, ExactMatchResult.EXACT)
+        self.assertEqual(wrong_512.exact_match, ExactMatchResult.REQUIRED_SPEC_MISMATCH)
+
+    def test_external_verification_never_turns_search_results_into_product_pages(self) -> None:
+        search = RawOffer(
+            source="yandex_web", platform="Яндекс Поиск", title="Apple iPhone 16 Pro 256 ГБ новый",
+            url="https://yandex.ru/search/?text=iphone+16+pro", price=75_399,
+            raw_metadata={"product_page_verified": True, "external_page_verified": True},
+        )
+        direct = RawOffer(
+            source="yandex_web", platform="Яндекс Поиск", title="Apple iPhone 16 Pro 256 ГБ новый",
+            url="https://store.example/p/iphone-16-pro", price=75_399,
+            raw_metadata={"product_page_verified": True, "external_page_verified": True},
+        )
+
+        rejected = normalize_raw_offer(search, self.request)
+        verified = normalize_raw_offer(direct, self.request)
+
+        self.assertTrue(rejected.raw_metadata["not_product_page"])
+        self.assertNotIn("not_product_page", verified.raw_metadata)
+
+    def test_wildberries_accepts_only_a_numeric_detail_product_route(self) -> None:
+        self.assertTrue(is_product_page_url("https://www.wildberries.ru/catalog/321732159/detail.aspx"))
+        self.assertTrue(is_product_page_url("https://www.wildberries.ru/catalog/321732159/detail.aspx?utm_source=nova"))
+        self.assertFalse(is_product_page_url("https://www.wildberries.ru/catalog/321732159"))
+        self.assertFalse(is_product_page_url("https://www.wildberries.ru/catalog/coffee-machines"))
+        self.assertFalse(is_product_page_url("https://www.wildberries.ru/catalog/321732159/detail.aspx?text=coffee"))
+
+    def test_named_generic_tech_model_matches_only_its_own_code(self) -> None:
+        request = SearchRequestV2(
+            category="generic_tech", brand="Canon", canonical_model="Canon EOS R50",
+            supported_category=True, hard_tokens=["Canon", "Canon EOS R50"],
+        )
+        same = normalize_raw_offer(RawOffer(
+            source="retail", platform="Retail", title="Фотоаппарат Canon EOS R50",
+            url="https://shop.example/canon-eos-r50", price=60_000,
+        ), request)
+        other = normalize_raw_offer(RawOffer(
+            source="retail", platform="Retail", title="Фотоаппарат Canon EOS R10",
+            url="https://shop.example/canon-eos-r10", price=55_000,
+        ), request)
+        self.assertEqual(same.exact_match, ExactMatchResult.EXACT)
+        self.assertEqual(other.exact_match, ExactMatchResult.MODEL_MISMATCH)
+
+    def test_mini_led_is_not_a_conflicting_model_modifier(self) -> None:
+        request = SearchRequestV2(
+            category="monitor",
+            brand="Xiaomi",
+            canonical_model="G 27i",
+            model_modifiers=["Pro"],
+            required_specs={"diagonal": 27, "resolution": "QHD", "refresh_rate": 180},
+            condition=ProductCondition.NEW,
+            supported_category=True,
+        )
+        candidate = normalize_raw_offer(RawOffer(
+            source="dns",
+            platform="DNS",
+            title="Xiaomi Mini LED Gaming Monitor G Pro 27i 27 дюймов QHD 180 Гц новый",
+            url="https://www.dns-shop.ru/product/123456/",
+            price=48_990,
+            condition=ProductCondition.NEW,
+            availability_text="в наличии",
+            raw_metadata={"structured_facts": request.required_specs},
+        ), request)
+
+        self.assertNotIn("mini", candidate.identity.modifiers)
+        self.assertIn("pro", candidate.identity.modifiers)
+        self.assertEqual(candidate.exact_match, ExactMatchResult.EXACT)
 
 
 if __name__ == "__main__":

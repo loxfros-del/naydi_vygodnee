@@ -123,7 +123,7 @@ from app.search_evidence import assess_product_card, assess_source_trust
 from app.ranking import rank_candidate
 from app.candidate_dedupe import canonical_identity, dedupe_candidates, diversify_top_sources
 from app.price_extractor import extract_price, extract_price_evidence
-from app.request_parser import build_request_search_query, normalize_request_data
+from app.request_parser import build_request_search_identity, build_request_search_query, normalize_request_data
 from app.search_links import build_search_query, generate_search_links
 from app.sources.direct_retail_source import (
     CITILINK_DIRECT_SOURCE,
@@ -151,6 +151,7 @@ from app.market_analysis import (
 from app.verification_state import normalize_verification_facts
 from app.sources.searchapi_source import SEARCHAPI_SOURCE, debug_searchapi_google_shopping
 from app.sources.serpapi_source import SERPAPI_SOURCE, debug_serpapi_google_shopping
+from app.sources.yandex_search_source import YANDEX_SEARCH_SOURCE, debug_yandex_search
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +343,7 @@ SOURCE_PRIORITY = {source.source: source.priority for source in SEARCH_SOURCES}
 TRUSTED_PRODUCT_SOURCES = {source.source for source in SEARCH_SOURCES}
 SOURCE_TYPE_BY_SOURCE[SEARCHAPI_SOURCE] = "shopping_api"
 SOURCE_TYPE_BY_SOURCE[SERPAPI_SOURCE] = "shopping_api"
+SOURCE_TYPE_BY_SOURCE[YANDEX_SEARCH_SOURCE] = "web_search_api"
 DIRECT_RETAIL_SOURCES = {
     CITILINK_DIRECT_SOURCE,
     DNS_DIRECT_SOURCE,
@@ -580,6 +582,35 @@ def extract_model_key(title: str) -> str:
         "75 (190.5 см) Телевизор TCL 75P7K" → "TCL 75P7K 4K"
     """
     text = title.lower().strip()
+
+    # Headset names are mostly word families (Cloud III S), not TV-like model
+    # codes. Preserve that family so compare-search can actually look for the
+    # same HyperX model on independent stores.
+    headphone_brands = (
+        "hyperx", "sony", "jbl", "sennheiser", "soundcore", "anker",
+        "marshall", "edifier", "qcy", "baseus",
+    )
+    headphone_markers = ("наушник", "гарнитур", "headphone", "headset", "earbud")
+    if any(marker in text for marker in headphone_markers):
+        for brand in headphone_brands:
+            brand_pos = text.find(brand)
+            if brand_pos < 0:
+                continue
+            original_tail = title[brand_pos:]
+            tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9-]+", original_tail)
+            stop_words = {
+                "черный", "чёрный", "белый", "красный", "синий", "цвет",
+                "проводные", "беспроводные", "wireless", "наушники", "гарнитура",
+            }
+            chosen: list[str] = []
+            for token in tokens:
+                if token.casefold() in stop_words or re.fullmatch(r"20\d{2}", token):
+                    break
+                chosen.append(token)
+                if len(chosen) >= 6:
+                    break
+            if len(chosen) >= 2:
+                return " ".join(chosen)
     parts: list[str] = []
 
     # Бренд
@@ -692,7 +723,7 @@ def _is_direct_product_url(source: str, url: str) -> bool:
     if any(key in query for key in ("q=", "text=", "search=", "query=")):
         return False
     source = source or _source_from_url(url)
-    if source in {SEARCHAPI_SOURCE, SERPAPI_SOURCE}:
+    if source in {SEARCHAPI_SOURCE, SERPAPI_SOURCE, YANDEX_SEARCH_SOURCE}:
         source = _source_from_url(url)
     if source == "wildberries":
         return "wildberries.ru" in domain and "/catalog/" in path and "/detail" in path
@@ -712,6 +743,8 @@ def _is_direct_product_url(source: str, url: str) -> bool:
         return "megamarket.ru" in domain and ("/catalog/details/" in path or "/product/" in path)
     if source == CITILINK_DIRECT_SOURCE:
         return "citilink.ru" in domain and "/product/" in path
+    if source == DNS_DIRECT_SOURCE:
+        return "dns-shop.ru" in domain and "/product/" in path
     if source == MVIDEO_DIRECT_SOURCE:
         return "mvideo.ru" in domain and ("/products/" in path or "/product/" in path)
     if source == YANDEX_MARKET_DIRECT_SOURCE:
@@ -810,13 +843,65 @@ def _is_laptop_request(req: Request) -> bool:
     return any(word in _request_product(req).lower() for word in ("ноутбук", "laptop"))
 
 
+def _is_gaming_laptop_request(req: Request) -> bool:
+    text = " ".join(str(getattr(req, name, "") or "") for name in ("product", "product_name", "use_case", "original_query", "criteria"))
+    return _is_laptop_request(req) and re.search(r"\b(?:игров\w*|gaming|game)\b", text, re.I) is not None
+
+
+def _has_entry_level_laptop_cpu(candidate: ProductCandidate) -> bool:
+    text = _candidate_text(candidate.title, candidate.snippet, candidate.url)
+    return re.search(r"\b(?:n4000|n4020|n4500|n5000|n5030|n5095|n95|n100|n150|celeron|pentium silver)\b", text, re.I) is not None
+
+
+def _has_obsolete_gaming_laptop_cpu(candidate: ProductCandidate) -> bool:
+    """Отсекает старые процессоры, которые не подходят для покупки игрового ноутбука сейчас."""
+    text = _candidate_text(candidate.title, candidate.snippet, candidate.url)
+    return re.search(
+        r"\b(?:ryzen\s*[3579]\s*3\d{3}[a-z]*|i[3579]-[4567]\d{3}[a-z]*|i[3579]\s+[4567]th\s+gen)\b",
+        text,
+        re.I,
+    ) is not None
+
+
+def _has_gaming_gpu_or_model(candidate: ProductCandidate) -> bool:
+    """Нужна дискретная игровая графика либо проверяемая игровая линейка."""
+    text = _candidate_text(candidate.title, candidate.snippet, candidate.url)
+    gaming_model = (
+        "tuf gaming", "rog ", "legion", "nitro", "loq", "katana", "cyborg",
+        "victus", "omen", "pulse", "raider", "aorus",
+    )
+    dedicated_gpu = re.search(
+        r"\b(?:rtx\s*(?:20|30|40|50)\d{2}|geforce\s+rtx|radeon\s+rx\s*(?:6|7)\d{3}[a-zm]*)\b",
+        text,
+        re.I,
+    )
+    return bool(dedicated_gpu) or any(marker in text for marker in gaming_model)
+
+
+def _has_less_than_16gb_ram(candidate: ProductCandidate) -> bool:
+    text = _candidate_text(candidate.title, candidate.snippet, candidate.url)
+    return re.search(r"\b8\s*(?:гб|gb)\s*(?:ram|оператив|ddr)|\b8\s*/\s*(?:256|512|1024)(?:\s*(?:гб|gb))?", text, re.I) is not None
+
+
 def _is_chair_request(req: Request) -> bool:
     product = _request_product(req).lower()
     return "кресл" in product or "стул" in product or "chair" in product
 
 
 def is_wrong_product_type(candidate: ProductCandidate, request: Request) -> bool:
-    """Исключает аксессуары и консоли для заявки на телевизор."""
+    """Исключает явный другой тип товара до проверки и ранжирования."""
+    category = str(normalize_request_data(request).get("category") or "unknown")
+    if category == "headphones":
+        title = candidate.title.casefold().replace("ё", "е")
+        headphone_markers = ("наушник", "гарнитур", "headphone", "headset", "earbud")
+        if any(marker in title for marker in headphone_markers):
+            return False
+        wrong_headphone_products = (
+            "клавиатур", "keyboard", "комплект клавиш", "keycap",
+            "игровая мыш", "computer mouse", "mouse pad", "коврик для мыш",
+        )
+        if any(marker in title for marker in wrong_headphone_products):
+            return True
     if not _is_tv_request(request):
         return False
     text = _candidate_text(candidate.title, candidate.snippet, candidate.url)
@@ -838,6 +923,38 @@ def is_wrong_product_type(candidate: ProductCandidate, request: Request) -> bool
     return (not has_tv) or (wrong_marker_found and not (has_tv and "приставк" not in text_without_allowed_context and all(
         marker not in text_without_allowed_context for marker in WRONG_TV_PRODUCT_MARKERS if marker != "приставка"
     )))
+
+
+_ACCESSORY_MARKERS = (
+    "аксессуар", "аналоги для", "чехол", "бампер", "защитное стекло", "гидрогелевая пленка",
+    "плёнка", "пленка", "зарядное устройство", "кабель", "держатель", "кронштейн",
+)
+
+
+def _required_storage_gb(request: Request) -> int | None:
+    value = normalize_request_data(request).get("storage_gb")
+    try:
+        return int(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_wrong_storage(candidate: ProductCandidate, request: Request) -> bool:
+    required = _required_storage_gb(request)
+    if not required:
+        return False
+    text = _candidate_text(candidate.title, candidate.snippet, candidate.url)
+    values = {
+        int(value)
+        for value in re.findall(r"(?<!\d)(64|128|256|512|1024)\s*(?:гб|gb)\b|/(64|128|256|512|1024)\b", text)
+        for value in value if value
+    }
+    return bool(values) and required not in values
+
+
+def _is_accessory(candidate: ProductCandidate) -> bool:
+    text = _candidate_text(candidate.title, candidate.snippet, candidate.url)
+    return any(marker in text for marker in _ACCESSORY_MARKERS)
 
 
 def _has_concrete_model(candidate: ProductCandidate) -> bool:
@@ -896,6 +1013,17 @@ def classify_candidate(candidate: ProductCandidate, request: Request) -> tuple[s
         return QUALITY_TRASH, ["обзор/подборка", "классификация: TRASH — обзор или отзывы"]
     if _is_foreign_vendor_site(candidate.url):
         return QUALITY_TRASH, ["сайт производителя, не точка покупки", "классификация: TRASH — не точка покупки"]
+    if _is_accessory(candidate):
+        return QUALITY_TRASH, ["аксессуар/аналог вместо товара", "классификация: TRASH — не товар"]
+    if _has_wrong_storage(candidate, request):
+        required = _required_storage_gb(request)
+        return QUALITY_TRASH, [f"другая память, нужна {required} ГБ", "классификация: TRASH — не та версия"]
+    if _is_gaming_laptop_request(request) and _has_entry_level_laptop_cpu(candidate):
+        return QUALITY_TRASH, ["слабый CPU для игрового ноутбука", "классификация: TRASH — не игровая конфигурация"]
+    if _is_gaming_laptop_request(request) and _has_obsolete_gaming_laptop_cpu(candidate):
+        return QUALITY_TRASH, ["устаревший CPU для игрового ноутбука", "классификация: TRASH — устаревшая конфигурация"]
+    if _is_gaming_laptop_request(request) and not _has_gaming_gpu_or_model(candidate):
+        return QUALITY_TRASH, ["нет признаков игровой видеокарты", "классификация: TRASH — не игровая конфигурация"]
 
     unavailable_markers = [
         ("нет в наличии", "нет в наличии"),
@@ -915,6 +1043,11 @@ def classify_candidate(candidate: ProductCandidate, request: Request) -> tuple[s
         if over_budget_pct > 0.15:
             return QUALITY_TRASH, [f"выше бюджета ({candidate.price} > {budget})", "классификация: TRASH — сильно выше бюджета"]
         return QUALITY_WEAK, [f"выше бюджета ({candidate.price} > {budget})", "классификация: WEAK — выше бюджета"]
+
+    # 8 ГБ RAM — не идеал для игр, но это реальный игровой ноутбук, который
+    # можно расширить. Оставляем его в резерве, не делая «лучшим» вариантом.
+    if _is_gaming_laptop_request(request) and _has_less_than_16gb_ram(candidate):
+        return QUALITY_WEAK, ["8 ГБ RAM — потребуется расширение", "классификация: WEAK — нужна модернизация памяти"]
 
     direct_product = _is_direct_product_url(candidate.source, candidate.url)
     has_model = _has_concrete_model(candidate)
@@ -1749,6 +1882,53 @@ def _collect_from_serpapi(
     ))
 
 
+def _collect_from_yandex_search(
+    req: Request,
+    query: str,
+    collection: SearchCollection,
+    seen_urls: set[str],
+) -> None:
+    try:
+        debug = debug_yandex_search(query, parsed=_request_as_searchapi_parsed(req))
+    except Exception as exc:
+        logger.debug("Автопоиск: %s не выполнил %r: %s", YANDEX_SEARCH_SOURCE, query, exc)
+        collection.attempts.append(SearchAttemptData(YANDEX_SEARCH_SOURCE, query, "ERROR", error_text=str(exc)))
+        return
+
+    rows = list(debug.get("candidates") or [])
+    status = str(debug.get("status") or "error")
+    if status not in {"ok", "empty"}:
+        collection.attempts.append(SearchAttemptData(
+            YANDEX_SEARCH_SOURCE, query, status.upper(), 0, 0,
+            str(debug.get("error") or debug.get("error_class") or ""),
+        ))
+        return
+
+    existing_keys = _existing_searchapi_dedupe_keys(collection)
+    kept = duplicates = 0
+    for row in rows:
+        candidate = _candidate_from_row(row, req, YANDEX_SEARCH_SOURCE)
+        if not candidate:
+            continue
+        normalized_url = _normalise_url(candidate.url)
+        dedupe_keys = _searchapi_dedupe_keys(candidate)
+        if normalized_url in seen_urls or existing_keys.intersection(dedupe_keys):
+            duplicates += 1
+            continue
+        if normalized_url:
+            seen_urls.add(normalized_url)
+        existing_keys.update(dedupe_keys)
+        collection.raw_candidates.append(candidate)
+        _bump_quality_stats(collection, candidate)
+        if candidate.quality != QUALITY_TRASH:
+            collection.candidates.append(candidate)
+            kept += 1
+    collection.attempts.append(SearchAttemptData(
+        YANDEX_SEARCH_SOURCE, query, "OK" if rows else "EMPTY", len(rows), kept,
+        f"duplicates={duplicates}",
+    ))
+
+
 def _collect_from_direct_retail(
     req: Request,
     query: str,
@@ -1908,13 +2088,13 @@ def _dedupe_verified_candidates(req: Request, candidates: list[ProductCandidate]
     diversified = diversify_top_sources(
         result,
         tier=lambda item: status_tier.get(_verified_status(item), 9),
-        limit=3,
+        limit=8,
     )
     quota_selected = select_with_source_quotas(
         diversified,
         source_getter=lambda item: item.source,
         identity_getter=lambda item: _normalise_url(item.url) or f"{item.source}:{item.product_id}:{item.title}",
-        quota=CandidatePoolQuota(total_limit=10, discovery_reserved=1, reliable_reserved=1, per_source_limit=3),
+        quota=CandidatePoolQuota(total_limit=12, discovery_reserved=2, reliable_reserved=2, per_source_limit=4),
     )
     selected_objects = {id(item) for item in quota_selected}
     return [item for item in diversified if id(item) in selected_objects]
@@ -2445,6 +2625,23 @@ def collect_product_candidates(
             lambda local, local_seen: _collect_from_serpapi(req, serpapi_query, local, local_seen),
         )
 
+    if settings.YANDEX_SEARCH_API_ENABLED:
+        # API ищет только модель и обязательную память: бюджет/город нужны
+        # для отбора, но ухудшают поисковую выдачу и расходуют платные запросы.
+        details = normalize_request_data(req)
+        yandex_query = build_request_search_identity(req)
+        # Не теряем важный сценарий запроса: «игровой ноутбук» и обычный
+        # ноутбук — разные товары, а бюджет и город в поисковую фразу не нужны.
+        if _is_gaming_laptop_request(req) and "игров" not in yandex_query.casefold():
+            yandex_query = f"игровой {yandex_query}"
+        storage = details.get("storage_gb")
+        if storage and not re.search(rf"(?<!\d){re.escape(str(storage))}\s*(?:гб|gb)\b", yandex_query, re.I):
+            yandex_query = f"{yandex_query} {storage}GB"
+        add_source_job(
+            YANDEX_SEARCH_SOURCE, yandex_query,
+            lambda local, local_seen: _collect_from_yandex_search(req, yandex_query, local, local_seen),
+        )
+
     def source_job_order(job: tuple[str, str, Callable]) -> int:
         source = job[0]
         group = source_group(source)
@@ -2655,6 +2852,13 @@ def _apply_universal_final_quality_gate(req: Request, verified_items: list[objec
     _apply_final_search_policy(req, verified_items)
 
 
+def _stored_candidate_identity(item: object) -> tuple[str, str]:
+    """Стабильный ключ для защиты от повторов при повторном автопоиске."""
+    source = re.sub(r"\s+", " ", str(getattr(item, "source", "") or "").casefold()).strip()
+    title = re.sub(r"[^\wа-яё]+", " ", str(getattr(item, "title", "") or "").casefold())
+    return source, re.sub(r"\s+", " ", title).strip()
+
+
 def run_product_search(req: Request, max_results: int = 15) -> dict:
     """Собирает и сохраняет кандидатов и диагностику в SQLite."""
     collection = collect_product_candidates(req, max_results=max_results)
@@ -2662,10 +2866,13 @@ def run_product_search(req: Request, max_results: int = 15) -> dict:
     if collection.manual_links:
         replace_manual_search_links(req.id, collection.manual_links)
 
-    existing_urls = {_normalise_url(row.url) for row in get_search_results(req.id)}
+    existing_rows = get_search_results(req.id)
+    existing_urls = {_normalise_url(row.url) for row in existing_rows}
+    existing_identities = {_stored_candidate_identity(row) for row in existing_rows}
     added = 0
     for candidate in collection.candidates:
-        if _normalise_url(candidate.url) in existing_urls:
+        identity = _stored_candidate_identity(candidate)
+        if _normalise_url(candidate.url) in existing_urls or identity in existing_identities:
             continue
         create_search_result(
             request_id=req.id,
@@ -2681,11 +2888,19 @@ def run_product_search(req: Request, max_results: int = 15) -> dict:
             facts_json=getattr(candidate, "facts_json", "") or json.dumps(getattr(candidate, "product_facts", {}) or {}, ensure_ascii=False),
         )
         existing_urls.add(_normalise_url(candidate.url))
+        existing_identities.add(identity)
         if candidate.status != "REJECTED_AUTO":
             added += 1
 
     # Compare search: ищем ту же модель дешевле на других площадках
-    normal_candidates = [c for c in collection.candidates if _verified_status(c) in {VERIFIED_GOOD, VERIFIED_OK}]
+    # A store may block page verification while still exposing an exact model
+    # URL (DNS is a common example). That candidate is not client-safe, but its
+    # model key is useful for discovering independently verifiable cheaper
+    # offers. Every discovered comparison still passes the strict verifier.
+    normal_candidates = [
+        c for c in collection.candidates
+        if c.status != "REJECTED_AUTO" and c.title and _is_direct_product_url(c.source, c.url)
+    ]
     comparison_candidates: list[ProductCandidate] = []
     compared_groups: set[str] = set()
     for candidate in normal_candidates:

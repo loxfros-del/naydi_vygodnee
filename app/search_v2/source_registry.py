@@ -14,6 +14,7 @@ from .adapters import (
     SourceAdapter,
     WildberriesAdapterV2,
     YandexMarketAdapter,
+    YandexWebDiscoveryAdapter,
 )
 
 
@@ -40,6 +41,8 @@ SOURCE_ALIASES = {
     "generic": "generic_exact",
     "generic_search": "generic_exact",
     "generic_web": "generic_exact",
+    "yandex_web": "yandex_web",
+    "yandex_search": "yandex_web",
 }
 
 
@@ -96,6 +99,7 @@ def build_default_registry(*, include_optional: bool = True) -> SourceRegistry:
         OzonAdapter(),
         AvitoAdapter(),
         DnsAdapter(),
+        YandexWebDiscoveryAdapter(),
         GenericExactSearchAdapter(),
     ]
     if include_optional:

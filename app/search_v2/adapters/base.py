@@ -31,12 +31,23 @@ LegacySearch = Callable[[str, SearchRequestV2, "SourceContext"], Any]
 
 @dataclass(frozen=True)
 class SourceCapabilities:
-    """Facts about transport only; never a quality/trust verdict."""
+    """Transport facts used for honest planning and rollout decisions.
+
+    A ``supports_*`` flag means the source really applies that value, not
+    merely that the value exists on the request. ``returns_*`` describes the
+    raw response before any external product-page verification.
+    """
 
     kind: str = "discovery"
     structured_endpoint: bool = False
     supports_city: bool = False
     supports_condition: bool = False
+    supports_sku_filter: bool = False
+    supports_price_filter: bool = False
+    supports_category_filter: bool = False
+    returns_price: bool = False
+    returns_availability: bool = False
+    requires_page_verification: bool = False
     optional: bool = False
 
 

@@ -15,12 +15,23 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("BOT_TOKEN", "test:token")
 os.environ.setdefault("ADMIN_IDS", "1")
 
-from app.search_v2.feature_flags import SearchEngineMode, get_search_engine_mode
+from app.search_v2.feature_flags import (
+    SearchEngineMode,
+    get_search_engine_mode,
+    get_v2_rollout_percent,
+    resolve_search_engine_mode,
+    rollout_bucket,
+)
 from app.search_v2.models import (
     ExactMatchResult, Offer, Recommendation, RecommendationRole, SearchResultStatus,
     SearchResultV2, VerificationState,
 )
-from app.search_v2.shadow_compare import build_shadow_comparison, format_shadow_comparison
+from app.search_v2.shadow_compare import (
+    aggregate_shadow_comparisons,
+    build_shadow_comparison,
+    format_shadow_comparison,
+)
+from app.search_v2.pilot_sample import REQUIRED_CATEGORIES
 from app.search_v2.snapshot_store import SNAPSHOT_VERSION, SearchV2SnapshotStore
 from app.search_cache import SearchCache
 from app.services.search_engine_bridge import SearchEngineBridge, persist_v2_result
@@ -56,8 +67,24 @@ class FeatureFlagTests(unittest.TestCase):
 
     def test_modes_are_case_and_whitespace_tolerant(self) -> None:
         self.assertEqual(get_search_engine_mode(" Shadow "), SearchEngineMode.SHADOW)
+        self.assertEqual(get_search_engine_mode("CANARY"), SearchEngineMode.CANARY)
         self.assertEqual(get_search_engine_mode("V2"), SearchEngineMode.V2)
         self.assertEqual(get_search_engine_mode("legacy"), SearchEngineMode.LEGACY)
+
+    def test_canary_is_bounded_stable_and_never_uses_request_text(self) -> None:
+        self.assertEqual(get_v2_rollout_percent("-1"), 0)
+        self.assertEqual(get_v2_rollout_percent("101"), 100)
+        self.assertEqual(get_v2_rollout_percent("bad"), 0)
+        self.assertEqual(rollout_bucket(42), rollout_bucket("42"))
+        self.assertIsNone(rollout_bucket(0))
+        self.assertEqual(
+            resolve_search_engine_mode("canary", request_id=42, rollout_percent=0),
+            SearchEngineMode.LEGACY,
+        )
+        self.assertEqual(
+            resolve_search_engine_mode("canary", request_id=42, rollout_percent=100),
+            SearchEngineMode.V2,
+        )
 
     def test_telegram_admin_uses_only_the_bridge_boundary(self) -> None:
         handler = (ROOT / "app" / "handlers" / "admin.py").read_text(encoding="utf-8")
@@ -123,6 +150,38 @@ class ShadowComparisonTests(unittest.TestCase):
         self.assertIn("V2 exact: 1", text)
         self.assertIn("ozon: SUCCESS", text)
         self.assertLess(len(text), 1000)
+
+    def test_rollout_aggregate_is_strict_and_contains_no_request_data(self) -> None:
+        snapshots = []
+        for request_id in range(30):
+            snapshot = build_shadow_comparison(
+                request_id=request_id + 1,
+                legacy_result={"success": True},
+                legacy_candidates=self.legacy,
+                v2_result=self.v2,
+            )
+            snapshot["v2"].update({"top1_exact": True, "top1_verified": True})
+            snapshot["v2"]["category"] = REQUIRED_CATEGORIES[request_id // 5]
+            snapshots.append(snapshot)
+
+        report = aggregate_shadow_comparisons(snapshots)
+
+        self.assertTrue(report["rollout_ready"])
+        self.assertEqual(report["cases"], 30)
+        self.assertEqual(report["rejected_wrong_product_count"], 30)
+        self.assertEqual(report["unsafe_candidate_count"], 0)
+        self.assertTrue(report["category_quotas_met"])
+        self.assertTrue(all(value == 5 for value in report["category_counts"].values()))
+        self.assertNotIn("request_id", report)
+        self.assertNotIn("title", json.dumps(report))
+
+        snapshots[0]["v2"]["unsafe_candidate_count"] = 1
+        self.assertFalse(aggregate_shadow_comparisons(snapshots)["rollout_ready"])
+
+        snapshots[0]["v2"]["unsafe_candidate_count"] = 0
+        snapshots[0]["v2"]["category"] = "smartphone"
+        snapshots[5]["v2"]["category"] = "smartphone"
+        self.assertFalse(aggregate_shadow_comparisons(snapshots)["rollout_ready"])
 
 
 class FakeV2Service:
@@ -217,6 +276,25 @@ class SearchEngineBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(execution.used_legacy_fallback)
         self.assertEqual(execution.client_result["found"], 1)
         self.assertIn("Search V2", execution.client_result["message"])
+
+    async def test_canary_zero_uses_legacy_and_full_rollout_uses_v2(self) -> None:
+        service = FakeV2Service(SearchResultV2(status=SearchResultStatus.SUCCESS))
+        bridge = SearchEngineBridge(
+            legacy_search=lambda _request: {"success": True, "message": "legacy"},
+            v2_service=service,
+            v2_writer=lambda *_args: None,
+            candidate_loader=lambda _request_id: [],
+            snapshot_store=self.store,
+        )
+        with patch.dict(os.environ, {"SEARCH_ENGINE_V2_ROLLOUT_PERCENT": "0"}):
+            legacy = await bridge.execute(self.request, mode="canary")
+        self.assertEqual(legacy.mode, SearchEngineMode.LEGACY)
+        self.assertEqual(service.calls, 0)
+
+        with patch.dict(os.environ, {"SEARCH_ENGINE_V2_ROLLOUT_PERCENT": "100"}):
+            v2 = await bridge.execute(self.request, mode="canary")
+        self.assertEqual(v2.mode, SearchEngineMode.V2)
+        self.assertEqual(service.calls, 1)
 
     async def test_v2_system_error_falls_back_to_legacy(self) -> None:
         for status in (SearchResultStatus.ERROR, SearchResultStatus.TIMEOUT):

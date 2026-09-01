@@ -65,6 +65,17 @@ class RequestWizardTests(unittest.TestCase):
         self.assertEqual(parse_budget("45к"), 45000)
         self.assertIsNone(parse_budget("сто рублей"))
 
+    def test_optional_question_can_be_skipped(self):
+        wizard = RequestWizard()
+        self.assertTrue(wizard.answer("smartphones"))
+        self.assertTrue(wizard.answer("Samsung S24"))
+        self.assertTrue(wizard.answer("80к"))
+        self.assertTrue(wizard.answer("Москва"))
+        self.assertTrue(wizard.answer("new"))
+        self.assertEqual(wizard.current_question.key, "phone_memory")
+        self.assertTrue(wizard.answer("не важно"))
+        self.assertEqual(wizard.answers["phone_memory"], "")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,7 +1,8 @@
 """Deterministic ranking after exact match, grouping, market and risks."""
 from __future__ import annotations
 
-from typing import Iterable
+import re
+from typing import Any, Iterable
 
 from .models import (
     AvailabilityStatus,
@@ -14,6 +15,59 @@ from .models import (
     SellerTrust,
 )
 from .risk_engine import risk_penalty
+
+
+_TOKEN_RE = re.compile(r"[0-9a-zа-я]+", re.IGNORECASE)
+
+
+def _tokens(value: Any) -> set[str]:
+    return set(_TOKEN_RE.findall(str(value or "").replace("ё", "е").casefold()))
+
+
+def _numbers(value: Any) -> set[float]:
+    return {float(item.replace(",", ".")) for item in re.findall(r"\d+(?:[.,]\d+)?", str(value or ""))}
+
+
+def _matches_optional(required: Any, candidate: Any) -> bool:
+    """Return true only for an explicit, compatible optional fact.
+
+    Optional facts rank already correct products; absence never penalizes a
+    listing and fuzzy prose never becomes a bonus.
+    """
+    if candidate in (None, "", [], {}):
+        return False
+    if isinstance(required, bool):
+        return required is candidate
+    required_numbers = _numbers(required)
+    candidate_numbers = _numbers(candidate)
+    if required_numbers and candidate_numbers:
+        return required_numbers.issubset(candidate_numbers)
+    wanted = _tokens(required)
+    actual = _tokens(candidate)
+    return bool(wanted and wanted.issubset(actual))
+
+
+def _optional_bonus(offer: Offer, request: SearchRequestV2 | None) -> float:
+    if request is None or not request.optional_specs:
+        return 0.0
+    identity = offer.identity
+    facts = dict(offer.facts or {})
+    configuration = dict(identity.key_configuration or {}) if identity else {}
+    bonus = 0.0
+    for key, required in request.optional_specs.items():
+        candidate = configuration.get(key, facts.get(key))
+        if _matches_optional(required, candidate):
+            bonus += 2.0
+    # User's stated priority can tune a correct result, never bypass its
+    # exact-match or safety requirements.
+    if request.priority == "price" and offer.price:
+        bonus += 1.0
+    elif request.priority in {"reliability", "reliable"} and (
+        offer.platform_trust is PlatformTrust.HIGH_RETAIL
+        or offer.seller.trust is SellerTrust.HIGH
+    ):
+        bonus += 1.0
+    return min(8.0, bonus)
 
 
 def is_rankable(offer: Offer) -> bool:
@@ -59,6 +113,10 @@ def score_offer(offer: Offer, market_stats: MarketStats | None = None, request: 
         score += 2.0
     if request and request.budget and offer.price and offer.price > request.budget:
         score -= min(20.0, (offer.price - request.budget) / request.budget * 40.0)
+    # Keep a little headroom: an explicit optional match may distinguish two
+    # otherwise equally safe offers.  The public score remains bounded.
+    score = min(96.0, score)
+    score += _optional_bonus(offer, request)
     score -= risk_penalty(offer)
     return round(max(0.0, min(100.0, score)), 3)
 
