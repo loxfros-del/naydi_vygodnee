@@ -1,107 +1,96 @@
-# Найди выгоднее — Telegram-бот
+# Naydi Vygodnee — Telegram Product Search Assistant
 
-Сервис поиска выгодных товаров. Пользователь описывает товар текстом, бот уточняет детали, создаёт заявку. Админ берёт заявку в работу, добавляет варианты, отправляет предпросмотр и полный отчёт после оплаты.
+A Telegram bot that turns a free-form shopping request into a structured product-search workflow.
 
-## Стек
+The bot collects requirements, searches multiple sources, ranks candidate products, tracks verification status, lets an admin review results, and generates a final report only from verified data.
+
+## Why this project exists
+
+Shopping search often produces dozens of links with stale prices, weak relevance, or unverified information. This project focuses on a more controlled workflow:
+
+`request → clarification → search → ranking → verification → preview → final report`
+
+Instead of treating every search result as truth, the system keeps explicit verification states and blocks the final report when critical information is not confirmed.
+
+## Tech stack
 
 - Python 3.11+
 - aiogram 3
 - SQLite
+- Pydantic
 - python-dotenv
-- pydantic
+- GitHub Actions
 
-## Структура
+## Architecture
 
-```
-main.py                  # Точка входа
+```text
+main.py                  application entry point
 app/
-  config.py              # Настройки из .env
-  db.py                  # SQLite: модель заявки, CRUD
-  states.py              # FSM-состояния
-  keyboards.py           # Клавиатуры
-  search_links.py        # Генерация поисковых ссылок
-  request_parser.py      # Чистый разбор текста заявки
-  product_search.py      # Multi-source автопоиск и ранжирование кандидатов
-  report_builder.py      # Предпросмотр и полный отчёт
+  config.py              environment configuration
+  db.py                  SQLite models and CRUD
+  states.py              FSM states
+  keyboards.py           Telegram UI
+  request_parser.py      request parsing
+  search_links.py        fallback search links
+  product_search.py      multi-source search and ranking
+  report_builder.py      preview and final report generation
   handlers/
-    user.py              # Обработчики пользователя
-    admin.py             # Обработчики админа
+    user.py              user flow
+    admin.py             admin workflow
 ```
 
-## Статусы заявки
+## Core workflow
 
-`NEW` → `SEARCHING` → `PREVIEW_SENT` → `PAID` → `REPORT_SENT` → `CLOSED`
+1. The user describes what they want in natural language.
+2. The bot extracts product, budget, location, use case, and criteria.
+3. Missing information triggers a small number of clarification questions.
+4. A structured request is created and becomes available to the admin.
+5. Multi-source search collects candidate products.
+6. Candidates are ranked and reviewed instead of being immediately presented as verified facts.
+7. The admin can keep, remove, reorder, edit, and verify candidates.
+8. A customer preview can be generated without exposing the complete result set.
+9. The full report is generated only after the required product data is verified.
 
-## Установка
+## Multi-source search
+
+The search layer is designed to tolerate partial failures. One source failing does not stop the rest of the pipeline.
+
+Current search logic can use independent sources and site-search fallbacks for marketplaces and electronics retailers. Search results are treated as **candidates**, not automatically trusted product facts.
+
+## Verification model
+
+The project deliberately separates “found” from “verified”.
+
+- A discovered link can remain unverified.
+- Price confirmation is tracked separately.
+- Store/domain mismatches can be flagged.
+- A top candidate over budget is not silently promoted as a valid match.
+- Unverified candidates are excluded from the final customer report.
+- The highest-priority candidate must have confirmed price and link data before the report can be completed.
+
+## Local run
 
 ```bash
 python -m pip install -r requirements.txt
 cp .env.example .env
-# Заполнить .env: BOT_TOKEN и ADMIN_IDS
+# Configure BOT_TOKEN and ADMIN_IDS in .env
 python -m compileall .
-python tools/test_search.py "Нужен телевизор для PS5 до 45к в Ярославле"
+python tools/test_search.py "Need a TV for PS5 under 45000"
 python main.py
 ```
 
-## Команды бота
+## What this project demonstrates
 
-- `/start` — начало работы
-- `/admin` — панель админа (только для ADMIN_IDS)
+- Python backend development
+- Telegram bot development with aiogram
+- SQLite CRUD and stateful workflows
+- Data validation and ranking
+- Multi-source integrations
+- Failure-tolerant search pipelines
+- Human-in-the-loop verification
+- Product and user-flow thinking
+- AI-assisted development workflow
 
-## Как работает
+## Current status
 
-1. Пользователь нажимает «🔍 Найти товар» и описывает что ищет.
-2. Бот извлекает: товар, бюджет, город, цель, критерии.
-3. Если данных мало — задаёт 2-3 уточняющих вопроса.
-4. Пользователь подтверждает заявку.
-5. Админ видит заявку через `/admin`, берёт в работу.
-6. Админ может проверить заявку через Алису или GigaChat: вставляет ответ ИИ, получает отдельные карточки, выбирает ТОП-1 и проверяет прямые ссылки.
-7. Ручное добавление остаётся запасным сценарием: `Название | Цена | Магазин | Ссылка`.
-8. Админ открывает «👁 Полный предпросмотр для админа»: в нём видны все товары, цены, магазины, ссылки и риски.
-9. Клиент получает только «👀 Клиентский предпросмотр до оплаты» без моделей, цен, магазинов и ссылок.
-10. После ручного нажатия «✅ Оплата подтверждена» админ отправляет полный отчёт со ссылками.
-
-## Автопоиск v2
-
-Автопоиск собирает карточки кандидатов, а не выдаёт ссылки как готовые товары.
-Он использует независимые источники: DDGS (если установлен), публичную выдачу
-Wildberries и site-поиск Ozon, Яндекс Маркета, DNS, М.Видео и Авито. Ошибка
-одного источника не останавливает остальные. Если карточек нет, поисковые
-ссылки сохраняются только как ручный fallback и видны в «🧪 Debug поиска».
-
-В админке после запуска откройте «📦 Показать найденные варианты», отметьте
-хотя бы один вариант как лучший/нормальный/дешёвый/надёжный, затем отправляйте
-предпросмотр и отчёт. Диагностика доступна по кнопке «🧪 Debug поиска» или
-командой `/debug_search REQUEST_ID`.
-
-Ручное добавление из чата администратора (запасной сценарий):
-
-```text
-/add_result REQUEST_ID | Название | Цена | Магазин | Ссылка | Плюсы | Риски
-```
-
-## Сценарий Алисы / GigaChat
-
-1. В карточке заявки нажмите «🟡 Проверить через Алису» и скопируйте промпт; его можно использовать и в GigaChat.
-2. Вставьте текст ответа Алисы или GigaChat обратно в бот. Поля «Ссылка», «Прямая ссылка» и «Прямая ссылка на товар» распознаются одинаково.
-3. Бот покажет отдельные карточки с ценой, магазином, причиной, риском и статусом ссылки.
-4. Для карточки можно выбрать ТОП-1, оставить/убрать её, поменять цену или ссылку, изменить порядок и открыть быстрый поиск по магазинам.
-5. Полный отчёт не отправится, пока у ТОП-1 не подтверждены прямая ссылка и цена; остальные непроверенные карточки в отчёт не попадут.
-
-## Ручная проверка карточек
-
-- Ссылка из Алисы/GigaChat получает статус «🔍 ссылка найдена, но не проверена»; пустая ссылка — «⚠️ ссылка нужна».
-- После ручной проверки нажмите «✅ Проверил ссылку». Неподходящую ссылку можно отдельно отметить.
-- Актуальную цену подтвердите через «✏️ Изменить цену» — повторный ввод той же цены тоже засчитывается как проверка.
-- Бот предупреждает о несовпадении магазина и домена ссылки, а для Авито напоминает проверить город, состояние товара, рейтинг продавца и подозрительно низкую цену.
-- В финальный отчёт входят только оставленные карточки с подтверждённой ссылкой и ценой. ТОП-1 выше бюджета не выбирается и остаётся в блоке «Осторожно».
-
-## Предпросмотры и выдача
-
-- «👁 Полный предпросмотр для админа» показывает полную подборку только в админском чате и не меняет статус заявки.
-- «👀 Клиентский предпросмотр до оплаты» отправляет короткий тизер: количество вариантов, ценность полного отчёта и цену услуги — без раскрытия товарных данных.
-- «📩 Отправить полный отчёт» доступна после ручного подтверждения оплаты и содержит точные модели, цены, магазины, ссылки, риски и итоговый совет.
-
-## Поисковые ссылки (fallback)
-
-Генерируются автоматически для: Яндекс, Google, Яндекс Маркет, Ozon, Wildberries, DNS, М.Видео, Авито.
+This is an actively developed MVP. The strongest part of the project is the end-to-end workflow and verification model: the system does not hide uncertain data behind confident output and keeps admin review as an explicit step before delivery.
