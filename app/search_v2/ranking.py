@@ -48,7 +48,7 @@ def _matches_optional(required: Any, candidate: Any) -> bool:
 
 
 def _optional_bonus(offer: Offer, request: SearchRequestV2 | None) -> float:
-    if request is None or not request.optional_specs:
+    if request is None:
         return 0.0
     identity = offer.identity
     facts = dict(offer.facts or {})

@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b0910">
+  <meta name="description" content="Найди выгоднее — AI-подбор товаров на Авито с проверкой цены, описания и фотографий">
+  <meta property="og:title" content="Найди выгоднее — поиск и проверка объявлений Авито">
+  <meta property="og:description" content="Опишите товар. Сервис прочитает объявления, сравнит цены и проверит фотографии финалистов.">
+  <meta property="og:type" content="website">
+  <title>Найди выгоднее — поиск и проверка объявлений Авито</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#search">Перейти к поиску</a>
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="#search" aria-label="Найди выгоднее — к поиску">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span><b>Найди выгоднее</b><small>AI-поиск по Авито</small></span>
+      </a>
+
+      <nav class="site-nav" id="site-nav" aria-label="Навигация">
+        <a href="#search">Поиск</a>
+        <a href="#result-section">Результаты</a>
+        <a href="#how">Как проверяем</a>
+        <a href="#faq">Вопросы</a>
+      </nav>
+
+      <div class="top-actions">
+        <div class="readiness" id="readiness" aria-live="polite"><span class="dot"></span><span>Проверяем подключения…</span></div>
+        <button class="icon-button" id="theme-toggle" type="button" aria-label="Включить тёмную тему" aria-pressed="false" title="Сменить тему">
+          <span class="theme-light" aria-hidden="true">☼</span><span class="theme-dark" aria-hidden="true">◐</span>
+        </button>
+        <button class="support-button" type="button" data-open-support>Поддержка</button>
+        <button class="menu-button" id="menu-toggle" type="button" aria-label="Открыть меню" aria-controls="site-nav" aria-expanded="false"><span></span><span></span></button>
+      </div>
+    </header>
+
+    <section class="workspace" id="search" aria-labelledby="search-title">
+      <div class="search-panel">
+        <div class="hero-copy">
+          <p class="eyebrow">Поиск с двойной AI-проверкой</p>
+          <h1 id="search-title">Найдём вещь.<br><span>Отсеем лишнее.</span></h1>
+          <p class="lead">Описание, цена и фото найденных объявлений — в одном отчёте.</p>
+        </div>
+
+        <form id="search-form" novalidate>
+          <fieldset class="mode-switch">
+            <legend>Что нужно сделать</legend>
+            <label><input type="radio" name="mode" value="bargain" checked><span><b>Найти выгоднее</b><small>Сравнить с аналогами</small></span></label>
+            <label><input type="radio" name="mode" value="find"><span><b>Найти точно</b><small>Главное — совпадение</small></span></label>
+          </fieldset>
+
+          <div class="main-fields">
+            <label class="field query-field"><span>Что ищем</span><input name="query" placeholder="Например, PlayStation 5 Slim с дисководом" required minlength="2" maxlength="300" autocomplete="off"></label>
+            <label class="field location-field"><span>Город</span><input name="location" value="Ярославль" maxlength="100" autocomplete="address-level2"></label>
+            <fieldset class="count-switch" aria-label="Количество вариантов">
+              <legend>Вариантов, до</legend>
+              <div class="count-segment">
+                <label><input type="radio" name="desiredResults" value="3"><span>3</span></label>
+                <label><input type="radio" name="desiredResults" value="5" checked><span>5</span></label>
+              </div>
+            </fieldset>
+          </div>
+
+          <section id="recognized-panel" class="recognized-panel" aria-labelledby="recognized-title" hidden>
+            <div class="recognized-head"><b id="recognized-title">Поняли запрос</b><span>Проверьте перед поиском</span></div>
+            <div id="recognized-parameters" class="recognized-parameters" aria-live="polite"></div>
+            <div id="ps5-quick-filters" class="quick-filters" hidden>
+              <label><span>Версия</span><select id="ps5-version"><option value="">Любая</option><option value="обычная">PS5</option><option value="Slim">PS5 Slim</option><option value="Pro">PS5 Pro</option></select></label>
+              <label><span>Привод</span><select id="ps5-drive"><option value="">Неважно</option><option value="с дисководом">С дисководом</option><option value="Digital">Digital</option></select></label>
+              <label><span>Состояние</span><select id="ps5-condition"><option value="">Неважно</option><option value="Новое">Новое</option><option value="Отличное">Отличное</option><option value="Хорошее">Хорошее</option></select></label>
+            </div>
+          </section>
+
+          <label class="pickup-option"><input type="checkbox" id="pickup-only" name="pickup-only" checked><span>Только самовывоз в выбранном городе</span></label>
+          <p class="submit-note">3 или 5 — максимум предложений в итоге. Для сравнения рынка проверяем более широкий набор объявлений.</p>
+
+          <section class="examples-panel" aria-labelledby="examples-title">
+            <div class="examples-head">
+              <div><span id="examples-title">Готовые примеры</span><small>заполняют модель и параметры</small></div>
+              <div class="examples-controls">
+                <span id="examples-page">1 / 4</span>
+                <button id="examples-prev" type="button" aria-label="Предыдущие примеры">←</button>
+                <button id="examples-pause" type="button" aria-label="Остановить смену примеров" aria-pressed="false">Ⅱ</button>
+                <button id="examples-next" type="button" aria-label="Следующие примеры">→</button>
+              </div>
+            </div>
+            <div class="examples" id="examples-list" aria-label="Примеры заполненных запросов"></div>
+          </section>
+
+          <p id="active-filters" class="submit-note" aria-live="polite">Категория: автоматически · Состояние: любое · Бюджет: не ограничен</p>
+          <button id="reset-extra-filters" class="mini-action" type="button">Сбросить дополнительные параметры — сохранить город и бюджет</button>
+          <details class="advanced">
+            <summary><span>Фильтры и приоритет</span><small id="advanced-hint">необязательно</small></summary>
+            <fieldset class="priority-switch">
+              <legend>Что важнее</legend>
+              <label><input type="radio" name="priority" value="quality"><span><b>Надёжность</b></span></label>
+              <label><input type="radio" name="priority" value="balanced" checked><span><b>Баланс</b></span></label>
+              <label><input type="radio" name="priority" value="budget"><span><b>Цена</b></span></label>
+            </fieldset>
+            <div class="advanced-grid base-grid">
+              <label class="field"><span>Категория</span><select name="category" id="category-select"><option value="all" selected>Определить автоматически</option><option value="phones">Телефоны</option><option value="computers">Компьютеры и ноутбуки</option><option value="household">Бытовая техника</option><option value="furniture">Мебель и интерьер</option><option value="gaming">Игры и приставки</option><option value="tools">Инструменты</option><option value="auto">Автозапчасти</option><option value="fashion">Одежда и аксессуары</option><option value="other">Необычный товар</option></select></label>
+              <label class="field"><span>Состояние</span><select name="requiredCondition"><option value="">Любое</option><option value="Новое">Новое</option><option value="Отличное">Отличное</option><option value="Хорошее">Хорошее</option><option value="С дефектом">Можно с дефектом</option></select></label>
+              <label class="field"><span>Цена от, ₽</span><input name="priceMin" type="number" min="0" step="1" inputmode="numeric" placeholder="Не важно"></label>
+              <label class="field"><span>Цена до, ₽</span><input name="priceMax" type="number" min="0" step="1" inputmode="numeric" placeholder="Не важно"></label>
+            </div>
+            <div class="advanced-grid dynamic-grid" id="dynamic-fields" aria-live="polite"></div>
+          </details>
+
+          <div id="last-search" class="last-search" hidden><span>Последний запрос: <b id="last-search-label"></b></span><button type="button" class="mini-action" data-repeat-last>Повторить</button></div>
+          <button class="primary magnetic" type="submit"><span class="button-glow" aria-hidden="true"></span><span class="button-label">Найти выгодные варианты</span><span class="button-arrow" aria-hidden="true">→</span></button>
+          <p class="submit-note">В «Найти выгоднее» покажем точные совпадения дешевле аналогов от 3 независимых продавцов и укажем размер выборки. В «Найти точно» — проверенные совпадения. Карточек может быть меньше выбранного числа или ни одной. Исправность проверяется при осмотре.</p>
+        </form>
+      </div>
+
+      <aside class="process-panel" aria-label="Как работает поиск">
+        <div><p class="eyebrow">Что происходит внутри</p><h2>Два фильтра.<br>Один выбор.</h2></div>
+        <ol class="process-list">
+          <li><span>01</span><div><b>Собираем рынок</b><small>Включая цены выше вашего бюджета</small></div></li>
+          <li><span>02</span><div><b>AI читает текст</b><small>Отмечает отличия и риски</small></div></li>
+          <li><span>03</span><div><b>Сверяем цены</b><small>Только одинаковые товары</small></div></li>
+          <li><span>04</span><div><b>Проверяем финалистов</b><small>Фото, свежая цена и активность страницы</small></div></li>
+        </ol>
+        <div class="process-time" aria-label="Цель — ответ до 45 секунд"><strong>45</strong><span>секунд<br>цель по времени</span></div>
+      </aside>
+    </section>
+
+    <section class="results-section" id="result-section" aria-labelledby="results-title">
+      <div class="results-heading"><div><p class="eyebrow">Результат</p><h2 id="results-title">Проверенные предложения</h2></div><p id="summary" class="summary">Только совпадения с запросом, без подмены модели</p></div>
+      <div id="live-progress" class="live-progress" role="status" aria-live="polite" aria-labelledby="progress-title" hidden>
+        <div class="progress-top"><div><span class="live-dot"></span><b id="progress-title">Поиск работает</b></div><span id="progress-time">0 сек</span></div>
+        <div class="progress-meta"><span id="progress-job">Задача создаётся…</span><button id="cancel-search" type="button" class="cancel-search">Отменить поиск</button></div>
+        <progress class="progress-track" id="progress-bar" max="100" value="2" aria-label="Готовность поиска">2%</progress>
+        <p id="progress-message">Запрос принят. Запускаем поиск…</p>
+        <p class="progress-note">Можно закрыть вкладку и вернуться позже по номеру задачи.</p>
+        <ol class="stage-list" aria-label="Этапы проверки"><li data-stage="queued"><span>1</span>Запрос</li><li data-stage="collect"><span>2</span>Рынок</li><li data-stage="text"><span>3</span>Описание</li><li data-stage="photo"><span>4</span>Фото</li><li data-stage="refresh"><span>5</span>Цена</li><li data-stage="complete"><span>6</span>Готово</li></ol>
+      </div>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+      <div id="warnings" class="warnings" aria-live="polite"></div>
+      <div id="results" class="cards"><div class="empty-state"><span aria-hidden="true">⌕</span><b>Начните с запроса выше</b><p>Укажите точную модель или опишите необычную вещь своими словами.</p></div></div>
+    </section>
+
+    <section class="proof-section" id="how" aria-labelledby="proof-title">
+      <div class="section-heading"><div><p class="eyebrow">Без ложной выгоды</p><h2 id="proof-title">Не просто дешевле.<br>Дешевле без подмены.</h2></div><p>При 3–9 сопоставимых продавцах пишем «Дешевле найденных аналогов» и отмечаем небольшую выборку. Для «Ниже рынка» нужны как минимум 10.</p></div>
+      <div class="proof-grid">
+        <article><span>01</span><b>Сверяем характеристики</b><p>Модель, комплектация, состояние и ваши обязательные признаки. Несовпадающие товары исключаем.</p></article>
+        <article><span>02</span><b>Разбираем цену</b><p>Отмечаем трейд‑ин, обязательные доплаты и цену «от».</p></article>
+        <article><span>03</span><b>Независимый рынок</b><p>Один продавец не сможет исказить среднюю цену дублями.</p></article>
+        <article><span>04</span><b>Фото финалиста</b><p>Ищем видимые дефекты и противоречия. Работоспособность подтверждает диагностика.</p></article>
+      </div>
+    </section>
+
+    <section class="use-section" id="uses" aria-labelledby="uses-title">
+      <div class="section-heading"><div><p class="eyebrow">Ищем не только технику</p><h2 id="uses-title">От точной модели<br>до странной палки.</h2></div><p>Выберите пример — запрос и нужные параметры заполнятся сами.</p></div>
+      <div class="use-grid">
+        <button type="button" data-preset-id="iphone-15-pro"><span>Смартфоны</span><b>iPhone 15 Pro · 256 ГБ</b><small>Память, SIM, состояние</small><i>→</i></button>
+        <button type="button" data-preset-id="lg-washer"><span>Для дома</span><b>Узкая стиральная машина</b><small>Габариты и загрузка</small><i>→</i></button>
+        <button type="button" data-preset-id="ikea-markus"><span>Мебель</span><b>Кресло IKEA MARKUS</b><small>Материал и механизмы</small><i>→</i></button>
+        <button type="button" data-preset-id="aquarium-root"><span>Редкая вещь</span><b>Коряга для аквариума</b><small>Форма, размер, материал</small><i>→</i></button>
+      </div>
+    </section>
+
+    <section class="numbers-section" aria-label="Ключевые принципы сервиса">
+      <div><strong>до 3–5</strong><span>проверенных предложений</span></div>
+      <div><strong>2 этапа</strong><span>сначала текст, потом фото</span></div>
+      <div><strong>0</strong><span>выдуманных скидок</span></div>
+      <div><strong>1 цель</strong><span>выгода без подмены товара</span></div>
+    </section>
+
+    <section class="faq-section" id="faq" aria-labelledby="faq-title">
+      <div class="faq-intro"><p class="eyebrow">Коротко о главном</p><h2 id="faq-title">Вопросы перед поиском.</h2><p>Если что-то пойдёт не так, заявка в поддержку сохраняется прямо на сайте.</p><button class="secondary" type="button" data-open-support>Задать вопрос →</button></div>
+      <div class="faq-list">
+        <details><summary>Почему предложений меньше трёх или пяти?</summary><p>Выбранное число — максимум. В «Найти выгоднее» выдаём только точные совпадения с подтверждённой выгодой, в «Найти точно» — проверенные совпадения без обязательной скидки к рынку. Другие модели, неактивные и непроверенные объявления не дополняют подборку. Если подходящих предложений нет, сообщим об этом.</p></details>
+        <details><summary>Чем отличаются две метки выгоды?</summary><p>«Дешевле найденных аналогов» — полная цена ниже медианы сопоставимых объявлений 3–9 других независимых продавцов. Это небольшая выборка, её размер указан в карточке. «Ниже рынка» допускается при сравнении как минимум с 10 другими продавцами. Учитываем обязательные доплаты, покажем цены, ссылки и время сбора. Сравниваются цены предложений, а не завершённых сделок.</p></details>
+        <details><summary>Почему фото проверяются после текста?</summary><p>Сначала проверяем описание, совпадение модели и полную цену с доплатами. Затем сравниваем цены аналогов. Фотографии AI смотрит у отобранных вариантов.</p></details>
+        <details><summary>Что будет после 45 секунд?</summary><p>Это ориентир по времени. Если проверка занимает дольше, поиск продолжается до шести минут. Можно обновить страницу: вернёмся к тому же поиску. Результат хранится 15 минут, пока сервис запущен.</p></details>
+        <details><summary>Товар точно исправен?</summary><p>Описание и фото помогают заметить дефекты и противоречия. Работоспособность и скрытые дефекты проверяются при осмотре или диагностике. Перед выдачей обновляем цену и активность страницы объявления.</p></details>
+      </div>
+    </section>
+
+    <section class="trust-section" aria-labelledby="trust-title"><div><p class="eyebrow">Поддержка</p><h2 id="trust-title">Поиск ошибся? Разберёмся.</h2><p>Опишите запрос и оставьте контакт — обращение получит отдельный номер.</p></div><button class="secondary" type="button" data-open-support>Написать в поддержку →</button></section>
+
+    <details class="operator-panel" id="operator-panel" hidden><summary>Техническая информация для владельца</summary><div id="audit" class="audit" hidden></div><div id="costs" class="costs" hidden></div><div id="admin-warnings" class="admin-warnings"></div><div id="owner-preview" hidden></div><label class="upload"><input id="dataset-file" type="file" accept="application/json,.json"><span>Загрузить готовый JSON из Dataset</span></label></details>
+
+    <footer>
+      <a class="brand compact" href="#search"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span><b>Найди выгоднее</b><small>выбираем по фактам</small></span></a>
+      <nav aria-label="Навигация в подвале"><a href="#search">Поиск</a><a href="#how">Проверка</a><a href="#faq">Вопросы</a></nav>
+      <div class="footer-actions"><button type="button" data-open-support>Поддержка</button><button type="button" data-open-access>Войти</button></div>
+      <p class="footer-note">Независимый сервис подбора. Актуальность цены и страницы указана в карточке. Состояние товара проверяется при осмотре.</p>
+    </footer>
+  </main>
+
+  <dialog id="support-dialog" class="support-dialog" aria-labelledby="support-title">
+    <form id="support-form" method="dialog">
+      <div class="dialog-head"><div><p class="eyebrow">Поддержка</p><h2 id="support-title">Чем помочь?</h2></div><button class="dialog-close" type="button" data-close-support aria-label="Закрыть">×</button></div>
+      <p class="dialog-lead">Опишите вопрос и оставьте удобный контакт. Заявка сохранится у владельца сервиса.</p>
+      <div class="support-grid"><label class="field"><span>Ваше имя</span><input name="name" required minlength="2" maxlength="80" autocomplete="name" placeholder="Как к вам обращаться"></label><label class="field"><span>Контакт для ответа</span><input name="contact" required minlength="3" maxlength="160" placeholder="@telegram, телефон или email"></label></div>
+      <label class="field"><span>Тема</span><select name="topic"><option>Поиск не нашёл товар</option><option>Вопрос по результату</option><option>Ошибка сайта</option><option>Оплата и заказ</option><option>Другое</option></select></label>
+      <label class="field"><span>Сообщение</span><textarea name="message" required minlength="10" maxlength="3000" placeholder="Что произошло и что вы хотели найти?"></textarea></label>
+      <label class="consent"><input type="checkbox" required><span>Согласен на обработку данных только для ответа на эту заявку.</span></label>
+      <div id="support-status" class="support-status" role="status" aria-live="polite"></div>
+      <button class="primary" type="submit"><span class="button-label">Отправить заявку</span><span aria-hidden="true">→</span></button>
+    </form>
+  </dialog>
+  <dialog id="access-dialog" class="support-dialog" aria-labelledby="access-title">
+    <form id="access-form" method="dialog">
+      <div class="dialog-head"><h2 id="access-title">Вход в пилот</h2><button class="dialog-close" type="button" data-close-access aria-label="Закрыть">×</button></div>
+      <p class="dialog-lead">Введите ключ доступа, полученный у владельца сервиса.</p>
+      <label class="field"><span>Ключ доступа</span><input name="token" type="password" required minlength="32" maxlength="512" autocomplete="off"></label>
+      <p id="access-status" class="support-status visible" role="status"></p>
+      <button class="primary" type="submit"><span class="button-label">Войти</span></button>
+      <button class="secondary" type="button" data-logout>Выйти из аккаунта</button>
+    </form>
+  </dialog>
+  <script src="/query_normalization.js" defer></script>
+  <script src="/app.js" defer></script>
+</body>
+</html>

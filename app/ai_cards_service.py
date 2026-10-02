@@ -11,6 +11,7 @@ from app.config import settings
 from app.db import Request, SearchResult, to_int_price
 from app.market_analysis import OfferIdentity, RecommendationRole, plan_recommendation_roles
 from app.price_extractor import format_price
+from app.purchase_claims import has_price_advantage_claim
 from app.verification_state import normalize_verification_facts, resolve_final_presentation
 from app.services.ai_review import (
     AI_CARD_APPROVED,
@@ -339,6 +340,11 @@ def build_ai_cards_prompt(req: Request, candidates: list[SearchResult]) -> str:
         "- если у candidate есть facts, объясняй выбор на основе facts, а не длинного snippet;\n"
         "- учитывай facts.budget_status, facts.ps5_flags и facts.warnings;\n"
         "- не скрывай исходные риски кандидата;\n"
+        "- не заявляй «ниже рынка», экономию, скидку или самую низкую цену: для этого нужны отдельные доказательства сравнения;\n"
+        "- цена товара не означает итоговую стоимость с доставкой; условия карт, клубов, подписок и рассрочки не считай общей ценой;\n"
+        "- не придумывай состояние, комплектацию, сроки доставки, гарантию или возврат; неизвестное вынеси в manual_check;\n"
+        "- при COMPATIBLE_VARIANT поясни, что модель совпадает, но конфигурацию нужно уточнить;\n"
+        "- в why свяжи подтверждённые характеристики с задачей клиента; в manual_check дай короткие конкретные вопросы;\n"
         "- карточки короткие и практичные.\n\n"
         "Входные данные:\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
@@ -478,10 +484,12 @@ def _editorial_why(value: Any) -> str:
 def _factual_why(req: Request, candidate: SearchResult) -> str:
     facts = _candidate_facts(candidate)
     parts: list[str] = []
-    exact = str(facts.get("exact_match") or "").upper()
-    if exact in {"EXACT", "COMPATIBLE_VARIANT"}:
+    exact = str(facts.get("exact_match") or facts.get("exact_match_status") or "").upper()
+    if exact == "EXACT":
         parts.append("Точная модель и обязательные характеристики совпадают")
-    if facts.get("storage_gb") or facts.get("storage") or facts.get("memory"):
+    elif exact == "COMPATIBLE_VARIANT":
+        parts.append("Модель совпадает, но конфигурацию нужно уточнить")
+    if exact == "EXACT" and (facts.get("storage_gb") or facts.get("storage") or facts.get("memory")):
         parts.append("нужный объём памяти подтверждён")
     budget = _budget_value(req)
     if candidate.price and budget and candidate.price <= budget:
@@ -579,7 +587,15 @@ def parse_ai_cards_for_candidates(
 
         why = _editorial_why(raw_card.get("why"))
         snippet = " ".join(str(getattr(candidate, "snippet", "") or "").split()).casefold()
-        if not why or why.casefold() == snippet or any(marker in why.casefold() for marker in ("купите", "успейте", "акция", "реклам")):
+        facts = _candidate_facts(candidate)
+        compatible = str(facts.get("exact_match") or facts.get("exact_match_status") or "").upper() == "COMPATIBLE_VARIANT"
+        if (
+            not why
+            or why.casefold() == snippet
+            or has_price_advantage_claim(why)
+            or compatible
+            or any(marker in why.casefold() for marker in ("купите", "успейте", "акция", "реклам"))
+        ):
             why = _factual_why(req, candidate)
         risks = _dedupe_text(_candidate_risks(candidate) + _as_list(raw_card.get("risks")))
         manual_check = _dedupe_text(_as_list(raw_card.get("manual_check")))

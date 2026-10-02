@@ -9,3 +9,5 @@ bot.db
 .DS_Store
 .idea/
 .vscode/
+runtime/
+/tmp/

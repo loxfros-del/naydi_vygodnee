@@ -16,6 +16,7 @@ from app.search_v2.models import (
     SearchRequestV2,
 )
 from app.search_v2.recommendations import select_recommendations
+from app.search_v2.ranking import score_offer
 
 
 class SearchV2RecommendationTests(unittest.TestCase):
@@ -128,7 +129,7 @@ class SearchV2RecommendationTests(unittest.TestCase):
 
         rows = select_recommendations([self.group(cheap, regular, higher, another)])
         cheap_row = next(item for item in rows if item.offer_id == "cheap")
-        self.assertIn("экономия 10 000 ₽ относительно типичной цены 80 000 ₽", cheap_row.reasons)
+        self.assertIn("экономия 10 000 ₽ по цене товара относительно типичной цены 80 000 ₽; доставка и условия скидок проверяются отдельно", cheap_row.reasons)
         self.assertFalse(any("итоговый балл" in reason for row in rows for reason in row.reasons))
 
     def test_unselected_laptop_configuration_is_not_called_exact(self) -> None:
@@ -168,6 +169,15 @@ class SearchV2RecommendationTests(unittest.TestCase):
         rows = select_recommendations([self.group(exact, wrong)], request=request)
 
         self.assertEqual([row.offer_id for row in rows], ["exact"])
+
+    def test_reliability_priority_does_not_require_an_optional_preference(self) -> None:
+        offer = self.offer("reliable", 80_000, platform=PlatformTrust.HIGH_RETAIL, seller=SellerTrust.HIGH, source="dns")
+        priority = SearchRequestV2(priority="reliability")
+        with_unrelated_preference = replace(priority, optional_specs={"color": "не указан"})
+        self.assertEqual(score_offer(offer, request=priority), score_offer(offer, request=with_unrelated_preference))
+        self.assertGreater(score_offer(offer, request=priority), score_offer(offer, request=SearchRequestV2(priority="balance")))
+        offer.exact_match = ExactMatchResult.MODEL_MISMATCH
+        self.assertEqual(score_offer(offer, request=priority), 0)
 
 
 if __name__ == "__main__":

@@ -125,7 +125,7 @@ if set(CATEGORY_QUESTIONS) != set(SUPPORTED_AUTO_SEARCH):
     raise RuntimeError("Wizard category questions must cover exactly the supported auto categories")
 
 
-_SKIP_VALUES = {"", "-", "нет", "не важно", "неважно", "пропустить", "любой", "любая"}
+_SKIP_VALUES = {"", "-", "нет", "не важно", "неважно", "пропустить", "любой", "любая", "не знаю", "помогите выбрать"}
 _CONDITION_ALIASES = {
     "new": "new",
     "новое": "new",

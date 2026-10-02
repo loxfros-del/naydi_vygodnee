@@ -12,6 +12,7 @@ from datetime import datetime
 
 from app.product_config import ServicePackage, get_service_packages
 from app.verification_state import resolve_final_presentation
+from app.purchase_claims import has_price_advantage_claim
 from app.ui_texts import (
     CONDITION_LABELS,
     PRICING_INTRO,
@@ -103,7 +104,7 @@ def source_display_name(source: object) -> str:
 CLIENT_ROLE_LABELS = {
     "BEST": "⭐ Лучший выбор",
     "BUDGET": "💰 Дешевле, но есть нюансы",
-    "BACKUP": "🛡 Самый надёжный",
+    "BACKUP": "🛡 Запасной вариант",
 }
 
 _CLIENT_FACT_LABELS = {
@@ -236,23 +237,26 @@ def format_client_card(card: Any, role: str) -> str:
 
     why_items: list[str] = []
     why = " ".join(str(getattr(card, "snippet", "") or "").split())
-    if why and not any(marker in why.casefold() for marker in (*_CLIENT_TECH_MARKERS, *_PROMOTIONAL_MARKERS)):
+    if why and not has_price_advantage_claim(why) and not any(marker in why.casefold() for marker in (*_CLIENT_TECH_MARKERS, *_PROMOTIONAL_MARKERS)):
         why_items.append(why[:300])
-    exact = str(display_facts.get("exact_match") or "").upper()
-    if exact in {"EXACT", "COMPATIBLE_VARIANT"}:
+    exact = str(display_facts.get("exact_match") or display_facts.get("exact_match_status") or "").upper()
+    if exact == "EXACT":
         why_items.append("точная модель и обязательные характеристики совпадают")
+    elif exact == "COMPATIBLE_VARIANT":
+        why_items.append("найден вариант модели; комплектацию нужно уточнить")
     budget_status = str(display_facts.get("budget_status") or "").upper()
     if budget_status == "IN_BUDGET":
         why_items.append("цена укладывается в бюджет")
     if platform_type == "RETAIL":
-        why_items.append("условия покупки и возврата у крупной сети понятнее")
+        why_items.append("предложение магазина; условия гарантии и возврата нужно сверить")
     elif platform_type == "MARKETPLACE":
         why_items.append("предложение найдено на известной торговой площадке")
     elif platform_type == "CLASSIFIED":
-        why_items.append("цена может быть ниже розничных магазинов")
-    why_items = _safe_client_items(why_items, 3) or ["подходит под основные требования"]
+        why_items.append("объявление продавца; состояние требует отдельной проверки")
+    why_items = _safe_client_items(why_items, 3) or ["причины выбора нужно уточнить у специалиста"]
     lines.extend(["", "<b>Почему рекомендуем:</b>"])
     lines.extend(f"• {escape_html(item)}" for item in why_items)
+    lines.append("Сравнение рынка: доказательства экономии в этой карточке не приложены.")
 
     confirmed: list[str] = []
     confirmation_labels = (
@@ -268,8 +272,10 @@ def format_client_card(card: Any, role: str) -> str:
         lines.extend(f"• {escape_html(item)}" for item in _safe_client_items(confirmed, 4))
 
     manual_check = _safe_client_items(final.get("warnings") or [], 3)
+    if exact == "COMPATIBLE_VARIANT":
+        manual_check.insert(0, "уточнить точную комплектацию и обязательные характеристики")
     if not manual_check:
-        manual_check = ["условия доставки и гарантии на момент заказа"]
+        manual_check = ["итоговую сумму с доставкой и обязательными доплатами", "условия гарантии и возврата на момент заказа"]
     manual_check = _safe_client_items(manual_check, 3)
     lines.extend(["", "<b>Что проверить:</b>"])
     lines.extend(f"• {escape_html(item)}" for item in manual_check)
@@ -296,13 +302,13 @@ def format_client_result_summary(
     items = list(cards)
     prices = [int(item.price) for item in items if getattr(item, "price", None)]
     checked = checked_at or next(
-        (str(getattr(item, "checked_at", "") or getattr(item, "updated_at", "")) for item in items if getattr(item, "checked_at", "") or getattr(item, "updated_at", "")),
+        (str(getattr(item, "checked_at", "")) for item in items if getattr(item, "checked_at", "")),
         "",
     )
     try:
-        checked_label = datetime.fromisoformat(checked).strftime("%d.%m.%Y") if checked else datetime.now().strftime("%d.%m.%Y")
+        checked_label = datetime.fromisoformat(checked).strftime("%d.%m.%Y %H:%M") if checked else "не указана"
     except ValueError:
-        checked_label = datetime.now().strftime("%d.%m.%Y")
+        checked_label = "не указана"
     total = found_count if found_count is not None else len(items)
     lines = [
         "✅ <b>Подбор готов</b>",

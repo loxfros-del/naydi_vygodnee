@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from statistics import median
+import math
 from .grouping import canonical_identity_key
 from .market_analysis import is_comparable_offer
 from .models import AvailabilityStatus, Offer, ProductGroup, utc_now
@@ -27,22 +28,81 @@ def _is_current(offer: Offer, now: datetime) -> bool:
     return timedelta(minutes=-5) <= age <= MAX_REFERENCE_AGE and (offer.cache_age is None or offer.cache_age <= MAX_REFERENCE_AGE.total_seconds())
 
 
-def _seller_or_url_key(offer: Offer) -> str:
+def _seller_keys(offer: Offer) -> set[str]:
+    """Names connect one merchant across platforms; IDs are platform-local."""
     seller = offer.seller
-    seller_key = normalize_key(seller.seller_id or seller.name)
-    if seller_key:
-        return f"seller:{seller_key}"
-    return f"url:{canonicalize_url(offer.url)}"
+    keys: set[str] = set()
+    name = normalize_key(seller.name)
+    if name and name not in {"unknown", "неизвестно", "неизвестный продавец"}:
+        keys.add(f"name:{name}")
+    seller_id = normalize_key(seller.seller_id)
+    if seller_id:
+        keys.add(f"id:{_source_key(offer)}:{seller_id}")
+    return keys
 
 
 def _source_key(offer: Offer) -> str:
     return normalize_key(offer.source or offer.platform)
 
 
+def _seller_components(offers: list[Offer]) -> dict[str, str]:
+    """Resolve all observed aliases before counting independent merchants."""
+    parents: dict[str, str] = {}
+
+    def root(key: str) -> str:
+        parents.setdefault(key, key)
+        while parents[key] != key:
+            parents[key] = parents[parents[key]]
+            key = parents[key]
+        return key
+
+    for offer in offers:
+        keys = sorted(_seller_keys(offer))
+        if keys:
+            anchor = root(keys[0])
+            for key in keys[1:]:
+                parents[root(key)] = anchor
+    return {key: root(key) for key in parents}
+
+
+def _verification_rejected(offer: Offer) -> bool:
+    # A resolved final/manual confirmation may supersede an earlier automatic
+    # failure. Explicit negative evidence must never be outweighed by a score.
+    for field in ("model_verified", "link_verified", "price_verified", "availability_verified"):
+        for state in (offer.final_verification, offer.manual_verification, offer.automatic_verification):
+            value = getattr(state, field, None)
+            if value is not None:
+                if value is False:
+                    return True
+                break
+    return False
+
+
+def _has_conditional_price(offer: Offer) -> bool:
+    # Adapters may carry these terms as facts/metadata even though Offer has
+    # only one numeric price. A card/member/installment price is not a common
+    # cash price and cannot prove an unconditional saving.
+    unconditional_kinds = {"", "regular", "current", "cash", "full", "total", "unconditional"}
+    for data in (offer.facts, offer.raw_metadata):
+        if not isinstance(data, dict):
+            continue
+        if data.get("price_conditions") not in (None, "", False, [], {}, ()):
+            return True
+        if normalize_key(data.get("price_kind")) not in unconditional_kinds:
+            return True
+    return False
+
+
 def _eligible(offer: Offer, now: datetime) -> bool:
     return bool(
         is_comparable_offer(offer)
+        and math.isfinite(float(offer.price or 0))
+        and str(offer.currency or "").upper() in {"RUB", "RUR", "₽"}
         and offer.availability.status is AvailabilityStatus.IN_STOCK
+        and offer.availability.available is not False
+        and not _verification_rejected(offer)
+        and not _has_conditional_price(offer)
+        and _seller_keys(offer)
         and is_product_page_url(offer.url)
         and _is_current(offer, now)
     )
@@ -82,22 +142,32 @@ def build_savings_evidence(
     if not selected_configuration:
         return None
 
-    seen: set[str] = set()
+    seller_components = _seller_components([selected, *group.offers])
+    seen: set[str] = {seller_components[key] for key in _seller_keys(selected)}
+    seen_urls: set[str] = set()
     references: list[Offer] = []
     selected_url = canonicalize_url(selected.url)
-    for offer in group.offers:
+    if selected_url:
+        seen_urls.add(selected_url)
+    # When one merchant has several listings, its lowest eligible price is the
+    # conservative reference. Input order must not inflate the claimed saving.
+    candidates = sorted(
+        (offer for offer in group.offers if _eligible(offer, now)),
+        key=lambda offer: float(offer.price or 0),
+    )
+    for offer in candidates:
         if offer is selected or (selected.offer_id and offer.offer_id == selected.offer_id):
             continue
-        if selected_url and canonicalize_url(offer.url) == selected_url:
+        url = canonicalize_url(offer.url)
+        if url in seen_urls:
             continue
         if _configuration_key(offer) != selected_configuration:
             continue
-        if not _eligible(offer, now):
+        keys = {seller_components[key] for key in _seller_keys(offer)}
+        if not keys or keys & seen:
             continue
-        key = _seller_or_url_key(offer)
-        if not key or key in seen:
-            continue
-        seen.add(key)
+        seen.update(keys)
+        seen_urls.add(url)
         references.append(offer)
 
     sources = {_source_key(offer) for offer in references if _source_key(offer)}
@@ -118,7 +188,10 @@ def build_savings_evidence(
         comparable_offer_count=len(references),
         source_count=len(sources),
         reference_offer_ids=tuple(offer.offer_id for offer in references if offer.offer_id),
-        client_reason=f"экономия {_rub(saving)} относительно типичной цены {_rub(baseline)}",
+        client_reason=(
+            f"экономия {_rub(saving)} по цене товара относительно типичной цены {_rub(baseline)}; "
+            "доставка и условия скидок проверяются отдельно"
+        ),
     )
 
 
