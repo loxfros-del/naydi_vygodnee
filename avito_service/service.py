@@ -893,6 +893,7 @@ class AvitoAnalysisService:
                         **{key: diagnostics.get(key) for key in (
                             "http_status", "transport_phase", "transport_error_type", "transport_errno",
                             "transport_winerror", "tls_reason", "request_outcome",
+                            "transport_elapsed_seconds", "transport_timeout_seconds", "transport_proxy_mode",
                         )},
                         "budget": {**diagnostics, "accounted_cost_rub": accounted,
                                    "cost_estimated": estimated, "reservation_blocked": blocked},

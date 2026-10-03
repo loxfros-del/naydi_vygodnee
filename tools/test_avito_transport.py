@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gzip
+from http.client import IncompleteRead
 from io import BytesIO
 import json
 import socket
@@ -139,6 +140,51 @@ class AvitoTransportTests(unittest.TestCase):
                 self.assertFalse(events[-1][1].get("run_id_received"))
                 self.assertEqual(events[-1][1]["reservation_accounting"], "settled_estimate")
                 self.assertEqual(guard.snapshot()["settledEstimateUsd"], 0.10)
+
+    def test_tls_eof_without_response_does_not_prove_paid_start_was_not_received(self):
+        for failure in (ssl.SSLError(1, "TLS transport failed"),
+                        ssl.SSLEOFError(8, "EOF occurred"),
+                        URLError(ssl.SSLEOFError(8, "EOF occurred"))):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as folder:
+                guard = SpendingGuard(Path(folder) / "spend.json")
+                current = ZenStudioProvider(ServiceConfig(apify_token="test"), guard)
+                events = []
+                with patch("avito_service.apify.urlopen", side_effect=failure) as network:
+                    with self.assertRaises(ExternalServiceError):
+                        current.collect_market(SearchRequest("PS5"), max_charge_usd=0.10,
+                                               telemetry=lambda event, data: events.append((event, data)))
+                self.assertEqual(network.call_count, 1)
+                record = events[-1][1]
+                self.assertEqual(record["network_error_type"], "tls_connection_failed")
+                self.assertFalse(record["no_run_proven"])
+                self.assertIsNone(record["request_reached_provider"])
+                self.assertIsNone(record["http_status"])
+                self.assertEqual(record["reservation_accounting"], "settled_estimate")
+                self.assertAlmostEqual(guard.snapshot()["settledEstimateUsd"], 0.10)
+
+    def test_response_read_failure_never_releases_paid_start_reservation(self):
+        for status in (200, None):
+            for failure in (ssl.SSLEOFError(8, "EOF occurred"), ssl.SSLCertVerificationError(),
+                            PermissionError(13, "read failed"), IncompleteRead(b"partial")):
+                with self.subTest(status=status, failure=type(failure).__name__), tempfile.TemporaryDirectory() as folder:
+                    guard = SpendingGuard(Path(folder) / "spend.json")
+                    current = ZenStudioProvider(ServiceConfig(apify_token="test"), guard)
+                    response = Response({})
+                    response.status = status
+                    events = []
+                    with patch.object(response, "read", side_effect=failure), \
+                            patch("avito_service.apify.urlopen", return_value=response) as network:
+                        with self.assertRaises(ExternalServiceError):
+                            current.collect_market(SearchRequest("PS5"), max_charge_usd=0.10,
+                                                   telemetry=lambda event, data: events.append((event, data)))
+                    self.assertEqual(network.call_count, 1)
+                    record = events[-1][1]
+                    self.assertEqual(record["http_status"], status)
+                    self.assertTrue(record["request_reached_provider"])
+                    self.assertFalse(record["no_run_proven"])
+                    self.assertEqual(record["reservation_accounting"], "settled_estimate")
+                    self.assertAlmostEqual(guard.snapshot()["monthlyCommittedUsd"], 0.10)
+                    self.assertAlmostEqual(guard.snapshot()["settledEstimateUsd"], 0.10)
 
     def test_candidate_search_prioritizes_relevance_before_full_price_ranking(self):
         for mode in ("bargain", "find"):

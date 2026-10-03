@@ -15,7 +15,7 @@ import unicodedata
 from typing import Any, Callable, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from .config import ServiceConfig
 from .errors import ConfigurationError, ExternalServiceError
@@ -134,7 +134,13 @@ class OpenAICompatibleReviewer:
     max_text_attempts_per_listing = 4
 
     def __init__(self, config: ServiceConfig) -> None:
+        if config.ai_proxy_mode not in {"system", "direct"}:
+            raise ConfigurationError("AVITO_AI_PROXY_MODE должен быть system или direct")
         self.config = config
+        # Keep the choice local to AI requests. Direct mode disables only proxy
+        # discovery; urllib's normal certificate and hostname checks stay intact.
+        # Never fall back to another route after a possibly paid POST.
+        self._opener = build_opener(ProxyHandler({})) if config.ai_proxy_mode == "direct" else None
         self._runtime = local()
         self._budget_condition = Condition()
         self._budget_limit: float | None = None
@@ -260,6 +266,9 @@ class OpenAICompatibleReviewer:
             "доказательством идеального состояния. Фото не доказывают оригинальность устройства, "
             "коробки или деталей и не заменяют диагностику: не называй их оригинальными лишь "
             "по внешнему виду, не подтверждай исправность всех пикселей или скрытых узлов. "
+            "Распакованная консоль с заявленным состоянием «Новое» не получает caution, "
+            "конфликт или отдельную пометку только из-за вскрытой упаковки. Реальные видимые "
+            "следы использования, повреждения и противоречия по-прежнему указывай как риски. "
             "Не переноси модель, память или состояние "
             "из текста в результаты наблюдения: укажи их только когда фото действительно "
             "позволяет это установить, иначе оставь поле пустым. В condition указывай только "
@@ -795,6 +804,8 @@ class OpenAICompatibleReviewer:
         for attempt in range(2):
             http_status = None
             transport_phase = "opening_response"
+            attempt_started = time.monotonic()
+            timeout = None
             request = Request(
                 endpoint,
                 data=body,
@@ -812,7 +823,8 @@ class OpenAICompatibleReviewer:
                     timeout = min(timeout, deadline_at - time.monotonic())
                     if timeout <= 0:
                         raise ExternalServiceError("Лимит времени AI-потока исчерпан.", code="AI_TIMEOUT")
-                with urlopen(request, timeout=timeout) as response:
+                open_request = self._opener.open if self._opener is not None else urlopen
+                with open_request(request, timeout=timeout) as response:
                     http_status = getattr(response, "status", None)
                     http_status = http_status if isinstance(http_status, int) else None
                     transport_phase = "reading_response"
@@ -888,6 +900,12 @@ class OpenAICompatibleReviewer:
                     "http_status": http_status,
                     "transport_phase": transport_phase,
                     "transport_error_type": type(reason).__name__,
+                    # Opening includes connect, TLS, sending and waiting for
+                    # headers. Timing and the selected route help diagnose it
+                    # without claiming whether the provider received the POST.
+                    "transport_elapsed_seconds": round(max(0.0, time.monotonic() - attempt_started), 3),
+                    "transport_timeout_seconds": round(timeout, 3) if timeout is not None else None,
+                    "transport_proxy_mode": self.config.ai_proxy_mode,
                     "request_outcome": "unknown",
                 }
                 for name in ("errno", "winerror"):
@@ -1672,6 +1690,7 @@ class OpenAICompatibleReviewer:
                     **{key: diagnostics[key] for key in (
                         "transport_phase", "transport_error_type", "transport_errno",
                         "transport_winerror", "tls_reason", "request_outcome",
+                        "transport_elapsed_seconds", "transport_timeout_seconds", "transport_proxy_mode",
                     ) if key in diagnostics},
                     "parse_schema_error": diagnostics.get("parse_error"),
                     "expected_result_count": len(group),

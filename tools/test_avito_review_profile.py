@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from avito_service.config import expanded_review_config, load_config
+from avito_service.config import ServiceConfig, expanded_review_config, load_config
 
 
 class ReviewProfileTests(unittest.TestCase):
@@ -24,6 +24,7 @@ class ReviewProfileTests(unittest.TestCase):
     def test_owner_profile_replaces_stale_model_and_expands_analysis(self):
         config = self.config()
         self.assertEqual(config.ai_model, "gpt-4.1-mini")
+        self.assertEqual(config.ai_proxy_mode, "direct")
         self.assertEqual(config.ai_api_key, "test-key")
         self.assertEqual(config.ai_text_batch_size, 5)
         self.assertEqual(config.ai_text_max_listings, 200)
@@ -49,6 +50,21 @@ class ReviewProfileTests(unittest.TestCase):
 
     def test_profile_can_be_disabled_without_editing_secret_file(self):
         self.assertEqual(self.config(env={"AVITO_REVIEW_PROFILE": "off"}).ai_model, "qwen3.8-flash")
+
+    def test_proxy_mode_is_scoped_to_profile_and_can_be_overridden(self):
+        self.assertEqual(ServiceConfig().ai_proxy_mode, "system")
+        self.assertEqual(self.config(env={"AVITO_AI_BASE_URL": "https://example.org/v1"}).ai_proxy_mode, "system")
+        self.assertEqual(self.config(env={"AVITO_REVIEW_PROFILE": "off"}).ai_proxy_mode, "system")
+        self.assertEqual(self.config(env={"AVITO_AI_PROXY_MODE": "system"}).ai_proxy_mode, "system")
+        self.assertEqual(self.config(env={"AVITO_AI_PROXY_MODE": " DIRECT "}).ai_proxy_mode, "direct")
+
+    def test_invalid_proxy_mode_fails_without_silent_route_change(self):
+        for value in ("", "fallback", "disabled", "http://127.0.0.1:10809"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.config(env={"AVITO_AI_PROXY_MODE": value})
+        with self.assertRaises(ValueError):
+            self.config(profile={"schema": 1, "provider": "aitunnel",
+                                 "settings": {"AVITO_AI_PROXY_MODE": "fallback"}})
 
     def test_minimum_bargain_thresholds_are_configurable(self):
         config = self.config(env={

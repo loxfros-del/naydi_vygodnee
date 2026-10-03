@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 import gzip
+from http.client import HTTPException
 import json
 import math
 import re
@@ -57,7 +58,9 @@ def _network_failure(exc: BaseException) -> tuple[str, bool]:
     if isinstance(reason, ssl.SSLCertVerificationError):
         return "tls_certificate_failed", True
     if isinstance(reason, ssl.SSLError):
-        return "tls_handshake_failed", True
+        # Generic TLS errors include EOF/reset while reading a paid start's
+        # response. The exception type alone cannot prove HTTP was never sent.
+        return "tls_connection_failed", False
     if isinstance(reason, (TimeoutError, socket.timeout)):
         return "network_timeout", False
     if isinstance(reason, (UnicodeError, json.JSONDecodeError, gzip.BadGzipFile)):
@@ -128,8 +131,10 @@ class ZenStudioProvider:
             request = Request(url, data=body, headers=self._headers(), method=method)
             retry_after = 0.5 * (attempt + 1)
             response_status: int | None = None
+            response_received = False
             try:
                 with urlopen(request, timeout=min(20.0, remaining) if attempts > 1 else remaining) as response:
+                    response_received = True
                     response_status = getattr(response, "status", None)
                     data = response.read()
                     if "gzip" in str(response.headers.get("Content-Encoding") or "").casefold():
@@ -182,8 +187,11 @@ class ZenStudioProvider:
                         retryable=exc.code >= 500,
                         diagnostics=diagnostics,
                     )
-            except (OSError, URLError, TimeoutError, EOFError, UnicodeError, json.JSONDecodeError) as exc:
+            except (OSError, URLError, TimeoutError, EOFError, HTTPException, UnicodeError, json.JSONDecodeError) as exc:
                 category, no_run_proven = _network_failure(exc)
+                # Even a normally pre-request exception is ambiguous after an
+                # HTTP response was opened: the provider may have created a run.
+                no_run_proven = no_run_proven and not response_received
                 reason = exc.reason if isinstance(exc, URLError) else exc
                 error_number = getattr(reason, "errno", None)
                 error = ExternalServiceError(
@@ -195,7 +203,7 @@ class ZenStudioProvider:
                         "sanitized_response": category,
                         "network_error_type": category,
                         "network_errno": error_number if isinstance(error_number, int) else None,
-                        "request_reached_provider": True if response_status is not None else
+                        "request_reached_provider": True if response_received else
                             False if no_run_proven else None,
                         "no_run_proven": no_run_proven,
                     },

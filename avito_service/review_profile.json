@@ -3,6 +3,7 @@
   "provider": "aitunnel",
   "settings": {
     "AVITO_AI_MODEL": "gpt-4.1-mini",
+    "AVITO_AI_PROXY_MODE": "direct",
     "AVITO_AI_TEXT_BATCH_SIZE": "5",
     "AVITO_AI_TEXT_MAX_LISTINGS": "200",
     "AVITO_AI_MAX_COST_RUB": "50",

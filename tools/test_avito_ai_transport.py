@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from http.client import IncompleteRead, RemoteDisconnected
 import ssl
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
 from avito_service.ai import OpenAICompatibleReviewer
 from avito_service.config import ServiceConfig
-from avito_service.errors import ExternalServiceError
+from avito_service.errors import ConfigurationError, ExternalServiceError
 from avito_service.normalization import normalize_listing
 
 
@@ -109,6 +110,27 @@ class AvitoAITransportTests(unittest.TestCase):
                     type(reason).__name__,
                 )
 
+    def test_timeout_diagnostic_records_duration_and_route_without_claiming_delivery(self):
+        clock = [100.0]
+
+        def timed_out(*args, **kwargs):
+            clock[0] += 18
+            raise TimeoutError("private endpoint or key must stay hidden")
+
+        with patch("avito_service.ai.time.monotonic", side_effect=lambda: clock[0]), \
+                patch("avito_service.ai.urlopen", side_effect=timed_out) as wire:
+            with self.assertRaises(ExternalServiceError) as caught:
+                self.reviewer._request(self.payload)
+        detail = caught.exception.diagnostics
+        self.assertEqual(wire.call_count, 1)
+        self.assertEqual(detail["transport_elapsed_seconds"], 18)
+        self.assertEqual(detail["transport_timeout_seconds"], 18)
+        self.assertEqual(detail["transport_proxy_mode"], "system")
+        self.assertEqual(detail["transport_phase"], "opening_response")
+        self.assertEqual(detail["request_outcome"], "unknown")
+        self.assertIsNone(detail["http_status"])
+        self.assertNotIn("private", str(caught.exception) + json.dumps(detail))
+
     def test_explicit_single_attempt_does_not_retry_http_429(self):
         self.reviewer.retry_rate_limits = False
         failure = HTTPError("https://api.aitunnel.ru/v1/chat/completions", 429, "limited", {}, None)
@@ -117,6 +139,50 @@ class AvitoAITransportTests(unittest.TestCase):
                 self.reviewer._request(self.payload)
         self.assertEqual(opened.call_count, 1)
         self.assertEqual(caught.exception.code, "AI_RATE_LIMIT")
+
+    def test_direct_route_bypasses_proxy_discovery_only_for_this_reviewer(self):
+        opener = Mock()
+        opener.open.return_value = Stream([event("{}", "stop", usage={"cost_rub": 0.02})])
+        with patch("avito_service.ai.build_opener", return_value=opener) as build, \
+                patch("urllib.request.install_opener") as install, \
+                patch("avito_service.ai.urlopen") as system_open:
+            reviewer = OpenAICompatibleReviewer(replace(self.reviewer.config, ai_proxy_mode="direct"))
+            response = reviewer._request(self.payload)
+        self.assertEqual(reviewer._content(response), "{}")
+        self.assertEqual(build.call_count, 1)
+        # The only override is an empty proxy map. HTTPS uses the unchanged
+        # stdlib handler/default SSL context with certificate verification.
+        self.assertEqual(len(build.call_args.args), 1)
+        self.assertEqual(build.call_args.args[0].proxies, {})
+        self.assertEqual(build.call_args.kwargs, {})
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertEqual(opener.open.call_args.args[0].get_method(), "POST")
+        system_open.assert_not_called()
+        install.assert_not_called()
+
+    def test_direct_transport_failure_keeps_reserve_without_system_fallback(self):
+        opener = Mock()
+        opener.open.side_effect = URLError(ssl.SSLEOFError(8, "private error"))
+        with patch("avito_service.ai.build_opener", return_value=opener), \
+                patch("avito_service.ai.urlopen") as system_open:
+            reviewer = OpenAICompatibleReviewer(replace(self.reviewer.config, ai_proxy_mode="direct"))
+            reviewer.begin_budget(50)
+            with self.assertRaises(ExternalServiceError) as caught:
+                reviewer._request(self.payload)
+        self.assertEqual(opener.open.call_count, 1)
+        system_open.assert_not_called()
+        self.assertEqual(caught.exception.code, "AI_NETWORK_ERROR")
+        self.assertEqual(caught.exception.diagnostics["reservation_state"], "retained_uncertain")
+        self.assertEqual(caught.exception.diagnostics["transport_proxy_mode"], "direct")
+        self.assertGreaterEqual(caught.exception.diagnostics["transport_elapsed_seconds"], 0)
+
+    def test_invalid_proxy_mode_fails_before_opener_or_request(self):
+        with patch("avito_service.ai.build_opener") as build, \
+                patch("avito_service.ai.urlopen") as wire:
+            with self.assertRaises(ConfigurationError):
+                OpenAICompatibleReviewer(replace(self.reviewer.config, ai_proxy_mode="fallback"))
+        build.assert_not_called()
+        wire.assert_not_called()
 
     def test_single_attempt_photo_never_resends_incomplete_coverage(self):
         from avito_service.models import AIReview, ReviewVerdict

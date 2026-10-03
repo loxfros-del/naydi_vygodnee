@@ -30,6 +30,8 @@ class PhotoAccountingTests(unittest.TestCase):
                             "reservation_state": "blocked_before_request" if blocked else "retained_uncertain",
                             "transport_phase": "open_or_read", "transport_error_type": "SSLEOFError",
                             "request_outcome": "unknown", "http_status": None,
+                            "transport_elapsed_seconds": 90.1, "transport_timeout_seconds": 90,
+                            "transport_proxy_mode": "direct",
                         })
 
                 listings = normalize_dataset([console_row(81000001 + index, 44_000) for index in range(3)])
@@ -57,6 +59,9 @@ class PhotoAccountingTests(unittest.TestCase):
                 self.assertEqual(photo["packets"][0]["budget"]["reservation_blocked"], blocked)
                 self.assertEqual(photo["packets"][0]["transport_error_type"], "SSLEOFError")
                 self.assertIsNone(photo["packets"][0]["http_status"])
+                self.assertEqual(photo["packets"][0]["transport_elapsed_seconds"], "90.1")
+                self.assertEqual(photo["packets"][0]["transport_timeout_seconds"], "90")
+                self.assertEqual(photo["packets"][0]["transport_proxy_mode"], "direct")
 
     def test_text_packet_receipts_keep_billed_child_calls_separate_from_parent_estimate(self):
         trace = SearchTrace("mixed-text-cost", SearchRequest("PS5"))

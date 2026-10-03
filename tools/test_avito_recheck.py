@@ -126,6 +126,21 @@ class RecheckFinalistTests(unittest.TestCase):
         self.load_listing.assert_not_called()
         self.account.assert_not_called()
 
+    def test_route_is_explicit_in_preflight_and_service_configuration(self):
+        with patch.object(recheck, "build_service", return_value=self.service) as builder:
+            recheck.main(self.argv + ["--ai-proxy-mode", "direct"])
+        self.assertEqual(builder.call_args.args[0].ai_proxy_mode, "direct")
+        plan = json.loads(self.output.getvalue().removeprefix("RECHECK_PLAN "))
+        self.assertEqual(plan["ai_proxy_mode"], "direct")
+        self.account.assert_not_called()
+        self.assertEqual(self.reviewer.photo_calls, [])
+
+    def test_invalid_route_is_rejected_before_loading_candidate(self):
+        with self.assertRaises(SystemExit):
+            recheck.main(self.argv + ["--ai-proxy-mode", "fallback"])
+        self.load_listing.assert_not_called()
+        self.account.assert_not_called()
+
     def test_live_requires_finite_positive_remaining_allowance_at_most_eight(self):
         for value in (None, "0", "-1", "8.01", "nan", "inf"):
             with self.subTest(value=value), self.assertRaises(SystemExit) as caught:
@@ -165,6 +180,8 @@ class RecheckFinalistTests(unittest.TestCase):
         self.reviewer.photo_error = ExternalServiceError("hidden raw error", code="AI_NETWORK_ERROR", diagnostics={
             "http_status": None, "transport_error_type": "SSLEOFError", "transport_phase": "tls",
             "tls_reason": "UNEXPECTED_EOF_WHILE_READING", "request_outcome": "unknown",
+            "transport_elapsed_seconds": 90.1, "transport_timeout_seconds": 90,
+            "transport_proxy_mode": "direct",
             "reservation_state": "retained_uncertain", "accounted_cost_rub": 4.5,
             "cost_estimated": True, "raw_secret": "must-never-be-saved",
         })
@@ -176,6 +193,9 @@ class RecheckFinalistTests(unittest.TestCase):
         self.assertEqual(result["blocker"], "AI_NETWORK_ERROR")
         self.assertEqual(result["photo_error"]["transport_error_type"], "SSLEOFError")
         self.assertEqual(result["photo_error"]["tls_reason"], "UNEXPECTED_EOF_WHILE_READING")
+        self.assertEqual(result["photo_error"]["transport_elapsed_seconds"], 90.1)
+        self.assertEqual(result["photo_error"]["transport_timeout_seconds"], 90)
+        self.assertEqual(result["photo_error"]["transport_proxy_mode"], "direct")
         self.assertEqual(result["photo_cost"]["accounted_cost_rub"], 4.5)
         self.assertNotIn("raw_secret", json.dumps(result))
         self.assertNotIn("hidden raw error", json.dumps(result))

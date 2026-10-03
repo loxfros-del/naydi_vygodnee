@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import json
 import math
@@ -69,6 +69,8 @@ def main(argv=None) -> None:
     parser.add_argument("--source-output", type=Path, required=True)
     parser.add_argument("--listing-id", required=True)
     parser.add_argument("--authorized-apify-budget-usd", type=float)
+    parser.add_argument("--ai-proxy-mode", choices=("system", "direct"),
+                        help="Choose one AI route before sending; never fall back after a POST")
     parser.add_argument("--live", action="store_true", help="Send one photo request, then refresh only if safe")
     parser.add_argument("--confirm-photo-resend", action="store_true",
                         help="Use only after the owner explicitly confirms resending these photos")
@@ -87,6 +89,8 @@ def main(argv=None) -> None:
         listing, load_text_review(source / "all-decisions.json", args.listing_id), request,
     )
     config = expanded_review_config(load_config())
+    if args.ai_proxy_mode is not None:
+        config = replace(config, ai_proxy_mode=args.ai_proxy_mode)
     service = build_service(config)
     risks = evaluate_rules(listing)
     text_gate = evaluate_verification(listing, risks, text_review, request, stage="text")
@@ -96,6 +100,7 @@ def main(argv=None) -> None:
     plan = {
         "listing_id": listing.listing_id, "saved_price_rub": listing.price,
         "photo_count": len(listing.images), "model": config.ai_model,
+        "ai_proxy_mode": config.ai_proxy_mode,
         "text_gate": text_gate.state.value, "text_reason": text_gate.primary_reason,
         "ai_reserve_rub": reserve, "ai_limit_rub": ai_limit,
         "final_refresh_max_usd": min(config.apify_max_charge_usd, 0.5),
@@ -144,6 +149,7 @@ def main(argv=None) -> None:
                 key: diagnostics.get(key) for key in (
                     "http_status", "provider_error_code", "transport_error_type",
                     "transport_phase", "transport_errno", "transport_winerror", "tls_reason",
+                    "transport_elapsed_seconds", "transport_timeout_seconds", "transport_proxy_mode",
                     "request_outcome", "reservation_rub", "reservation_blocked",
                     "reservation_state", "accounted_cost_rub", "cost_estimated",
                 ) if key in diagnostics

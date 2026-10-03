@@ -16,6 +16,7 @@ REVIEW_PROFILE_PATH = ROOT / "avito_service" / "review_profile.json"
 _PROFILE_NAMES = {
     "AVITO_AI_MODEL", "AVITO_AI_TEXT_BATCH_SIZE", "AVITO_AI_TEXT_MAX_LISTINGS",
     "AVITO_AI_MAX_COST_RUB", "AVITO_APIFY_MAX_CHARGE_USD", "AVITO_REPORT_MAX_COST_RUB",
+    "AVITO_AI_PROXY_MODE",
 }
 _ALLOWED_ENV_NAMES = {
     "APIFY_TOKEN",
@@ -25,6 +26,7 @@ _ALLOWED_ENV_NAMES = {
     "AVITO_AI_API_KEY",
     "AVITO_AI_BASE_URL",
     "AVITO_AI_MODEL",
+    "AVITO_AI_PROXY_MODE",
     "AVITO_AI_TIMEOUT_SECONDS",
     "AVITO_AI_CONCURRENCY",
     "AVITO_AI_TEXT_BATCH_SIZE",
@@ -58,6 +60,7 @@ class ServiceConfig:
     ai_api_key: str = ""
     ai_base_url: str = ""
     ai_model: str = ""
+    ai_proxy_mode: str = "system"
     ai_timeout_seconds: int = 45
     ai_concurrency: int = 3
     ai_text_batch_size: int = 10
@@ -205,6 +208,9 @@ def load_config() -> ServiceConfig:
     # Process environment still wins, including an explicit provider/model switch.
     if os.environ.get("AVITO_REVIEW_PROFILE", "").casefold() != "off":
         local = _apply_review_profile(local)
+    ai_proxy_mode = _env_value(local, "AVITO_AI_PROXY_MODE", "system").strip().casefold()
+    if ai_proxy_mode not in {"system", "direct"}:
+        raise ValueError("AVITO_AI_PROXY_MODE должен быть system или direct")
     return ServiceConfig(
         apify_token=_env_value(local, "APIFY_TOKEN").strip(),
         apify_actor_id=_env_value(
@@ -215,6 +221,7 @@ def load_config() -> ServiceConfig:
         ai_api_key=_env_value(local, "AVITO_AI_API_KEY").strip(),
         ai_base_url=_clean_url(_env_value(local, "AVITO_AI_BASE_URL")),
         ai_model=_env_value(local, "AVITO_AI_MODEL").strip(),
+        ai_proxy_mode=ai_proxy_mode,
         ai_timeout_seconds=_safe_int(local, "AVITO_AI_TIMEOUT_SECONDS", 45, 8, 60),
         ai_concurrency=_safe_int(local, "AVITO_AI_CONCURRENCY", 3, 1, 4),
         ai_text_batch_size=_safe_int(local, "AVITO_AI_TEXT_BATCH_SIZE", 10, 2, 10),

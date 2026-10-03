@@ -498,7 +498,8 @@ class SearchTrace:
                 **{
                     key: str(record[key])[:120] if record.get(key) is not None else None
                     for key in ("transport_phase", "transport_error_type", "transport_errno",
-                                "transport_winerror", "tls_reason", "request_outcome")
+                                "transport_winerror", "tls_reason", "request_outcome",
+                                "transport_elapsed_seconds", "transport_timeout_seconds", "transport_proxy_mode")
                 },
             }
             with self._lock:
