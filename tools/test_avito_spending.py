@@ -76,6 +76,11 @@ class AvitoSpendingTests(unittest.TestCase):
         self.assertEqual(snapshot["date"], "2026-09-10")
         self.assertEqual(snapshot["dailyCommittedUsd"], 1)
         self.assertEqual(snapshot["monthlyCommittedUsd"], 2)
+        self.assertEqual(snapshot["activeReservationUsd"], 1)
+        self.assertEqual(snapshot["monthlyActiveReservationUsd"], 2)
+
+        self.now.return_value = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
+        self.assertEqual(self.guard.snapshot()["monthlyActiveReservationUsd"], 0)
 
     def test_calendar_month_limit_and_rollover(self):
         self.guard.record_existing("prior-runs", 17.5, "2026-09-01")

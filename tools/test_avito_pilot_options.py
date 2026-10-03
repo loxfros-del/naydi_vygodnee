@@ -44,6 +44,28 @@ class PilotOptionTests(unittest.TestCase):
                                    before["monthlyCommittedUsd"] + 7.39)
             self.assertEqual(guard.snapshot()["monthlyLimitUsd"], 18)
 
+            # The account endpoint may not yet include a started/uncertain run.
+            guard.reserve(1.0)
+            pending_guard, pending_details = account_bounded_spending_guard(
+                ServiceConfig(), guard, 8, Account(),
+            )
+            self.assertEqual(pending_details["pending_reservations_usd"], 1.0)
+            self.assertEqual(pending_details["new_spend_ceiling_usd"], 6.39)
+            self.assertEqual(pending_guard.snapshot()["activeReservationUsd"], 1.0)
+            self.assertAlmostEqual(pending_guard.snapshot()["monthlyLimitUsd"], 7.39)
+
+            # A caller's remaining authorization must also stay a hard ceiling.
+            _, lower_details = account_bounded_spending_guard(
+                ServiceConfig(), guard, 0.5, Account(),
+            )
+            self.assertEqual(lower_details["new_spend_ceiling_usd"], 0.5)
+
+            guard.reserve(2.0)
+            near_limit = Account()._json_request("GET", "/users/me/limits")
+            near_limit["data"]["current"]["monthlyUsageUsd"] = 16
+            with patch.object(Account, "_json_request", return_value=near_limit), self.assertRaises(ValueError):
+                account_bounded_spending_guard(ServiceConfig(), guard, 8, Account())
+
     def test_legacy_phone_defaults_keep_specs_without_an_implicit_price_ceiling(self):
         request = build_request(parse_options([]))
         self.assertEqual((request.query, request.location, request.category), ("iPhone 13", "Москва", "phones"))

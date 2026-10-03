@@ -218,7 +218,7 @@ class AvitoAnalysisService:
         try:
             return self.reviewer.review_photos(listing, text_review)
         except AvitoServiceError as exc:
-            if self._surface_provider_failure(exc):
+            if self._surface_provider_failure(exc) or exc.code == "AI_BUDGET":
                 raise
             return replace(text_review, error=str(exc), verdict=ReviewVerdict.CAUTION)
         except Exception:
@@ -859,8 +859,10 @@ class AvitoAnalysisService:
         completed_target = completed_quota()
         cursor = 0
         photo_provider_failed = Event()
+        photo_error_estimates: dict[str, bool] = {}
 
         def run_photo(listing_id: str) -> AIReview:
+            attempt_started = time.monotonic()
             worker_deadline = getattr(self.reviewer, "set_deadline", None)
             if callable(worker_deadline):
                 worker_deadline(deadline_at)
@@ -869,9 +871,36 @@ class AvitoAnalysisService:
             except AvitoServiceError as exc:
                 photo_provider_failed.set()
                 text_review = by_id[listing_id]
+                diagnostics = getattr(exc, "diagnostics", {}) or {}
+                blocked = bool(diagnostics.get("reservation_blocked") or exc.code == "AI_BUDGET")
+                # The remaining search allowance is not a provider charge. Only
+                # a retained reservation may be charged for an uncertain request.
+                accounted = 0.0 if blocked else max(0.0, float(diagnostics.get("accounted_cost_rub") or 0.0))
+                # Older/custom reviewers can fail without a cost diagnostic.
+                # Do not invent an amount or present that unknown charge as free.
+                estimated = not blocked and (
+                    "accounted_cost_rub" not in diagnostics or bool(diagnostics.get("cost_estimated"))
+                )
+                photo_error_estimates[listing_id] = estimated
+                if trace is not None:
+                    trace.record_ai_packet({
+                        "listing_ids": [listing_id], "batch_size": 1, "attempt": 1,
+                        "expected_result_count": 1, "completed_result_count": 0,
+                        "missing_ids": [listing_id],
+                        "duration_ms": round((time.monotonic() - attempt_started) * 1000),
+                        "model": getattr(getattr(self.reviewer, "config", None), "ai_model", type(self.reviewer).__name__),
+                        "provider_error_code": exc.code,
+                        **{key: diagnostics.get(key) for key in (
+                            "http_status", "transport_phase", "transport_error_type", "transport_errno",
+                            "transport_winerror", "tls_reason", "request_outcome",
+                        )},
+                        "budget": {**diagnostics, "accounted_cost_rub": accounted,
+                                   "cost_estimated": estimated, "reservation_blocked": blocked},
+                    }, kind="photo")
                 return replace(text_review, error=str(exc), verdict=ReviewVerdict.CAUTION,
-                    cost_rub=text_review.cost_rub + remaining_budget / batch_size,
-                    cost_estimated=True)
+                    cost_rub=text_review.cost_rub + accounted,
+                    request_count=text_review.request_count + (0 if blocked else 1),
+                    cost_estimated=text_review.cost_estimated or estimated)
 
         while cursor < len(photo_ids) and completed_target < request.desired_results:
             _raise_if_cancelled(progress)
@@ -935,6 +964,8 @@ class AvitoAnalysisService:
                             )
             if trace is not None:
                 photo_costs = []
+                photo_actual_cost = 0.0
+                photo_estimated_cost = 0.0
                 photo_calls = 0
                 photo_retries = 0
                 input_tokens = 0
@@ -944,7 +975,12 @@ class AvitoAnalysisService:
                 for listing_id in batch_ids:
                     before = by_id[listing_id]
                     after = batch_reviews[listing_id]
-                    photo_costs.append(max(0.0, after.cost_rub - before.cost_rub))
+                    photo_cost = max(0.0, after.cost_rub - before.cost_rub)
+                    photo_costs.append(photo_cost)
+                    if photo_error_estimates.get(listing_id, after.cost_estimated):
+                        photo_estimated_cost += photo_cost
+                    else:
+                        photo_actual_cost += photo_cost
                     item_calls = max(0, after.request_count - before.request_count)
                     photo_calls += item_calls
                     photo_retries += max(0, item_calls - 1)
@@ -966,6 +1002,8 @@ class AvitoAnalysisService:
                     output_tokens=output_tokens if output_known else None,
                     errors=sum(bool(batch_reviews[item].error) for item in batch_ids),
                     retries=photo_retries,
+                    actual_cost_rub=photo_actual_cost,
+                    estimated_cost_rub=photo_estimated_cost,
                 )
             for listing_id in batch_ids:
                 listing = by_listing_id[listing_id]

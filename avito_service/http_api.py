@@ -135,6 +135,8 @@ class AvitoHTTPServer(ThreadingHTTPServer):
             raise ConfigurationError("Для сетевого доступа задайте AVITO_OWNER_TOKEN или AVITO_ACCESS_TOKEN в окружении процесса.")
         if any(token and len(token) < 32 for token in (owner_token, access_token)):
             raise ConfigurationError("Ключ доступа должен содержать не менее 32 символов.")
+        if owner_token and access_token and secrets.compare_digest(owner_token.encode(), access_token.encode()):
+            raise ConfigurationError("Ключ владельца и ключ доступа участников должны различаться.")
         self.analysis_service = service
         self.service_config = config
         trace_store = (

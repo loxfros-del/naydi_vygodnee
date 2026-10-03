@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from http.client import HTTPException
 import json
 import math
 import re
@@ -792,6 +793,8 @@ class OpenAICompatibleReviewer:
                 payload.setdefault("reasoning", {"effort": "none"})
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         for attempt in range(2):
+            http_status = None
+            transport_phase = "opening_response"
             request = Request(
                 endpoint,
                 data=body,
@@ -811,6 +814,8 @@ class OpenAICompatibleReviewer:
                         raise ExternalServiceError("Лимит времени AI-потока исчерпан.", code="AI_TIMEOUT")
                 with urlopen(request, timeout=timeout) as response:
                     http_status = getattr(response, "status", None)
+                    http_status = http_status if isinstance(http_status, int) else None
+                    transport_phase = "reading_response"
                     if streaming:
                         result = self._stream_response(response, deadline_at)
                         self._ensure_stream_cost(result, payload)
@@ -868,35 +873,43 @@ class OpenAICompatibleReviewer:
                     "Нейросеть вернула некорректный JSON-конверт.",
                     code="AI_INVALID_RESPONSE",
                     diagnostics={
-                        "http_status": None,
+                        "http_status": http_status,
+                        "transport_phase": transport_phase,
                         "parse_error": f"provider_envelope_json:{exc.msg}",
                     },
                 ) from None
-            except TimeoutError:
+            except (OSError, HTTPException) as exc:
+                # urllib can wrap handshake failures in URLError, but socket/TLS
+                # failures while reading a response escape as raw exceptions.
+                # No HTTP response does not prove that a POST was never received.
+                reason = exc.reason if isinstance(exc, URLError) else exc
+                timeout_error = isinstance(reason, (TimeoutError, socket.timeout))
+                diagnostics = {
+                    "http_status": http_status,
+                    "transport_phase": transport_phase,
+                    "transport_error_type": type(reason).__name__,
+                    "request_outcome": "unknown",
+                }
+                for name in ("errno", "winerror"):
+                    value = getattr(reason, name, None)
+                    if isinstance(value, int):
+                        diagnostics["transport_" + name] = value
+                ssl_reason = getattr(reason, "reason", None)
+                if isinstance(ssl_reason, str) and re.fullmatch(r"[A-Z_]{1,80}", ssl_reason):
+                    diagnostics["tls_reason"] = ssl_reason
                 raise ExternalServiceError(
-                    "Таймаут соединения с нейросетью.",
-                    code="AI_TIMEOUT",
-                    diagnostics={"http_status": None, "transport_error_type": "TimeoutError"},
+                    "Таймаут соединения с нейросетью." if timeout_error
+                    else "Сетевая ошибка соединения с нейросетью.",
+                    code="AI_TIMEOUT" if timeout_error else "AI_NETWORK_ERROR",
+                    retryable=False,
+                    diagnostics=diagnostics,
                 ) from None
-            except URLError as exc:
-                reason = getattr(exc, "reason", None)
-                if isinstance(reason, (TimeoutError, socket.timeout)):
-                    raise ExternalServiceError(
-                        "Таймаут соединения с нейросетью.",
-                        code="AI_TIMEOUT",
-                        diagnostics={
-                            "http_status": None,
-                            "transport_error_type": type(reason).__name__,
-                        },
-                    ) from None
-                raise ExternalServiceError(
-                    "Сетевая ошибка соединения с нейросетью.",
-                    code="AI_NETWORK_ERROR",
-                    diagnostics={
-                        "http_status": None,
-                        "transport_error_type": type(reason).__name__ if reason is not None else "URLError",
-                    },
-                ) from None
+            except ExternalServiceError as exc:
+                diagnostics = dict(getattr(exc, "diagnostics", {}) or {})
+                diagnostics.setdefault("http_status", http_status)
+                diagnostics.setdefault("transport_phase", transport_phase)
+                exc.diagnostics = diagnostics
+                raise
         raise ExternalServiceError("AI временно ограничила частоту запросов.", code="AI_RATE_LIMIT")
 
     @staticmethod
@@ -1656,6 +1669,10 @@ class OpenAICompatibleReviewer:
                     "duration_ms": duration_ms,
                     "provider_error_code": diagnostics.get("provider_error_code") or exc.code,
                     "http_status": diagnostics.get("http_status", transport_meta.get("http_status")),
+                    **{key: diagnostics[key] for key in (
+                        "transport_phase", "transport_error_type", "transport_errno",
+                        "transport_winerror", "tls_reason", "request_outcome",
+                    ) if key in diagnostics},
                     "parse_schema_error": diagnostics.get("parse_error"),
                     "expected_result_count": len(group),
                     "returned_result_count": 0,
@@ -1695,7 +1712,9 @@ class OpenAICompatibleReviewer:
             ))
         return tuple(results)
 
-    def review_photos(self, listing: NormalizedListing, text_review: AIReview) -> AIReview:
+    def review_photos(
+        self, listing: NormalizedListing, text_review: AIReview, *, allow_retry: bool = True,
+    ) -> AIReview:
         if not text_review.text_analyzed:
             return replace(text_review, error=text_review.error or "Текстовый этап не завершён.")
         if not listing.images:
@@ -1708,7 +1727,7 @@ class OpenAICompatibleReviewer:
         input_tokens: int | None = None
         output_tokens: int | None = None
         request_count = 0
-        for attempt in range(2):
+        for attempt in range(2 if allow_retry else 1):
             try:
                 request_count += 1
                 response = self._request(payload)
@@ -1725,7 +1744,7 @@ class OpenAICompatibleReviewer:
                 if exc.code in _PROVIDER_FAILURE_CODES:
                     raise
                 message = str(exc).casefold()
-                if attempt == 0 and (
+                if allow_retry and attempt == 0 and (
                     "не вернула текст" in message
                     or "ошибку генерации" in message
                     or "невалидный json" in message
@@ -1744,7 +1763,7 @@ class OpenAICompatibleReviewer:
             if review.is_complete_for(listing):
                 return review
             last_review = review
-            if attempt == 0:
+            if allow_retry and attempt == 0:
                 payload["messages"][1]["content"][0]["text"] += (
                     "\nПовтори анализ: предыдущий ответ не подтвердил каждый индекс фото. "
                     "Прочитай описание полностью и проверь все изображения без пропусков."

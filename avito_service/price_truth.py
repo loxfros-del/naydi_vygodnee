@@ -17,8 +17,12 @@ _CYRILLIC_TO_LATIN = str.maketrans({
     "у": "y", "к": "k", "м": "m", "т": "t", "в": "b", "н": "h",
 })
 _PRICE_NUMBER = re.compile(
-    r"(?<![\d.,])(?P<number>\d{1,3}(?:[ .]\d{3})+|\d{2,6})"
-    r"\s*(?P<unit>к\b|k\b|тыс(?:яч[аиу]?)?\b|₽|руб(?:\.|л(?:ей|я)?)?\b)?",
+    r"(?<![\w.,])(?P<number>\d{1,3}(?:[ .]\d{3})+|\d{2,6})(?!\d)"
+    r"\s*(?P<unit>к\b|k\b|тыс(?:яч[аиу]?)?\b|₽|руб(?:\.|л(?:ей|я)?)?\b)?(?!\w)",
+    re.IGNORECASE,
+)
+_NON_PRICE_IDENTIFIER = re.compile(
+    r"\b[a-z]{1,4}[-‐‑‒–—−]\d+(?:[-‐‑‒–—−]\d+)+\b",
     re.IGNORECASE,
 )
 _WORD_TENS = {
@@ -138,7 +142,13 @@ def _word_prices(value: str) -> list[tuple[int, int, int]]:
 
 def _numeric_prices(value: str) -> list[tuple[int, int, int]]:
     results: list[tuple[int, int, int]] = []
-    for match in _PRICE_NUMBER.finditer(_normalized(value)):
+    normalized = _normalized(value)
+    identifier_spans = [match.span() for match in _NON_PRICE_IDENTIFIER.finditer(normalized)]
+    for match in _PRICE_NUMBER.finditer(normalized):
+        # A dash inside a compound error code is not the separator of a price
+        # row: «PS5 (CE-108255-1)» must not override the advertised price.
+        if any(start < match.end("number") and match.start("number") < end for start, end in identifier_spans):
+            continue
         number = match.group("number")
         unit = (match.group("unit") or "").casefold()
         compact = number.replace(" ", "").replace(".", "")

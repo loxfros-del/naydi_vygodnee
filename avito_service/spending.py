@@ -289,11 +289,16 @@ class SpendingGuard:
             daily, monthly = self._totals(state, day)
             actual, estimate, active = self._breakdown(state, day)
             period_start, period_end = self._period(day)
+            monthly_active = sum(
+                record["reserved_units"] for record in state["records"].values()
+                if record["settled_units"] is None and period_start <= record["date"] < period_end
+            )
             return {"date": day, "dailyCommittedUsd": daily / _UNITS_PER_USD,
                     "monthlyCommittedUsd": monthly / _UNITS_PER_USD,
                     "actualSpendUsd": actual / _UNITS_PER_USD,
                     "settledEstimateUsd": estimate / _UNITS_PER_USD,
                     "activeReservationUsd": active / _UNITS_PER_USD,
+                    "monthlyActiveReservationUsd": monthly_active / _UNITS_PER_USD,
                     "dailyLimitUsd": self.daily_limit_units / _UNITS_PER_USD,
                     "monthlyLimitUsd": self.monthly_limit_units / _UNITS_PER_USD,
                     "monthlyPeriodStart": period_start,

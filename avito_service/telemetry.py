@@ -419,14 +419,35 @@ class SearchTrace:
                         float(section["estimated_cost_rub"] or 0.0)
                         + max(0.0, float(estimated_cost_rub or 0.0)), 4,
                     )
+                # A review can combine an uncertain parent request with billed
+                # child replies. Its boolean estimate flag loses that split.
+                # Use complete packet receipts when they reconcile to the total.
+                packets = section["packets"]
+                packet_budgets = [packet["budget"] for packet in packets]
+                packet_amounts = [_number(budget.get("accounted_cost_rub")) for budget in packet_budgets]
+                packet_calls = sum(not budget.get("reservation_blocked") for budget in packet_budgets)
+                if (kind == "text" and packets and packet_calls == section["calls"]
+                        and all(value is not None and value >= 0 for value in packet_amounts)
+                        and all(isinstance(budget.get("cost_estimated"), bool) for budget in packet_budgets)
+                        and math.isclose(sum(packet_amounts),
+                            float(section["actual_cost_rub"] or 0) + float(section["estimated_cost_rub"] or 0),
+                            rel_tol=0, abs_tol=0.0001)):
+                    section["actual_cost_rub"] = round(sum(
+                        value for value, budget in zip(packet_amounts, packet_budgets)
+                        if not budget["cost_estimated"]), 4)
+                    section["estimated_cost_rub"] = round(sum(
+                        value for value, budget in zip(packet_amounts, packet_budgets)
+                        if budget["cost_estimated"]), 4)
                 self._refresh_stage_costs_locked()
             self._persist()
         except Exception:
             pass
 
-    def record_ai_packet(self, record: Mapping[str, Any]) -> None:
+    def record_ai_packet(self, record: Mapping[str, Any], *, kind: str = "text") -> None:
         """Store bounded structural metadata; raw prompts/responses are rejected by omission."""
         try:
+            if kind not in {"text", "photo"}:
+                return
             def ids(name: str) -> list[str]:
                 value = record.get(name)
                 if not isinstance(value, (list, tuple)):
@@ -474,9 +495,14 @@ class SearchTrace:
                 ),
                 "will_split": bool(record.get("will_split")),
                 "budget": safe_budget,
+                **{
+                    key: str(record[key])[:120] if record.get(key) is not None else None
+                    for key in ("transport_phase", "transport_error_type", "transport_errno",
+                                "transport_winerror", "tls_reason", "request_outcome")
+                },
             }
             with self._lock:
-                packets = self._data["ai"]["text"]["packets"]
+                packets = self._data["ai"][kind]["packets"]
                 if len(packets) < 100:
                     packets.append(safe)
             self._persist()

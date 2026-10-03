@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+from http.client import IncompleteRead, RemoteDisconnected
+import ssl
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -107,11 +109,77 @@ class AvitoAITransportTests(unittest.TestCase):
                     type(reason).__name__,
                 )
 
+    def test_explicit_single_attempt_does_not_retry_http_429(self):
+        self.reviewer.retry_rate_limits = False
+        failure = HTTPError("https://api.aitunnel.ru/v1/chat/completions", 429, "limited", {}, None)
+        with patch("avito_service.ai.urlopen", side_effect=failure) as opened:
+            with self.assertRaises(ExternalServiceError) as caught:
+                self.reviewer._request(self.payload)
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(caught.exception.code, "AI_RATE_LIMIT")
+
+    def test_single_attempt_photo_never_resends_incomplete_coverage(self):
+        from avito_service.models import AIReview, ReviewVerdict
+        listing = normalize_listing({"id": "12345678", "title": "PS5", "price": 48000,
+                                     "images": ["https://01.img.avito.st/photo.jpg"]})
+        text = AIReview(listing_id=listing.listing_id, text_analyzed=True, photos_analyzed=False,
+                        matches_request=True, verdict=ReviewVerdict.APPROVE)
+        answer = json.dumps({"text_analyzed": True, "photos_analyzed": False,
+                             "photo_coverage": [], "matches_request": True, "verdict": "caution"})
+        with patch("avito_service.ai.urlopen", return_value=Stream([
+            event(answer, "stop", usage={"cost_rub": 0.02})
+        ])) as opened:
+            review = self.reviewer.review_photos(listing, text, allow_retry=False)
+        self.assertEqual(opened.call_count, 1)
+        self.assertFalse(review.is_complete_for(listing))
+
     def test_usage_on_stop_does_not_wait_for_another_event(self):
         stream = Stream([event("{}", "stop", usage={"cost_rub": 0.02}), AssertionError("must not read again")])
         result, _ = self.request(stream)
         self.assertEqual(self.reviewer._cost_rub(result), 0.02)
         self.assertEqual(stream.reads, 1)
+
+    def test_raw_transport_failures_retain_reserve_and_never_repeat_post(self):
+        for failure in (ssl.SSLEOFError(8, "private URL/key"),
+                        ConnectionResetError(10054, "private URL/key"),
+                        RemoteDisconnected("private URL/key")):
+            with self.subTest(failure=type(failure).__name__):
+                self.reviewer.begin_budget(50)
+                with patch("avito_service.ai.urlopen", side_effect=failure) as wire:
+                    with self.assertRaises(ExternalServiceError) as caught:
+                        self.reviewer._request(self.payload)
+                self.assertEqual(wire.call_count, 1)
+                self.assertEqual(caught.exception.code, "AI_NETWORK_ERROR")
+                detail = caught.exception.diagnostics
+                self.assertEqual(detail["transport_error_type"], type(failure).__name__)
+                self.assertEqual(detail["transport_phase"], "opening_response")
+                self.assertIsNone(detail["http_status"])
+                self.assertEqual(detail["request_outcome"], "unknown")
+                self.assertEqual(detail["reservation_state"], "retained_uncertain")
+                self.assertGreater(detail["accounted_cost_rub"], 0)
+                self.assertEqual(self.reviewer.budget_snapshot()["active_reservations"], 0)
+                self.assertNotIn("private", str(caught.exception) + json.dumps(detail))
+
+    def test_read_failure_preserves_received_http_status_and_uncertain_cost(self):
+        self.reviewer.begin_budget(50)
+        stream = Stream([IncompleteRead(b"private partial response")])
+        stream.status = 200
+        with self.assertRaises(ExternalServiceError) as caught:
+            self.request(stream)
+        detail = caught.exception.diagnostics
+        self.assertEqual(detail["http_status"], 200)
+        self.assertEqual(detail["transport_phase"], "reading_response")
+        self.assertEqual(detail["transport_error_type"], "IncompleteRead")
+        self.assertEqual(detail["reservation_state"], "retained_uncertain")
+        self.assertTrue(stream.closed)
+        self.assertNotIn("private", str(caught.exception) + json.dumps(detail))
+
+    def test_stream_parse_failure_preserves_received_http_status(self):
+        stream = Stream([event("{}", "length")])
+        stream.status = 200
+        with self.assertRaises(ExternalServiceError) as caught:
+            self.request(stream)
+        self.assertEqual(caught.exception.diagnostics["http_status"], 200)
 
     def test_utf8_and_crlf_events_can_split_at_any_byte(self):
         raw = b": heartbeat\r\n\r\n" + event('{"text":"Проверено"}', "stop").replace(b"\n", b"\r\n")

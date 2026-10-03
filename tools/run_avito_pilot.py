@@ -7,8 +7,10 @@ from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 import json
 import math
+import os
 from pathlib import Path
 import sys
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +27,37 @@ from avito_service.telemetry import PilotTraceStore, SearchTrace
 
 
 def write_json(path, value):
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    """Commit durable JSON before the next paid step; retain the old file on failure."""
+    path = Path(path)
+    payload = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    pending = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as stream:
+            pending = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(pending, path)
+    finally:
+        if pending is not None:
+            pending.unlink(missing_ok=True)
+
+
+def console_line(value):
+    """Best-effort diagnostics must never invalidate a paid search or its trace."""
+    stream = sys.stdout
+    if stream is None:
+        return
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    message = str(value).encode(encoding, errors="backslashreplace").decode(encoding)
+    try:
+        print(message, file=stream, flush=True)
+    except (OSError, ValueError):
+        # A closed console/pipe is independent of the UTF-8 artifacts on disk.
+        pass
 
 
 def funnel_from_audit(report):
@@ -96,7 +128,7 @@ class PilotProvider(ZenStudioProvider):
             raise ValueError("Recovered market does not match this pilot query")
         batch = CollectionBatch(tuple(rows), float(receipt["usageTotalUsd"]), False,
                                 requested_count=search.max_results, capped_count=len(rows))
-        print("PILOT_REUSE existing paid market; no actor start", flush=True)
+        console_line("PILOT_REUSE existing paid market; no actor start")
         self._record_batch("market", batch)
         return batch
 
@@ -148,7 +180,7 @@ class PilotProvider(ZenStudioProvider):
                      "address", "delivery", "deliveryAvailable", "scrapedAt", "collectedAt"}
         write_json(self.output / f"{stage}-facts.json", [
             {key:value for key,value in row.items() if key in permitted} for row in batch.items])
-        print("PILOT_DIAGNOSTICS " + json.dumps(summary, ensure_ascii=False), flush=True)
+        console_line("PILOT_DIAGNOSTICS " + json.dumps(summary, ensure_ascii=False))
 
 
 def _positive_amount(value: str) -> float:
@@ -237,8 +269,12 @@ def account_bounded_spending_guard(config, original_guard, authorized_usd, accou
             or account_start.isoformat() != snapshot["monthlyPeriodStart"]
             or account_end.isoformat() != snapshot["monthlyPeriodEndExclusive"]):
         raise ValueError("Расчётный период или доступный бюджет Apify не подтверждён.")
-    # Keep 50 cents for delayed provider billing and rounded dashboard usage.
-    available = math.floor(min(authorized_usd, account_limit - account_used - 0.5) * 10_000) / 10_000
+    # Active starts may not be included in the account's delayed billing yet.
+    # Keep their obligations plus 50 cents for delayed/rounded provider usage.
+    pending_usd = float(snapshot["monthlyActiveReservationUsd"])
+    if not math.isfinite(pending_usd) or pending_usd < 0:
+        raise ValueError("Не подтверждён размер незавершённых резервов Apify.")
+    available = math.floor(min(authorized_usd, account_limit - account_used - pending_usd - 0.5) * 10_000) / 10_000
     if available < 0.02:
         raise ValueError("После страхового остатка нет бюджета для нового запуска Apify.")
     guard = SpendingGuard(
@@ -250,6 +286,7 @@ def account_bounded_spending_guard(config, original_guard, authorized_usd, accou
     )
     return guard, {"account_used_usd": round(account_used, 5),
                    "account_hard_limit_usd": account_limit,
+                   "pending_reservations_usd": round(pending_usd, 8),
                    "new_spend_ceiling_usd": available,
                    "reserve_buffer_usd": 0.5}
 
@@ -260,10 +297,10 @@ def main(argv=None):
     from avito_service.config import expanded_review_config
     from avito_service.jobs import WORKER_DEADLINE_SECONDS
     config = apply_config_overrides(expanded_review_config(load_config()), args)
-    print(json.dumps({"ready":config.readiness(), "apifyCapUsd":config.apify_max_charge_usd,
+    console_line(json.dumps({"ready":config.readiness(), "apifyCapUsd":config.apify_max_charge_usd,
                       "aiBudgetRub":config.ai_max_cost_rub, "model":config.ai_model,
                       "reportBudgetRub":config.report_max_cost_rub, "live":args.live,
-                      "request":asdict(request)}, ensure_ascii=False), flush=True)
+                      "request":asdict(request)}, ensure_ascii=False))
     if not args.live:
         return
     if not all(config.readiness().values()):
@@ -284,11 +321,11 @@ def main(argv=None):
             config, spending_guard, args.authorized_apify_budget_usd,
             ZenStudioProvider(config),
         )
-        print("PILOT_ACCOUNT_BUDGET " + json.dumps(account_budget), flush=True)
+        console_line("PILOT_ACCOUNT_BUDGET " + json.dumps(account_budget))
     service.provider = PilotProvider(service.provider.config, output, args.resume_market,
                                      spending_guard=spending_guard)
     started = time.monotonic()
-    print("PILOT_OUTPUT " + str(output), flush=True)
+    console_line("PILOT_OUTPUT " + str(output))
     try:
         if args.collect_only:
             deadline = time.monotonic() + 180
@@ -301,12 +338,12 @@ def main(argv=None):
                        "candidates":len(candidates.items), "aiCalls":0,
                        "accountedApifyCostUsd":market.apify_cost_usd + candidates.apify_cost_usd}
             write_json(output / "collection-only.json", summary)
-            print("PILOT_RESULT " + json.dumps(summary, ensure_ascii=False), flush=True)
+            console_line("PILOT_RESULT " + json.dumps(summary, ensure_ascii=False))
             return
         assert trace is not None
         def progress(stage, message, percent):
             trace.stage(stage)
-            print(f"[{percent}% {stage}] {message}", flush=True)
+            console_line(f"[{percent}% {stage}] {message}")
 
         progress.trace = trace
         report = service.search(request, deadline_seconds=WORKER_DEADLINE_SECONDS,
@@ -318,16 +355,20 @@ def main(argv=None):
         write_json(output / "all-decisions.json", [item.public_dict() for item in report.recommendations])
         funnel = funnel_from_audit(audit)
         write_json(output / "funnel.json", funnel)
-        print("PILOT_FUNNEL " + " -> ".join(f"{key}={value}" for key, value in funnel.items()), flush=True)
+        closest = None
         if funnel["CONFIRMED"] == 0:
             closest = closest_failures(audit)
             write_json(output / "closest-failures.json", closest)
-            print("PILOT_CLOSEST " + json.dumps(closest, ensure_ascii=False), flush=True)
+        result = {"visible":len(public["recommendations"]),
+            "costs":report.costs.admin_dict(), "audit":report.pipeline.admin_dict(),
+            "warnings":report.admin_warnings, "elapsed":round(time.monotonic()-started,2)}
+        write_json(output / "result.json", result)
         trace.finish_report(report, usd_rub_rate=config.usd_rub_rate)
         trace.worker_stopped(result_published=True)
-        print("PILOT_RESULT " + json.dumps({"visible":len(public["recommendations"]),
-            "costs":report.costs.admin_dict(), "audit":report.pipeline.admin_dict(),
-            "warnings":report.admin_warnings, "elapsed":round(time.monotonic()-started,2)}, ensure_ascii=False), flush=True)
+        console_line("PILOT_FUNNEL " + " -> ".join(f"{key}={value}" for key, value in funnel.items()))
+        if closest is not None:
+            console_line("PILOT_CLOSEST " + json.dumps(closest, ensure_ascii=False))
+        console_line("PILOT_RESULT " + json.dumps(result, ensure_ascii=False))
     except Exception as exc:
         if trace is not None:
             trace.finish_error(getattr(exc, "code", "PILOT_ERROR"), type(exc).__name__)
@@ -337,7 +378,7 @@ def main(argv=None):
         if getattr(exc, "apify_context", None):
             error["apify_context"] = exc.apify_context
         write_json(output / "failure.json", error)
-        print("PILOT_FAILED " + json.dumps(error, ensure_ascii=False), flush=True)
+        console_line("PILOT_FAILED " + json.dumps(error, ensure_ascii=False))
         raise SystemExit(1) from None
 
 

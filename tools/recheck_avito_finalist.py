@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import sys
 import time
@@ -62,12 +64,21 @@ def load_text_review(path: Path, listing_id: str) -> AIReview:
     return AIReview(**mapping)
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-output", type=Path, required=True)
     parser.add_argument("--listing-id", required=True)
-    parser.add_argument("--authorized-apify-budget-usd", type=float, required=True)
-    args = parser.parse_args()
+    parser.add_argument("--authorized-apify-budget-usd", type=float)
+    parser.add_argument("--live", action="store_true", help="Send one photo request, then refresh only if safe")
+    parser.add_argument("--confirm-photo-resend", action="store_true",
+                        help="Use only after the owner explicitly confirms resending these photos")
+    args = parser.parse_args(argv)
+    if args.live and not args.confirm_photo_resend:
+        parser.error("Live requires separate owner confirmation of this photo resend.")
+    if args.live and (args.authorized_apify_budget_usd is None
+                     or not math.isfinite(args.authorized_apify_budget_usd)
+                     or not 0 < args.authorized_apify_budget_usd <= 8):
+        parser.error("Live requires the remaining authorized Apify budget, at most $8.")
     source = args.source_output.resolve()
     listing = load_listing(source / "candidates-normalized.json", args.listing_id)
     request = SearchRequest("PS5", location="Ярославль", category="gaming",
@@ -77,41 +88,75 @@ def main() -> None:
     )
     config = expanded_review_config(load_config())
     service = build_service(config)
+    risks = evaluate_rules(listing)
+    text_gate = evaluate_verification(listing, risks, text_review, request, stage="text")
+    payload = service.reviewer.build_photo_payload(listing, config.ai_model, text_review)
+    reserve = service.reviewer.estimate_payload_cost(payload)
+    ai_limit = min(config.ai_max_cost_rub, 50.0)
+    plan = {
+        "listing_id": listing.listing_id, "saved_price_rub": listing.price,
+        "photo_count": len(listing.images), "model": config.ai_model,
+        "text_gate": text_gate.state.value, "text_reason": text_gate.primary_reason,
+        "ai_reserve_rub": reserve, "ai_limit_rub": ai_limit,
+        "final_refresh_max_usd": min(config.apify_max_charge_usd, 0.5),
+        "automatic_paid_retries": False, "live": args.live,
+    }
+    print("RECHECK_PLAN " + json.dumps(plan, ensure_ascii=True), flush=True)
+    if not args.live:
+        return
+    if (text_gate.state is VerificationState.FAIL or text_gate.next_stage != "photo_ai"
+            or text_review.error or not listing.images or reserve > ai_limit):
+        raise ValueError("Candidate text/photos/budget preflight failed before any paid call.")
+    # Read the current account immediately before any spending. Do not change
+    # its hard limit. The caller supplies the *remaining* authorized allowance.
     guard, account = account_bounded_spending_guard(
         config, service.provider.spending_guard, args.authorized_apify_budget_usd,
         ZenStudioProvider(config),
     )
     output = ROOT / "runtime" / "avito_pilot" / (
-        "recheck-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        "recheck-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     )
     output.mkdir(parents=True, exist_ok=False)
     service.provider = PilotProvider(config, output, spending_guard=guard)
     print("RECHECK_BUDGET " + json.dumps(account), flush=True)
-    print("RECHECK_OUTPUT " + str(output), flush=True)
+    print("RECHECK_OUTPUT " + json.dumps(str(output), ensure_ascii=True), flush=True)
     result = {"listing_id": args.listing_id, "photo_attempted": False,
-              "final_refresh_attempted": False, "finalists": []}
+              "final_refresh_attempted": False, "finalists": [], "plan": plan,
+              "account": account}
+    write_json(output / "plan.json", plan)
     try:
-        risks = evaluate_rules(listing)
-        text_gate = evaluate_verification(listing, risks, text_review, request, stage="text")
-        if text_gate.state is VerificationState.FAIL:
-            result["blocker"] = text_gate.primary_reason
-            return
-        service.reviewer.begin_budget(min(config.ai_max_cost_rub, 50.0))
+        service.reviewer.begin_budget(ai_limit)
+        service.reviewer.retry_rate_limits = False
         deadline = time.monotonic() + 240
         service.reviewer.set_deadline(deadline)
         result["photo_attempted"] = True
+        # Persist before POST: even process termination must leave a conservative
+        # liability, never an empty result that looks like a free failure.
+        result["photo_cost"] = {"reservation_state": "retained_uncertain",
+                                "accounted_cost_rub": reserve, "cost_estimated": True}
+        write_json(output / "result.json", result)
         try:
-            photo_review = service.reviewer.review_photos(listing, text_review)
+            photo_review = service.reviewer.review_photos(listing, text_review, allow_retry=False)
         except AvitoServiceError as exc:
             diagnostics = getattr(exc, "diagnostics", {}) or {}
             result["blocker"] = getattr(exc, "code", "PHOTO_PROVIDER_ERROR")
             result["photo_error"] = {
                 key: diagnostics.get(key) for key in (
                     "http_status", "provider_error_code", "transport_error_type",
+                    "transport_phase", "transport_errno", "transport_winerror", "tls_reason",
+                    "request_outcome", "reservation_rub", "reservation_blocked",
                     "reservation_state", "accounted_cost_rub", "cost_estimated",
                 ) if key in diagnostics
             }
+            for key in ("reservation_state", "accounted_cost_rub", "cost_estimated"):
+                if key in diagnostics:
+                    result["photo_cost"][key] = diagnostics[key]
             return
+        write_json(output / "photo-review.json", asdict(photo_review))
+        result["photo_cost"] = {
+            "reservation_state": "settled_estimate" if photo_review.cost_estimated else "settled_actual",
+            "accounted_cost_rub": photo_review.cost_rub, "cost_estimated": photo_review.cost_estimated,
+        }
         result["photo"] = {
             "complete": photo_review.is_complete_for(listing),
             "coverage": len(photo_review.photo_coverage), "expected": len(listing.images),
@@ -126,8 +171,10 @@ def main() -> None:
             result["blocker"] = gate.primary_reason or "SAFETY_GATE"
             return
         result["final_refresh_attempted"] = True
+        write_json(output / "result.json", result)
         checked, apify_cost, estimated = service._verify_finalists(
-            (analyzed,), request, deadline_at=deadline, allowance_usd=0.5,
+            (analyzed,), request, deadline_at=deadline,
+            allowance_usd=min(plan["final_refresh_max_usd"], account["new_spend_ceiling_usd"]),
             progress=None,
         )
         result["final_refresh"] = {"cost_usd": apify_cost, "estimated": estimated,
@@ -138,7 +185,12 @@ def main() -> None:
         ]
         if not result["finalists"]:
             result["blocker"] = "FINAL_REFRESH_OR_SAFETY"
+    except Exception as exc:
+        result["blocker"] = getattr(exc, "code", "RECHECK_ERROR")
+        result["error_type"] = type(exc).__name__
+        raise
     finally:
+        result["ai_budget"] = service.reviewer.budget_snapshot()
         write_json(output / "result.json", result)
         print("RECHECK_RESULT " + json.dumps(result, ensure_ascii=True), flush=True)
 

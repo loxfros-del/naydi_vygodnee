@@ -152,6 +152,33 @@ class HTTPQualityTests(unittest.TestCase):
             with self.subTest(host=host, token=bool(token)), self.assertRaises(ConfigurationError):
                 make_server(host, 0, service=FixtureService(), config=CONFIG, owner_token=token, access_token="")
 
+    def test_customer_key_cannot_also_grant_owner_access(self):
+        with self.assertRaises(ConfigurationError):
+            make_server("127.0.0.1", 0, service=FixtureService(), config=CONFIG,
+                        owner_token=OWNER, access_token=OWNER)
+
+    def test_https_proxy_host_keeps_customer_auth_and_owner_isolation(self):
+        with http_fixture(protected=True) as (server, service, base):
+            # Exercise the external deployment policy using only a loopback socket.
+            server.local_only = False
+            headers = {"Host": "pilot.onrender.com", "Origin": "https://pilot.onrender.com",
+                       "Sec-Fetch-Site": "same-origin"}
+            self.assertEqual(request(base, "/api/session", headers=headers)[0], 401)
+            code, session = request(base, "/api/session", token=ACCESS, headers=headers)
+            self.assertEqual(code, 200)
+            self.assertFalse(session["owner"])
+            code, created = request(base, "/api/avito/jobs", {"query": "PS5", "location": "Ярославль",
+                                   "pickupOnly": True}, token=ACCESS, headers=headers)
+            self.assertEqual(code, 202)
+            job = server.jobs.get(created["jobId"])
+            finished(job)
+            code, public = request(base, "/api/avito/jobs/" + job.job_id, token=ACCESS, headers=headers)
+            self.assertEqual(code, 200)
+            self.assertEqual(public["state"], "complete")
+            self.assertNotIn("adminCosts", public["result"])
+            self.assertNotIn("adminRecommendations", public["result"])
+            self.assertEqual(service.calls, 1)
+
     def test_owner_query_string_never_grants_owner_access(self):
         with http_fixture() as (server, service, base):
             code, body = request(base, "/api/session?owner=1")

@@ -34,6 +34,53 @@ def listing(listing_id: str, *, title: str, price: int, model: str, condition: s
 
 
 class PriceTruthRegressionTests(unittest.TestCase):
+    def test_8376263618_error_code_is_not_a_price(self):
+        # Saved live description from 2026-10-03: the dash in CE-108255-1
+        # used to turn the diagnostic code into an offer for 108,255 RUB.
+        item = listing(
+            "8376263618", title="Sony playstation 5,с дисководом", price=43_100,
+            model="PlayStation 5", condition="Отличное",
+            description=(
+                "Полный комплект, состояние отличное.\n\n"
+                "Вылезает ошибка на играх ps5 (ce-108255-1)\n"
+                "На играх PS4 все работает.\n\nСамовывоз."
+            ),
+        )
+        self.assertEqual(item.effective_price, 43_100)
+        self.assertEqual(item.acquisition_price, 43_100)
+        self.assertEqual(item.price_truth.offers, ())
+        self.assertNotIn("PRICE_VARIANT_MISMATCH", item.price_truth.conflicts)
+        self.assertIn("Вылезает ошибка", item.description)
+
+    def test_identifiers_do_not_override_a_real_price_on_the_same_line(self):
+        for code in ("CE-108255-1", "CE‑108255‑1", "NP-103111-7"):
+            with self.subTest(code=code):
+                item = listing(
+                    "9000000002", title="Sony PlayStation 5", price=43_100,
+                    model="PlayStation 5", condition="Отличное",
+                    description=f"PS5 ({code}) — 43 100 ₽",
+                )
+                self.assertEqual(item.effective_price, 43_100)
+                self.assertEqual([offer.amount for offer in item.price_truth.offers], [43_100])
+
+    def test_long_identifiers_are_not_truncated_into_prices(self):
+        item = listing(
+            "9000000003", title="Sony PlayStation 5", price=43_100,
+            model="PlayStation 5", condition="Отличное",
+            description="PS5, номер объявления — 8376263618",
+        )
+        self.assertEqual(item.effective_price, 43_100)
+        self.assertEqual(item.price_truth.offers, ())
+
+    def test_compact_price_rows_still_use_the_description_price(self):
+        for row in ("PS5-48000", "PS5 цена-48000", "PS5 — 48к", "PS5 — 48.000₽", "PS5 — 48000 руб."):
+            with self.subTest(row=row):
+                item = listing(
+                    "9000000004", title="Sony PlayStation 5", price=43_100,
+                    model="PlayStation 5", condition="Отличное", description=row,
+                )
+                self.assertEqual(item.effective_price, 48_000)
+
     def test_7704979247_new_price_is_not_card_price(self):
         item = listing(
             "7704979247",
