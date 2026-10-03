@@ -54,6 +54,13 @@ assert(uncertainHistory.indexOf('class="history-warning"') < uncertainHistory.in
 assert(!uncertainHistory.includes('<script>'));
 assert(uncertainHistory.includes('&lt;script&gt;unsafe()&lt;/script&gt;'));
 assert(!render().includes('class="history-warning"'));
+const exactWithoutMarket = render({belowMarket: false, belowComparables: false,
+  comparableCount: 0, comparableSellerCount: 0, savingAmount: null, savingPercent: null});
+assert(exactWithoutMarket.includes('Точное совпадение'));
+assert(exactWithoutMarket.includes('Выгода не подтверждена'));
+assert(!exactWithoutMarket.includes('deal-badge'));
+assert(!exactWithoutMarket.includes('Экономия '));
+assert(exactWithoutMarket.includes('Проверьте товар у продавца перед покупкой.'));
 for (const role of ['CAUTION', 'REJECTED', 'DO_NOT_BUY', 'UNKNOWN']) {
   const result = render({role});
   assert(!result.includes('deal-badge'));

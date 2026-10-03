@@ -1139,8 +1139,12 @@ class AvitoAnalysisService:
     @staticmethod
     def _review_evidence_unchanged(before: NormalizedListing, after: NormalizedListing) -> bool:
         # A changed price is re-ranked; changed product evidence needs a new AI pass.
-        return before.analysis_parameters == after.analysis_parameters and all(getattr(before, name) == getattr(after, name) for name in (
-            "listing_id", "title", "description", "images", "seller", "currency",
+        same_seller = (
+            before.seller.identity_hash == after.seller.identity_hash
+            and before.seller.kind == after.seller.kind
+        ) if before.seller.identity_hash and after.seller.identity_hash else before.seller == after.seller
+        return same_seller and before.analysis_parameters == after.analysis_parameters and all(getattr(before, name) == getattr(after, name) for name in (
+            "listing_id", "title", "description", "images", "currency",
             "location", "address", "delivery", "completeness", "repair_status", "parts_status", "battery_health_percent",
             "mandatory_fee_rub", "delivery_cost_rub", "delivery_required",
         ))
@@ -1174,10 +1178,14 @@ class AvitoAnalysisService:
                              item.analyzed.ai_review, request, stage="final",
                          ).state is VerificationState.PASS)[:request.desired_results]
         refresh = getattr(self.provider, "refresh", None)
+        trace = _trace(progress)
         if not selected:
             return analyzed, 0.0, False
         selected_ids = {item.listing_id for item in selected}
+        requested_ids = tuple(item.listing_id for item in selected)
         if not callable(refresh) or allowance_usd <= 0 or _time_left(deadline_at) < 5:
+            if trace is not None:
+                trace.record_final_refresh(requested_ids)
             return self._invalidate_finalist_verification(
                 analyzed, selected_ids, failed=False,
             ), 0.0, False
@@ -1186,7 +1194,6 @@ class AvitoAnalysisService:
             "deadline_at": deadline_at,
             "max_charge_usd": allowance_usd,
         }
-        trace = _trace(progress)
         if getattr(self.provider, "supports_telemetry", False) and trace is not None:
             provider_kwargs["telemetry"] = trace.record_apify
             provider_kwargs["purpose"] = "final_revalidation"
@@ -1199,32 +1206,48 @@ class AvitoAnalysisService:
             raise
         except AvitoServiceError:
             # A failed paid refresh may still incur a charge; reserve its allowance.
+            if trace is not None:
+                trace.record_final_refresh(requested_ids, outcomes={key: "provider_error" for key in requested_ids})
             return self._invalidate_finalist_verification(
                 analyzed, selected_ids, failed=True,
             ), allowance_usd, True
         if not isinstance(batch, CollectionBatch):
+            if trace is not None:
+                trace.record_final_refresh(requested_ids, outcomes={key: "provider_error" for key in requested_ids})
             return self._invalidate_finalist_verification(
                 analyzed, selected_ids, failed=True,
             ), allowance_usd, True
         fresh_by_id = {item.listing_id: item for item in normalize_dataset(batch.items)}
         result = []
+        outcomes: dict[str, str] = {}
         for item in analyzed:
             if item.listing.listing_id not in selected_ids:
                 result.append(item)
                 continue
             fresh = fresh_by_id.get(item.listing.listing_id)
-            if fresh is None or fresh.url != item.listing.url or not fresh.is_recently_collected(60):
+            if fresh is None:
+                outcomes[item.listing.listing_id] = "missing"
+                result.append(replace(item, listing=replace(item.listing, verification_status="failed")))
+                continue
+            if fresh.url != item.listing.url or not fresh.is_recently_collected(60):
+                outcomes[item.listing.listing_id] = "url_changed" if fresh.url != item.listing.url else "stale"
                 result.append(replace(item, listing=replace(item.listing, verification_status="failed")))
                 continue
             review = item.ai_review
-            if not self._review_evidence_unchanged(item.listing, fresh):
+            evidence_changed = not self._review_evidence_unchanged(item.listing, fresh)
+            if evidence_changed:
                 review = replace(review, verdict=ReviewVerdict.CAUTION,
                                  conflicts=(*review.conflicts, "Данные объявления изменились при повторной проверке."))
             findings = evaluate_rules(fresh)
             positive = not any(risk.severity is not Severity.INFO for risk in findings)
+            outcomes[item.listing.listing_id] = (
+                "evidence_changed" if evidence_changed else "verified" if positive else "rule_failed"
+            )
             fresh = replace(fresh, verified_at=fresh.collected_at if positive else "",
                             verification_status="verified" if positive else "failed")
             result.append(AnalyzedListing(fresh, findings, review))
+        if trace is not None:
+            trace.record_final_refresh(requested_ids, returned_ids=tuple(fresh_by_id), outcomes=outcomes)
         return tuple(result), batch.apify_cost_usd, batch.apify_cost_estimated
 
     def analyze_dataset(

@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: naydi-vygodnee-avito-pilot
+    runtime: python
+    plan: 0.5c-512mb
+    branch: codex/all-work-2026-10-02
+    buildCommand: python -m compileall -q avito_service
+    startCommand: python -m avito_service --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeployTrigger: 'off'
+    disk:
+      name: avito-runtime
+      mountPath: /opt/render/project/src/runtime
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: AVITO_LIVE_PILOT
+        value: '1'
+      - key: APIFY_TOKEN
+        sync: false
+      - key: AVITO_AI_API_KEY
+        sync: false
+      - key: AVITO_AI_BASE_URL
+        sync: false
+      - key: AVITO_AI_MODEL
+        sync: false
+      - key: AVITO_ACCESS_TOKEN
+        sync: false
+      - key: AVITO_OWNER_TOKEN
+        sync: false

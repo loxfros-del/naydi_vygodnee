@@ -625,7 +625,7 @@ function renderCard(item, index, mode) {
       ${historyWarnings.length ? `<p class="history-warning">${historyWarnings.map(escapeHtml).join(' ')}</p>` : ''}
       ${risks.length ? `<div class="visible-risks"><b>На что обратить внимание</b><ul>${risks.slice(0, 3).map((risk) => `<li>${escapeHtml(risk)}</li>`).join('')}</ul></div>` : ''}
       <div class="card-actions">${openAction}<span class="meta">${facts.map(escapeHtml).join(' · ')}</span></div>
-      <p class="verification-note">${discovered ? 'Это найденное объявление; рекомендация к покупке не подтверждена.' : analysis.complete === true ? 'Проверены описание и фото.' : 'Проверка описания и фото не завершена.'} Исправность требует осмотра.</p>
+      <p class="verification-note">${discovered ? 'Это найденное объявление; рекомендация к покупке не подтверждена.' : analysis.complete === true ? 'Проверены описание и фото.' : 'Проверка описания и фото не завершена.'} Проверьте товар у продавца перед покупкой.</p>
       <details class="card-details"><summary>Факты и вопросы перед покупкой</summary><div class="detail-columns">${listBlock(discovered ? 'Причины статуса' : 'Почему подходит', item.reasons)}${listBlock('Заявлено в объявлении', [...(analysis.descriptionFindings || []), ...conditionClaims])}${listBlock('Видно на фото', analysis.photoFindings)}${listBlock('Что входит в цену', priceFacts)}${listBlock('Риски и условия', risks)}${listBlock('Дефекты', analysis.defects)}${listBlock('Не подтверждено — проверить', manualChecks)}</div>${!discovered && references.length ? `<div class="market-evidence"><h4>С чем сравнили цену</h4><p>Полные цены предложений с обязательными доплатами, а не завершённых сделок.</p><ul>${references.join('')}</ul></div>` : ''}</details>
     </div>
   </article>`;

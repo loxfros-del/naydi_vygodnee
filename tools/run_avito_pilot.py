@@ -20,6 +20,7 @@ from avito_service.http_api import build_service
 from avito_service.models import SearchRequest, CollectionBatch
 from avito_service.normalization import normalize_dataset
 from avito_service.risk_rules import evaluate_rules
+from avito_service.telemetry import PilotTraceStore, SearchTrace
 
 
 def write_json(path, value):
@@ -228,6 +229,11 @@ def main(argv=None):
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output = ROOT / "runtime" / "avito_pilot" / stamp
     output.mkdir(parents=True, exist_ok=False)
+    trace = None if args.collect_only else SearchTrace(
+        f"pilot-{stamp}", request,
+        store=PilotTraceStore(ROOT / "runtime" / "avito_pilot_traces"),
+        usd_rub_rate=config.usd_rub_rate,
+    )
     write_json(output / "request.json", asdict(request))
     service = build_service(config)
     service.provider = PilotProvider(service.provider.config, output, args.resume_market,
@@ -248,8 +254,14 @@ def main(argv=None):
             write_json(output / "collection-only.json", summary)
             print("PILOT_RESULT " + json.dumps(summary, ensure_ascii=False), flush=True)
             return
+        assert trace is not None
+        def progress(stage, message, percent):
+            trace.stage(stage)
+            print(f"[{percent}% {stage}] {message}", flush=True)
+
+        progress.trace = trace
         report = service.search(request, deadline_seconds=WORKER_DEADLINE_SECONDS,
-            progress=lambda stage,message,percent: print(f"[{percent}% {stage}] {message}", flush=True))
+                                progress=progress)
         public = report.public_dict()
         write_json(output / "report.json", public)
         audit = report.public_dict(include_admin=True)
@@ -262,10 +274,15 @@ def main(argv=None):
             closest = closest_failures(audit)
             write_json(output / "closest-failures.json", closest)
             print("PILOT_CLOSEST " + json.dumps(closest, ensure_ascii=False), flush=True)
+        trace.finish_report(report, usd_rub_rate=config.usd_rub_rate)
+        trace.worker_stopped(result_published=True)
         print("PILOT_RESULT " + json.dumps({"visible":len(public["recommendations"]),
             "costs":report.costs.admin_dict(), "audit":report.pipeline.admin_dict(),
             "warnings":report.admin_warnings, "elapsed":round(time.monotonic()-started,2)}, ensure_ascii=False), flush=True)
     except Exception as exc:
+        if trace is not None:
+            trace.finish_error(getattr(exc, "code", "PILOT_ERROR"), type(exc).__name__)
+            trace.worker_stopped(result_published=False)
         error = {"type":type(exc).__name__, "code":getattr(exc,"code",""),
                  "message":str(exc), "elapsed":round(time.monotonic()-started,2)}
         if getattr(exc, "apify_context", None):

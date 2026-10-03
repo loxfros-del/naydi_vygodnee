@@ -167,8 +167,11 @@ class SearchTrace:
                 "photo": self._empty_ai_section(),
             },
             "verification": {
+                "photo_completed": None,
                 "final_revalidation_candidates": None,
+                "final_revalidation_returned": None,
                 "final_revalidation_completed": None,
+                "final_revalidation_outcomes": [],
             },
             "cost": {
                 "usd_rub_rate": max(1.0, float(usd_rub_rate)),
@@ -330,6 +333,35 @@ class SearchTrace:
                     )
                     key = "cache_hits" if hit else "cache_misses"
                     self._data["ai"][key] += 1
+            self._persist()
+        except Exception:
+            pass
+
+    def record_final_refresh(
+        self, requested_ids: tuple[str, ...], *, returned_ids: tuple[str, ...] = (),
+        outcomes: Mapping[str, str] | None = None,
+    ) -> None:
+        """Record only public listing IDs and fixed reason codes, never page data."""
+        allowed = {
+            "verified", "missing", "url_changed", "stale", "evidence_changed",
+            "rule_failed", "provider_error", "not_run",
+        }
+        try:
+            requested = tuple(str(value) for value in requested_ids if str(value).isdigit())[:10]
+            returned = {str(value) for value in returned_ids if str(value).isdigit()}
+            states = outcomes or {}
+            rows = [{
+                "listing_id": listing_id,
+                "returned": listing_id in returned,
+                "status": states.get(listing_id) if states.get(listing_id) in allowed else "not_run",
+            } for listing_id in requested]
+            with self._lock:
+                self._data["verification"].update({
+                    "final_revalidation_candidates": len(requested),
+                    "final_revalidation_returned": sum(row["returned"] for row in rows),
+                    "final_revalidation_completed": sum(row["status"] == "verified" for row in rows),
+                    "final_revalidation_outcomes": rows,
+                })
             self._persist()
         except Exception:
             pass
@@ -544,9 +576,12 @@ class SearchTrace:
                     "bargain_decisions": [dict(item) for item in pipeline.bargain_decisions],
                 })
                 self._data["verification"].update({
-                    "final_revalidation_candidates": int(pipeline.photo_completed_count),
-                    "final_revalidation_completed": int(pipeline.final_visible_count),
+                    "photo_completed": int(pipeline.photo_completed_count),
                 })
+                if self._data["verification"]["final_revalidation_candidates"] is None:
+                    self._data["verification"]["final_revalidation_candidates"] = 0
+                    self._data["verification"]["final_revalidation_returned"] = 0
+                    self._data["verification"]["final_revalidation_completed"] = 0
                 actual_apify = None if costs.apify_cost_estimated else round(costs.apify_cost_usd, 6)
                 estimated_apify = round(costs.apify_cost_usd, 6) if costs.apify_cost_estimated else None
                 actual_ai = None if costs.ai_cost_estimated else round(costs.ai_cost_rub, 4)

@@ -586,14 +586,21 @@ class ZenStudioProvider:
         self._raise_if_cancelled(cancel_requested, context=context)
         # Reserve before POST: a timeout can conceal a successfully billed start.
         # Keep the full reservation after any ambiguous failure or delayed billing.
+        context.update({
+            "phase": "reservation",
+            "actor_id": (self.config.apify_actor_id if re.fullmatch(
+                r"[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", self.config.apify_actor_id) else "<invalid-actor-id>"),
+            "run_id_received": False,
+            "request_reached_provider": False,
+            "no_run_proven": True,
+        })
         if self.spending_guard is not None:
             context["reservation_id"] = self.spending_guard.reserve(allowance)
         context["reserved_max_cost_usd"] = allowance
         context["paid_post_attempted"] = True
         context["phase"] = "start_run"
-        context["actor_id"] = (self.config.apify_actor_id if re.fullmatch(
-            r"[A-Za-z0-9_-]+/[A-Za-z0-9_-]+", self.config.apify_actor_id) else "<invalid-actor-id>")
-        context["run_id_received"] = False
+        context["request_reached_provider"] = None
+        context["no_run_proven"] = False
         self._emit_telemetry(telemetry, "starting", context)
         start_mono = time.monotonic()
         try:
