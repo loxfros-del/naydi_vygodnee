@@ -358,7 +358,8 @@ class AvitoAITransportTests(unittest.TestCase):
                 self.assertGreater(review.cost_rub, text.cost_rub)
 
     def test_other_hosts_keep_nonstream_transport_and_payload(self):
-        for host in ("api.example.invalid", "api.aitunnel.ru.example.invalid"):
+        for host in ("api.example.invalid", "api.aitunnel.ru.example.invalid",
+                     "ru-api.aitunnel.ru.example.invalid", "ru-api-aitunnel.ru", "aitunnel.ru"):
             with self.subTest(host=host):
                 reviewer = OpenAICompatibleReviewer(ServiceConfig(ai_base_url=f"https://{host}/v1", ai_api_key="offline", ai_model="qwen3.8-flash"))
                 response = SimpleNamespace(read=lambda: b'{"choices":[{"message":{"content":"{}"}}]}')
@@ -367,6 +368,25 @@ class AvitoAITransportTests(unittest.TestCase):
                     result = reviewer._request(self.payload)
                 self.assertEqual(reviewer._content(result), "{}")
                 self.assertEqual(json.loads(opened.call_args.args[0].data), self.payload)
+
+    def test_official_hosts_use_sse_and_preserve_actual_usage(self):
+        for host in ("api.aitunnel.ru", "ru-api.aitunnel.ru"):
+            with self.subTest(host=host):
+                endpoint = f"https://{host}/v1"
+                reviewer = OpenAICompatibleReviewer(replace(self.reviewer.config, ai_base_url=endpoint))
+                stream = Stream([event("{}", "stop", usage={"cost_rub": 0.02})])
+                with patch("avito_service.ai.urlopen", return_value=stream) as opened:
+                    result = reviewer._request(self.payload)
+                self.assertEqual(opened.call_count, 1)
+                request = opened.call_args.args[0]
+                self.assertEqual(request.full_url, endpoint + "/chat/completions")
+                sent = json.loads(request.data)
+                self.assertTrue(sent["stream"])
+                self.assertEqual(sent["stream_options"], {"include_usage": True})
+                self.assertEqual(reviewer._content(result), "{}")
+                self.assertEqual(reviewer._cost_rub(result), 0.02)
+                self.assertFalse(reviewer._cost_estimated(result))
+                self.assertTrue(result["_transport"]["streaming"])
 
 
 if __name__ == "__main__":

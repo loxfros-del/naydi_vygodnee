@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_ENV_PATH = ROOT / ".env"
 REVIEW_PROFILE_PATH = ROOT / "avito_service" / "review_profile.json"
+AITUNNEL_API_HOSTS = frozenset({"api.aitunnel.ru", "ru-api.aitunnel.ru"})
 _PROFILE_NAMES = {
     "AVITO_AI_MODEL", "AVITO_AI_TEXT_BATCH_SIZE", "AVITO_AI_TEXT_MAX_LISTINGS",
     "AVITO_AI_MAX_COST_RUB", "AVITO_APIFY_MAX_CHARGE_USD", "AVITO_REPORT_MAX_COST_RUB",
@@ -276,6 +277,6 @@ def _apply_review_profile(local: dict[str, str]) -> dict[str, str]:
     if set(settings) - _PROFILE_NAMES or any(not isinstance(v, str) for v in settings.values()):
         raise ValueError("Профиль Avito содержит недопустимые настройки")
     endpoint = _clean_url(_env_value(local, "AVITO_AI_BASE_URL"))
-    if urlsplit(endpoint).hostname != "api.aitunnel.ru":
+    if urlsplit(endpoint).hostname not in AITUNNEL_API_HOSTS:
         return local
     return {**local, **settings}

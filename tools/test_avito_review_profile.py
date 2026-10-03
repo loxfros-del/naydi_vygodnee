@@ -48,6 +48,23 @@ class ReviewProfileTests(unittest.TestCase):
         self.assertEqual(config.ai_model, "qwen3.8-flash")
         self.assertEqual(config.apify_max_charge_usd, 1)
 
+    def test_official_mirror_gets_same_profile_without_rewriting_base_url(self):
+        endpoint = "https://ru-api.aitunnel.ru/v1"
+        config = self.config(env={"AVITO_AI_BASE_URL": endpoint})
+        self.assertEqual(config.ai_base_url, endpoint)
+        self.assertEqual(config.ai_model, "gpt-4.1-mini")
+        self.assertEqual(config.ai_proxy_mode, "direct")
+        self.assertEqual(config.ai_max_cost_rub, 50)
+
+    def test_lookalike_hosts_do_not_get_aitunnel_profile(self):
+        for host in ("api.aitunnel.ru.example.invalid", "ru-api.aitunnel.ru.example.invalid",
+                     "ru-api-aitunnel.ru", "aitunnel.ru"):
+            with self.subTest(host=host):
+                config = self.config(env={"AVITO_AI_BASE_URL": f"https://{host}/v1"})
+                self.assertEqual(config.ai_model, "qwen3.8-flash")
+                self.assertEqual(config.ai_proxy_mode, "system")
+                self.assertEqual(config.ai_max_cost_rub, 15)
+
     def test_profile_can_be_disabled_without_editing_secret_file(self):
         self.assertEqual(self.config(env={"AVITO_REVIEW_PROFILE": "off"}).ai_model, "qwen3.8-flash")
 

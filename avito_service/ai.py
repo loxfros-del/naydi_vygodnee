@@ -17,7 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
-from .config import ServiceConfig
+from .config import AITUNNEL_API_HOSTS, ServiceConfig
 from .errors import ConfigurationError, ExternalServiceError
 from .matching import evidence_conflicts, storage_with_source_unit
 from .models import AIReview, NormalizedListing, ReviewVerdict, SearchRequest
@@ -790,7 +790,7 @@ class OpenAICompatibleReviewer:
 
     def _request_unbudgeted(self, payload: dict[str, Any]) -> Any:
         endpoint = self._endpoint()
-        streaming = urlsplit(endpoint).hostname == "api.aitunnel.ru"
+        streaming = urlsplit(endpoint).hostname in AITUNNEL_API_HOSTS
         deadline_at = time.monotonic() + self._request_timeout()
         worker_deadline = getattr(self._runtime, "deadline_at", None)
         if worker_deadline is not None:
