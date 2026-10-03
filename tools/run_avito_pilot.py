@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import math
 from pathlib import Path
@@ -20,6 +20,7 @@ from avito_service.http_api import build_service
 from avito_service.models import SearchRequest, CollectionBatch
 from avito_service.normalization import normalize_dataset
 from avito_service.risk_rules import evaluate_rules
+from avito_service.spending import SpendingGuard
 from avito_service.telemetry import PilotTraceStore, SearchTrace
 
 
@@ -177,6 +178,8 @@ def parse_options(argv=None):
     parser.add_argument("--model", help="Override the configured AI model for this pilot only")
     parser.add_argument("--apify-cap-usd", type=_positive_amount, help="Lower the pilot Apify ceiling; never raise configured limits")
     parser.add_argument("--ai-budget-rub", type=_positive_amount, help="Lower the configured AI budget for this pilot")
+    parser.add_argument("--authorized-apify-budget-usd", type=_positive_amount,
+                        help="Owner-approved additional Apify budget; verify account hard limit before use")
     parser.add_argument("--collect-only", action="store_true", help="Collect and inspect locally; make no AI calls")
     parser.add_argument("--resume-market", help="Reuse a recovered paid market JSON for the same request")
     return parser.parse_args(argv)
@@ -212,6 +215,45 @@ def collection_only_allowances(config: ServiceConfig) -> tuple[float, float]:
     return market, max(0.0, total - market)
 
 
+def account_bounded_spending_guard(config, original_guard, authorized_usd, account_provider):
+    """Keep the journal; permit only new spend backed by the account hard limit."""
+    if authorized_usd <= 0 or authorized_usd > 8:
+        raise ValueError("Разовый дополнительный бюджет Apify должен быть в пределах $8.")
+    response = account_provider._json_request(
+        "GET", config.apify_api_url + "/users/me/limits", timeout=15,
+    )
+    data = response.get("data") if isinstance(response, dict) else None
+    try:
+        account_limit = float(data["limits"]["maxMonthlyUsageUsd"])
+        account_used = float(data["current"]["monthlyUsageUsd"])
+        cycle = data["monthlyUsageCycle"]
+        account_start = date.fromisoformat(cycle["startAt"][:10])
+        account_end = date.fromisoformat(cycle["endAt"][:10]) + timedelta(days=1)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("Apify не подтвердил текущий лимит и расход аккаунта.") from exc
+    snapshot = original_guard.snapshot()
+    if (not math.isfinite(account_limit) or not math.isfinite(account_used)
+            or account_used < 0 or account_limit < account_used
+            or account_start.isoformat() != snapshot["monthlyPeriodStart"]
+            or account_end.isoformat() != snapshot["monthlyPeriodEndExclusive"]):
+        raise ValueError("Расчётный период или доступный бюджет Apify не подтверждён.")
+    # Keep 50 cents for delayed provider billing and rounded dashboard usage.
+    available = math.floor(min(authorized_usd, account_limit - account_used - 0.5) * 10_000) / 10_000
+    if available < 0.02:
+        raise ValueError("После страхового остатка нет бюджета для нового запуска Apify.")
+    guard = SpendingGuard(
+        original_guard.path,
+        daily_limit_usd=max(original_guard.daily_limit_units / 100_000_000,
+                            snapshot["dailyCommittedUsd"] + available),
+        monthly_limit_usd=snapshot["monthlyCommittedUsd"] + available,
+        billing_cycle_day=original_guard.billing_cycle_day,
+    )
+    return guard, {"account_used_usd": round(account_used, 5),
+                   "account_hard_limit_usd": account_limit,
+                   "new_spend_ceiling_usd": available,
+                   "reserve_buffer_usd": 0.5}
+
+
 def main(argv=None):
     args = parse_options(argv)
     request = build_request(args)
@@ -236,8 +278,15 @@ def main(argv=None):
     )
     write_json(output / "request.json", asdict(request))
     service = build_service(config)
+    spending_guard = service.provider.spending_guard
+    if args.authorized_apify_budget_usd is not None:
+        spending_guard, account_budget = account_bounded_spending_guard(
+            config, spending_guard, args.authorized_apify_budget_usd,
+            ZenStudioProvider(config),
+        )
+        print("PILOT_ACCOUNT_BUDGET " + json.dumps(account_budget), flush=True)
     service.provider = PilotProvider(service.provider.config, output, args.resume_market,
-                                     spending_guard=service.provider.spending_guard)
+                                     spending_guard=spending_guard)
     started = time.monotonic()
     print("PILOT_OUTPUT " + str(output), flush=True)
     try:
@@ -269,7 +318,7 @@ def main(argv=None):
         write_json(output / "all-decisions.json", [item.public_dict() for item in report.recommendations])
         funnel = funnel_from_audit(audit)
         write_json(output / "funnel.json", funnel)
-        print("PILOT_FUNNEL " + " → ".join(f"{key}={value}" for key, value in funnel.items()), flush=True)
+        print("PILOT_FUNNEL " + " -> ".join(f"{key}={value}" for key, value in funnel.items()), flush=True)
         if funnel["CONFIRMED"] == 0:
             closest = closest_failures(audit)
             write_json(output / "closest-failures.json", closest)

@@ -2,17 +2,48 @@
 from contextlib import redirect_stderr
 from dataclasses import asdict
 import io
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from avito_service.config import ServiceConfig
+from avito_service.spending import SpendingGuard
 from tools.run_avito_pilot import (
-    apply_config_overrides, build_request, closest_failures, collection_only_allowances,
+    account_bounded_spending_guard, apply_config_overrides, build_request, closest_failures, collection_only_allowances,
     funnel_from_audit, parse_options,
 )
 
 
 class PilotOptionTests(unittest.TestCase):
+    def test_account_verified_override_preserves_journal_and_reserves_buffer(self):
+        class Account:
+            def _json_request(self, method, url, **_):
+                self_url = url.endswith("/users/me/limits")
+                assert method == "GET" and self_url
+                snapshot = guard.snapshot()
+                end = snapshot["monthlyPeriodEndExclusive"]
+                from datetime import date, timedelta
+                return {"data": {
+                    "monthlyUsageCycle": {"startAt": snapshot["monthlyPeriodStart"] + "T00:00:00Z",
+                                           "endAt": (date.fromisoformat(end) - timedelta(days=1)).isoformat() + "T23:59:59Z"},
+                    "limits": {"maxMonthlyUsageUsd": 19},
+                    "current": {"monthlyUsageUsd": 11.11},
+                }}
+
+        with TemporaryDirectory() as folder:
+            guard = SpendingGuard(Path(folder) / "spend.json", daily_limit_usd=3,
+                                  monthly_limit_usd=18, billing_cycle_day=9)
+            before = guard.snapshot()
+            elevated, details = account_bounded_spending_guard(
+                ServiceConfig(), guard, 8, Account(),
+            )
+            self.assertEqual(details["new_spend_ceiling_usd"], 7.39)
+            self.assertEqual(elevated.snapshot()["monthlyCommittedUsd"], before["monthlyCommittedUsd"])
+            self.assertAlmostEqual(elevated.snapshot()["monthlyLimitUsd"],
+                                   before["monthlyCommittedUsd"] + 7.39)
+            self.assertEqual(guard.snapshot()["monthlyLimitUsd"], 18)
+
     def test_legacy_phone_defaults_keep_specs_without_an_implicit_price_ceiling(self):
         request = build_request(parse_options([]))
         self.assertEqual((request.query, request.location, request.category), ("iPhone 13", "Москва", "phones"))

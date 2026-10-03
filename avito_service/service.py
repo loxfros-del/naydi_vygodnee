@@ -52,6 +52,29 @@ class ListingProvider(Protocol):
 ProgressCallback = Callable[[str, str, int], None]
 
 
+def reconcile_ps5_family_mismatch(
+    listing: NormalizedListing, review: AIReview, request: SearchRequest,
+) -> AIReview:
+    """Correct the known AI claim that a PS5 Slim is outside an unspecified PS5 request."""
+    if request.query.strip().casefold() not in {"ps5", "playstation 5", "sony playstation 5"}:
+        return review
+    reason = review.mismatch_reason.casefold()
+    if not (
+        review.text_analyzed and not review.matches_request
+        and "slim" in reason and "не входит" in reason
+        and "запрос" in reason and "ps5" in reason
+        and not review.defects and not review.conflicts and not review.price_conditions
+        and review.confidence >= 0.5
+        and matches_listing_request(
+            listing, request, identified_model=review.identified_model,
+            storage=review.storage, sim_variant=review.sim_variant,
+            condition=review.condition, final=True,
+        )
+    ):
+        return review
+    return replace(review, matches_request=True, mismatch_reason="", verdict=ReviewVerdict.APPROVE)
+
+
 @dataclass(frozen=True, slots=True)
 class _ReviewRun:
     reviews: tuple[AIReview, ...]
@@ -540,7 +563,15 @@ class AvitoAnalysisService:
                     and analyzed.configuration_evidence_complete()
                 )
 
-            price_leaders = [item for item in candidates if specified_and_approved(item)]
+            certified_bargains = [
+                item for item in candidates
+                if diagnostics_by_id[item.listing_id]["comparable_seller_count"] >= MIN_COMPARABLE_SELLERS
+                and (diagnostics_by_id[item.listing_id]["delta_rub"] or 0) > 0
+                and specified_and_approved(item)
+            ]
+            price_leaders = certified_bargains or [
+                item for item in candidates if specified_and_approved(item)
+            ]
             if price_leaders:
                 cheapest = min(price_leaders, key=lambda item: (item.acquisition_price or 10**18, item.listing_id))
                 ordered = [cheapest, *(item for item in ordered if item.listing_id != cheapest.listing_id)]
@@ -612,7 +643,7 @@ class AvitoAnalysisService:
             listing = by_listing_id[listing_id]
             cached = self._cached_review(listing, request)
             if cached is not None:
-                by_id[listing.listing_id] = cached
+                by_id[listing.listing_id] = reconcile_ps5_family_mismatch(listing, cached, request)
                 cached_count += 1
                 print(f"[ai-text] {position}/{len(candidate_ids)}: результат взят из кэша.", flush=True)
                 if trace is not None:
@@ -723,6 +754,7 @@ class AvitoAnalysisService:
             text_cost_rub += batch_cost
             ai_cost_rub += batch_cost
             for listing, review in zip(batch_listings, batch_reviews, strict=True):
+                review = reconcile_ps5_family_mismatch(listing, review, request)
                 by_id[listing.listing_id] = review
                 self._remember_review(listing, review, request)
             completed = sum(review.text_analyzed for review in batch_reviews)
